@@ -1,0 +1,30 @@
+[package]
+name = "vane"
+version = "0.1.0"
+authors = ["Graham Kelly <gkgoat6700@gmail.com>"]
+edition = "2018"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["console_error_panic_hook"]
+
+[dependencies]
+wasm-bindgen = "0.2.100"
+
+# The `console_error_panic_hook` crate provides better debugging of panics by
+# logging them with `console.error`. This is great for development, but requires
+# all the `std::fmt` and `std::panicking` infrastructure, so isn't great for
+# code size when deploying.
+console_error_panic_hook = { version = "0.1.7", optional = true }
+js-sys = "0.3.77"
+rv-asm.workspace = true
+paste = "1.0.15"
+wasm-bindgen-futures = "0.4.50"
+
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3.34"
+
