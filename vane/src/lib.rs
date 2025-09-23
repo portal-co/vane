@@ -24,12 +24,25 @@ extern "C" {
 //     type Reactor2;
 // }
 
-#[wasm_bindgen(
-    inline_js = r#"export function get(a,b){return a.p[`${b}`]??=new Function(a.j(b))().bind(undefined,a)};export function on(){return Object.ceate(null)}"#
-)]
+#[wasm_bindgen(inline_js = r#"
+    export function get(a,b){
+        return a.p[`${b}`]??=(new Function("$","J",a.j(b))(a,b=>get(a,b)))
+    }
+    export function on(){
+        return Object.create(null)
+    }
+    export function tget(a,b){
+        return a.p[`${b}`]
+    }
+    export async function l(a){
+        while(typeof a === "function")a = await a();
+        return a;
+    }"#)]
 extern "C" {
     fn get(a: Reactor, b: u64) -> JsValue;
+    fn tget(a: Reactor, b: u64) -> JsValue;
     fn on() -> JsValue;
+    fn l(a: JsValue) -> Promise;
 }
 
 #[wasm_bindgen]
@@ -42,7 +55,7 @@ pub struct Reactor {
 struct Core {
     pages: BTreeMap<u64, [u8; 65536]>,
     dollar: OnceCell<JsValue>,
-     dollar2: OnceCell<JsValue>,
+    dollar2: OnceCell<JsValue>,
     regs: [u64; 31], // regs: Regs,
 }
 
@@ -55,7 +68,7 @@ impl Reactor {
             .get_or_init(|| on())
             .clone();
     }
-       #[wasm_bindgen(getter, js_name = "r")]
+    #[wasm_bindgen(getter, js_name = "r")]
     pub fn dollar2(&self) -> JsValue {
         return unsafe { &mut *self.core.get() }
             .dollar2
@@ -86,7 +99,7 @@ impl Reactor {
     #[wasm_bindgen]
     pub fn j(&self, a: u64) -> String {
         return format!(
-            "async $=>{{let f=$.f,g=0xffff_ffffn,s=a=>BigInt.toIntN(64,a),u=a=>BigInt.toUIntN(64,a),d=>p=>{{p=$.get_page(p);return new DataView($._sys(`memory`),p)}};{}}}",
+            "async ()=>{{let f=$.f,g=0xffff_ffffn,s=a=>BigInt.toIntN(64,a),u=a=>BigInt.toUIntN(64,a),d=>p=>{{p=$.get_page(p);return new DataView($._sys(`memory`),p)}};{}}}",
             TemplateJit {
                 react: self,
                 pc: a,
@@ -150,6 +163,9 @@ impl<'a> Display for TemplateReg<'a> {
 }
 impl<'a> Display for TemplateJit<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if tget(self.react.clone(), self.pc) != JsValue::UNDEFINED {
+            return write!(f, "return J({}n);", self.pc);
+        }
         let p;
         let i = Inst::decode(
             match self.react.get_page(self.pc) as *mut u32 {
@@ -165,7 +181,7 @@ impl<'a> Display for TemplateJit<'a> {
             std::collections::btree_map::Entry::Vacant(vacant_entry) => {
                 let f2 = format!("x{}", self.pc);
                 vacant_entry.insert(&f2);
-                write!(f, "x{}: for(;;){{if(d({0}n).getUInt32(0,true)!={p}){{delete $.p[`{}`];return $.J({0}n);}};", self.pc,self.root)?;
+                write!(f, "x{}: for(;;){{const p={0}n;if(d(p).getUInt32(0,true)!={p}){{delete $.p[`{}`];return J(p);}};", self.pc,self.root)?;
                 match i {
                     Err(e) => write!(f, "throw $.d(`decoding: {e}`);}}"),
                     Ok((a, b)) => {
@@ -312,7 +328,7 @@ impl<'a> Display for TemplateJit<'a> {
                                     return Ok(());
                                 }
                                 Inst::Jalr { offset,base, dest } => {
-                                    write!(f,"{};return ()=>$.J({});}}",TemplateReg{
+                                    write!(f,"{};return ()=>J({});}}",TemplateReg{
                                         reg: &dest,
                                         value: Some(&format_args!("{}n",next))
                                     },&format_args!("({}+{})&f",(offset.as_i64() * 2) as u64,TemplateReg{reg: &base,value: None}))?;
