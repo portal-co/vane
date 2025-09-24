@@ -518,8 +518,8 @@ impl<'a> Display for TemplateReg<'a> {
         let r = self.reg.0 % 32;
         if r != 0 {
             match self.value.as_deref() {
-                None => write!(f, "$.r[`x{r}`]??=0n"),
-                Some(a) => write!(f, "$.r[`x{r}`]={a}"),
+                None => write!(f, "($.r[`x{r}`]??=0n)"),
+                Some(a) => write!(f, "($.r[`x{r}`]={a})"),
             }
         } else {
             match self.value.as_deref() {
