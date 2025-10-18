@@ -15,7 +15,7 @@ macro_rules! renders {
                 }
                 impl<'a,T: [<$a Display>] + ?Sized> [<$a Display>] for &'a T{
                     fn $a(&self, f: &mut Formatter) -> core::fmt::Result{
-                        write!(f,"{}",$a(self))
+                        (&**self).$a(f)
                     }
                 }
             };
