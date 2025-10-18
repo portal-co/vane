@@ -27,21 +27,11 @@ extern "C" {
 // }
 
 #[wasm_bindgen(inline_js = r#"
-    let fn;
-    try{
-        fn=Function;
-    }catch{
-    
-    };
     export function get(a,b){
         const jit = () => {
-            if(fn){
-                try{
-                    return (new fn("$","J",a.j(b))(a,b=>get(a,b)))
-                }catch{
-                    return a.interp.bind(a,b);
-                }
-            }else{
+            try{
+                return (new (get.f ??= Function)("$","J",a.j(b))(a,b=>get(a,b)))
+            }catch{
                 return a.interp.bind(a,b);
             }
         };
