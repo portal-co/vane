@@ -1,4 +1,4 @@
-use crate::{arch::{RiscVDisplay, Riscv}, *};
+use crate::{arch::{RiscvDisplay, Riscv}, *};
 #[derive(Clone, Copy)]
 pub struct Params<'a> {
     pub react: &'a UnsafeCell<Mem>,
@@ -32,8 +32,8 @@ impl<'a> Display for TemplateReg<'a> {
     }
 }
 
-impl<'a> RiscVDisplay for TemplateJit<'a> {
-    fn riscv(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl<'a> RiscvDisplay for TemplateJit<'a> {
+    fn Riscv(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         // if tget(self.react.clone(), self.pc) != JsValue::UNDEFINED {
         match (self.params.trial)(self.pc) {
             Heat::New => {}
