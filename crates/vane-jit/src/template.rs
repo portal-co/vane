@@ -206,14 +206,21 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                                     write!(f,"{};{};break;}}",TemplateReg{
                                         reg: &dest,
                                         value: Some(&format_args!("{}n",next))
-                                    },Riscv(&TemplateJit{ params:self.params, labels: &labels, pc: self.pc.wrapping_add_signed(offset.as_i64() * 2),      }))?;
+                                    },Riscv(&TemplateJit{ 
+                                        params:self.params, 
+                                        labels: &labels, 
+                                        pc: self.pc.wrapping_add_signed(offset.as_i64() * 2),
+                                    }))?;
                                     return Ok(());
                                 }
                                 Inst::Jalr { offset,base, dest } => {
                                     write!(f,"{};return ()=>J({});}}",TemplateReg{
                                         reg: &dest,
                                         value: Some(&format_args!("{}n",next))
-                                    },&format_args!("({}+{})&f",(offset.as_i64() * 2) as u64,TemplateReg{reg: &base,value: None}))?;
+                                    },&format_args!("({}+{})&f",(offset.as_i64() * 2) as u64,TemplateReg{
+                                        reg: &base,
+                                        value: None
+                                    }))?;
                                     return Ok(());
                                 }
                                 Inst::Lb { offset, dest, base } => write!(f,"{}",TemplateReg{
@@ -221,7 +228,10 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                                     value:Some(&format_args!(
                                         "u(BigInt(d(({}n+{})&f).getInt8(0,true)))",
                                         offset.as_i64() as u64,
-                                        TemplateReg{reg:&base,value:None}
+                                        TemplateReg{
+                                            reg:&base,
+                                            value:None
+                                        }
                                     ))
                                 }),
                                 Inst::Lbu { offset, dest, base } => write!(f,"{}",TemplateReg{
@@ -229,7 +239,10 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                                     value:Some(&format_args!(
                                         "BigInt(d(({}n+{})&f).getUInt8(0,true))",
                                         offset.as_i64() as u64,
-                                        TemplateReg{reg:&base,value:None}
+                                        TemplateReg{
+                                            reg:&base,
+                                            value:None
+                                        }
                                     ))
                                 }),
                                 Inst::Lh { offset, dest, base } => write!(f,"{}",TemplateReg{
@@ -237,7 +250,10 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                                     value:Some(&format_args!(
                                         "u(BigInt(d(({}n+{})&f).getInt16(0,true)))",
                                         offset.as_i64() as u64,
-                                        TemplateReg{reg:&base,value:None}
+                                        TemplateReg{
+                                            reg:&base,
+                                            value:None
+                                        }
                                     ))
                                 }),
                                 Inst::Lhu { offset, dest, base } => write!(f,"{}",TemplateReg{
@@ -245,7 +261,10 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                                     value:Some(&format_args!(
                                         "BigInt(d(({}n+{})&f).getUInt16(0,true))",
                                         offset.as_i64() as u64,
-                                        TemplateReg{reg:&base,value:None}
+                                        TemplateReg{
+                                            reg:&base,
+                                            value:None
+                                        }
                                     ))
                                 }),
                                 Inst::Lw { offset, dest, base } => write!(f,"{}",TemplateReg{
@@ -253,7 +272,10 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                                     value:Some(&format_args!(
                                         "u(BigInt(d(({}n+{})&f).getInt32(0,true)))",
                                         offset.as_i64() as u64,
-                                        TemplateReg{reg:&base,value:None}
+                                        TemplateReg{
+                                            reg:&base,
+                                            value:None
+                                        }
                                     ))
                                 }),
                                 Inst::Lwu { offset, dest, base } => write!(f,"{}",TemplateReg{
@@ -261,7 +283,10 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                                     value:Some(&format_args!(
                                         "BigInt(d(({}n+{})&f).getUInt32(0,true))",
                                         offset.as_i64() as u64,
-                                        TemplateReg{reg:&base,value:None}
+                                        TemplateReg{
+                                            reg:&base,
+                                            value:None
+                                        }
                                     ))
                                 }),
                                 Inst::Ld { offset, dest, base } => write!(f,"{}",TemplateReg{
@@ -269,32 +294,59 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                                     value:Some(&format_args!(
                                         "d(({}n+{})&f).getBigUInt64(0,true)",
                                         offset.as_i64() as u64,
-                                        TemplateReg{reg:&base,value:None}
+                                        TemplateReg{
+                                            reg:&base,
+                                            value:None
+                                        }
                                     ))
                                 }),
                                 Inst::Sb { offset, src, base } => write!(f,
                                     "d({}n+{}).setUInt8(0,Number({}&g),true)",
                                     offset.as_i64() as u64,
-                                    TemplateReg{reg:&base,value:None},
-                                    TemplateReg{reg:&src,value:None}
+                                    TemplateReg{
+                                        reg:&base,
+                                        value:None
+                                    },
+                                    TemplateReg{
+                                        reg:&src,
+                                        value:None
+                                    }
                                 ),
                                 Inst::Sh { offset, src, base } => write!(f,
                                     "d({}n+{}).setUInt16(0,Number({}&g),true)",
                                     offset.as_i64() as u64,
-                                    TemplateReg{reg:&base,value:None},
-                                    TemplateReg{reg:&src,value:None}
+                                    TemplateReg{
+                                        reg:&base,
+                                        value:None
+                                    },
+                                    TemplateReg{
+                                        reg:&src,
+                                        value:None
+                                    }
                                 ),
                                 Inst::Sw { offset, src, base } => write!(f,
                                     "d({}n+{}).setUInt32(0,Number({}&g),true)",
                                     offset.as_i64() as u64,
-                                    TemplateReg{reg:&base,value:None},
-                                    TemplateReg{reg:&src,value:None}
+                                    TemplateReg{
+                                        reg:&base,
+                                        value:None
+                                    },
+                                    TemplateReg{
+                                        reg:&src,
+                                        value:None
+                                    }
                                 ),
                                 Inst::Sd { offset, src, base } => write!(f,
                                     "d({}n+{}).setBigUInt64(0,{},true)",
                                     offset.as_i64() as u64,
-                                    TemplateReg{reg:&base,value:None},
-                                    TemplateReg{reg:&src,value:None}
+                                    TemplateReg{
+                                        reg:&base,
+                                        value:None
+                                    },
+                                    TemplateReg{
+                                        reg:&src,
+                                        value:None
+                                    }
                                 ),
                                 Inst::Fence{..} => Ok(()),
                                 Inst::Ecall => write!(f,"await $.ecall();"),
