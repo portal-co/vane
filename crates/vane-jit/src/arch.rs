@@ -6,8 +6,8 @@ macro_rules! renders {
                 fn $a(&self, f: &mut Formatter) -> core::fmt::Result;
             }
             #[derive(Clone, Copy)]
-            pub struct $a<'a>(pub &'a (dyn [<$a Display>] + 'a));
-            impl Display for $a<'_>{
+            pub struct $a<'a,T: ?Sized = dyn [<$a Display>] + 'a>(pub &'a T);
+            impl<T: [<$a Display>] + ?Sized> Display for $a<'_,T>{
                 fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
                     self.0.$a(f)
                 }
