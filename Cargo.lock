@@ -141,9 +141,18 @@ dependencies = [
  "js-sys",
  "paste",
  "rv-asm",
+ "vane-jit",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
+]
+
+[[package]]
+name = "vane-jit"
+version = "0.1.0"
+dependencies = [
+ "paste",
+ "rv-asm",
 ]
 
 [[package]]

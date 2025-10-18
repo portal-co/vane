@@ -1,5 +1,5 @@
 [workspace]
-members=["vane"]
+members=["vane", "vane-jit"]
 resolver="3"
 
 [workspace.dependencies]

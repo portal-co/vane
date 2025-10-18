@@ -1,0 +1,8 @@
+[package]
+name = "vane-jit"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rv-asm.workspace = true
+paste = "1.0.15"
