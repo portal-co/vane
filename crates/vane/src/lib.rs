@@ -1,4 +1,6 @@
 mod utils;
+use vane_jit::template::Params;
+use vane_jit::Heat;
 use vane_jit::{template::TemplateJit, Mem};
 
 use std::{
@@ -471,13 +473,17 @@ impl Reactor {
         return format!(
             "async ()=>{{let f=$.f,g=0xffff_ffffn,s=a=>BigInt.toIntN(64,a),u=a=>BigInt.toUIntN(64,a),d=>p=>{{p=$.get_page(p);return new DataView($._sys(`memory`),p)}};{}}}",
             TemplateJit {
-                react: unsafe{
+            params: Params{    react: unsafe{
                     transmute(unsafe{
                         &mut (&mut *self.core.get()).mem
                     })
-                },trial: &|a|tget(self.clone(), a) != JsValue::UNDEFINED,
+                },trial: &|a|match tget(self.clone(), a) != JsValue::UNDEFINED{
+                    true => Heat::Cached,
+                    false => Heat::New,
+                },
+                 root:a,},
                 pc: a,
-                root:a,
+               
                 labels: &BTreeMap::default()
             }
         );

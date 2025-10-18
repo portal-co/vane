@@ -1,9 +1,14 @@
 use crate::*;
-pub struct TemplateJit<'a> {
+#[derive(Clone, Copy)]
+pub struct Params<'a> {
     pub react: &'a UnsafeCell<Mem>,
-    pub trial: &'a (dyn Fn(u64) -> bool + 'a),
-    pub pc: u64,
+    pub trial: &'a (dyn Fn(u64) -> Heat + 'a),
     pub root: u64,
+}
+pub struct TemplateJit<'a> {
+    pub params: Params<'a>,
+    pub pc: u64,
+
     pub labels: &'a BTreeMap<u64, &'a (dyn Display + 'a)>,
 }
 struct TemplateReg<'a> {
@@ -15,8 +20,8 @@ impl<'a> Display for TemplateReg<'a> {
         let r = self.reg.0 % 32;
         if r != 0 {
             match self.value.as_deref() {
-                None => write!(f, "($.r[`x{r}`]??=0n)"),
-                Some(a) => write!(f, "($.r[`x{r}`]={a})"),
+                None => write!(f, "(($._r??=$.r)[`x{r}`]??=0n)"),
+                Some(a) => write!(f, "(($._r??=$.r)[`x{r}`]={a})"),
             }
         } else {
             match self.value.as_deref() {
@@ -29,12 +34,15 @@ impl<'a> Display for TemplateReg<'a> {
 impl<'a> Display for TemplateJit<'a> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         // if tget(self.react.clone(), self.pc) != JsValue::UNDEFINED {
-        if (self.trial)(self.pc) {
-            return write!(f, "return J({}n);", self.pc);
+        match (self.params.trial)(self.pc) {
+            Heat::New => {}
+            Heat::Cached => {
+                return write!(f, "return J({}n);", self.pc);
+            }
         }
         let inst_code;
         let i = Inst::decode(
-            match unsafe { &mut *self.react.get() }.get_page(self.pc) as *mut u32 {
+            match unsafe { &mut *self.params.react.get() }.get_page(self.pc) as *mut u32 {
                 inst_code_ptr => {
                     inst_code = unsafe { *inst_code_ptr };
                     inst_code
@@ -50,7 +58,7 @@ impl<'a> Display for TemplateJit<'a> {
                 write!(
                     f,
                     "{label_name}: for(;;){{const p={}n;if(d(p).getUInt32(0,true)!={inst_code}){{delete $.p[`{}`];return J(p);}};",
-                    self.pc, self.root
+                    self.pc, self.params.root
                 )?;
                 match i {
                     Err(e) => write!(f, "throw $.d(`decoding: {e}`);}}"),
@@ -146,16 +154,16 @@ impl<'a> Display for TemplateJit<'a> {
                                         }
                                     ),
                                     TemplateJit{
-                                        react: self.react,trial:self.trial,
+                                     params:self.params,
                                         labels: &labels,
                                         pc: self.pc.wrapping_add_signed(offset.as_i64() * 2),
-                                        root:self.root,
+                                        // root:self.root,
                                     },
                                     TemplateJit{
-                                        react: self.react,trial:self.trial,
+                                        params:self.params,
                                         labels: &labels,
                                         pc: next,
-                                              root:self.root,
+                                            //   root:self.root,
                                     }
                                 )?;
                                 return Ok(());
@@ -194,7 +202,7 @@ impl<'a> Display for TemplateJit<'a> {
                                     write!(f,"{};{};break;}}",TemplateReg{
                                         reg: &dest,
                                         value: Some(&format_args!("{}n",next))
-                                    },TemplateJit{react: self.react,trial:self.trial, labels: &labels, pc: self.pc.wrapping_add_signed(offset.as_i64() * 2),      root:self.root})?;
+                                    },TemplateJit{ params:self.params, labels: &labels, pc: self.pc.wrapping_add_signed(offset.as_i64() * 2),      })?;
                                     return Ok(());
                                 }
                                 Inst::Jalr { offset,base, dest } => {
@@ -292,11 +300,10 @@ impl<'a> Display for TemplateJit<'a> {
                             f,
                             ";{};break;}}",
                             TemplateJit {
-                                react: self.react,
-                                trial: self.trial,
+                                params:self.params,
                                 pc: next,
                                 labels: &labels,
-                                root: self.root,
+                             
                             }
                         )
                     }

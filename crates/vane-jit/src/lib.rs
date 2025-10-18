@@ -21,4 +21,9 @@ impl Mem {
         }
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Heat {
+    New,
+    Cached,
+}
 pub mod template;
