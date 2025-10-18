@@ -1,4 +1,7 @@
-use crate::{arch::{RiscvDisplay, Riscv}, *};
+use crate::{
+    arch::{Riscv, RiscvDisplay},
+    *,
+};
 #[derive(Clone, Copy)]
 pub struct Params<'a> {
     pub react: &'a UnsafeCell<Mem>,
@@ -300,11 +303,10 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                         write!(
                             f,
                             ";{};break;}}",
-                           Riscv(& TemplateJit {
-                                params:self.params,
+                            Riscv(&TemplateJit {
+                                params: self.params,
                                 pc: next,
                                 labels: &labels,
-                             
                             })
                         )
                     }

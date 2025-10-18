@@ -481,17 +481,19 @@ impl Reactor {
         return format!(
             "async ()=>{{let f=$.f,g=0xffff_ffffn,s=a=>BigInt.toIntN(64,a),u=a=>BigInt.toUIntN(64,a),d=>p=>{{p=$.get_page(p);return new DataView($._sys(`memory`),p)}};{}}}",
             Riscv(&TemplateJit {
-            params: Params{    react: unsafe{
-                    transmute(unsafe{
-                        &mut (&mut *self.core.get()).mem
-                    })
-                },trial: &|a|match tget(self.clone(), a) != JsValue::UNDEFINED{
-                    true => Heat::Cached,
-                    false => Heat::New,
+                params: Params{
+                    react: unsafe{
+                        transmute(unsafe{
+                            &mut (&mut *self.core.get()).mem
+                        })
+                    },
+                    trial: &|a|match tget(self.clone(), a) != JsValue::UNDEFINED{
+                        true => Heat::Cached,
+                        false => Heat::New,
+                    },
+                    root:a,
                 },
-                 root:a,},
                 pc: a,
-               
                 labels: &BTreeMap::default()
             })
         );
