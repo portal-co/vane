@@ -1,4 +1,4 @@
-use crate::*;
+use crate::{arch::{RiscVDisplay, Riscv}, *};
 #[derive(Clone, Copy)]
 pub struct Params<'a> {
     pub react: &'a UnsafeCell<Mem>,
@@ -31,8 +31,9 @@ impl<'a> Display for TemplateReg<'a> {
         }
     }
 }
-impl<'a> Display for TemplateJit<'a> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+
+impl<'a> RiscVDisplay for TemplateJit<'a> {
+    fn riscv(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         // if tget(self.react.clone(), self.pc) != JsValue::UNDEFINED {
         match (self.params.trial)(self.pc) {
             Heat::New => {}
@@ -153,18 +154,18 @@ impl<'a> Display for TemplateJit<'a> {
                                             value: None
                                         }
                                     ),
-                                    TemplateJit{
+                                    Riscv(&TemplateJit{
                                      params:self.params,
                                         labels: &labels,
                                         pc: self.pc.wrapping_add_signed(offset.as_i64() * 2),
                                         // root:self.root,
-                                    },
-                                    TemplateJit{
+                                    }),
+                                    Riscv(&TemplateJit{
                                         params:self.params,
                                         labels: &labels,
                                         pc: next,
                                             //   root:self.root,
-                                    }
+                                    })
                                 )?;
                                 return Ok(());
                             },)*
@@ -202,7 +203,7 @@ impl<'a> Display for TemplateJit<'a> {
                                     write!(f,"{};{};break;}}",TemplateReg{
                                         reg: &dest,
                                         value: Some(&format_args!("{}n",next))
-                                    },TemplateJit{ params:self.params, labels: &labels, pc: self.pc.wrapping_add_signed(offset.as_i64() * 2),      })?;
+                                    },Riscv(&TemplateJit{ params:self.params, labels: &labels, pc: self.pc.wrapping_add_signed(offset.as_i64() * 2),      }))?;
                                     return Ok(());
                                 }
                                 Inst::Jalr { offset,base, dest } => {
@@ -299,12 +300,12 @@ impl<'a> Display for TemplateJit<'a> {
                         write!(
                             f,
                             ";{};break;}}",
-                            TemplateJit {
+                           Riscv(& TemplateJit {
                                 params:self.params,
                                 pc: next,
                                 labels: &labels,
                              
-                            }
+                            })
                         )
                     }
                 }

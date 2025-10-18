@@ -1,5 +1,6 @@
 #![no_std]
 
+use core::fmt::Formatter;
 use core::{cell::UnsafeCell, fmt::Display};
 
 use alloc::format;
@@ -26,4 +27,5 @@ pub enum Heat {
     New,
     Cached,
 }
+pub mod arch;
 pub mod template;

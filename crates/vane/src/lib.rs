@@ -1,4 +1,5 @@
 mod utils;
+use vane_jit::arch::Riscv;
 use vane_jit::template::Params;
 use vane_jit::Heat;
 use vane_jit::{template::TemplateJit, Mem};
@@ -29,6 +30,13 @@ extern "C" {
 // }
 
 #[wasm_bindgen(inline_js = r#"
+    const suspend = a=>{
+        try{
+            return (a._p??=a.p).s??=new WebAssembly.Suspending(async b=>await l(get(a,b)));
+        }catch{
+            return;
+        };
+    };
     export function get(a,b){
         const jit = () => {
             try{
@@ -43,7 +51,7 @@ extern "C" {
         return Object.create(null)
     }
     export function tget(a,b){
-        return a.p[`${b}`]
+        return (a._p??=a.p)[`${b}`]
     }
     export async function l(a){
         while(typeof a === "function")a = await a();
@@ -52,12 +60,12 @@ extern "C" {
     export function reg(a,b){
         b %= 32;
         if(!b)return 0n;
-        return a.r[`x${b}`]??=0n;
+        return (a._r??=a.r)[`x${b}`]??=0n;
     }
     export function set_reg(a,b,c){
         b %= 32;
         if(!b)return c;
-        return a.r[`x${b}`]=c;
+        return (a._r??=a.r)[`x${b}`]=c;
     }
     "#)]
 extern "C" {
@@ -472,7 +480,7 @@ impl Reactor {
     pub fn jit_code(&self, a: u64) -> String {
         return format!(
             "async ()=>{{let f=$.f,g=0xffff_ffffn,s=a=>BigInt.toIntN(64,a),u=a=>BigInt.toUIntN(64,a),d=>p=>{{p=$.get_page(p);return new DataView($._sys(`memory`),p)}};{}}}",
-            TemplateJit {
+            Riscv(&TemplateJit {
             params: Params{    react: unsafe{
                     transmute(unsafe{
                         &mut (&mut *self.core.get()).mem
@@ -485,7 +493,7 @@ impl Reactor {
                 pc: a,
                
                 labels: &BTreeMap::default()
-            }
+            })
         );
     }
     #[wasm_bindgen(getter, js_name = "f")]
