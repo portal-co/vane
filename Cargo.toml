@@ -2,6 +2,11 @@
 members=["crates/vane", "crates/vane-jit"]
 resolver="3"
 
+[workspace.package]
+version = "0.1.0"
+license = "MPL-2.0"
+description = "Risc-V emulator for the Web, WASM, and anything based on them"
+
 [workspace.dependencies]
 portal-jsc-common =   {git="https://github.com/portal-co/jsaw-core.git",version="^0.8.0-pre.7"}
 portal-jsc-swc-cfg =  {git="https://github.com/portal-co/jsaw-core.git",version="^0.8.0-pre.7"}

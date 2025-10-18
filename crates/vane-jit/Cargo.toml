@@ -1,7 +1,10 @@
 [package]
 name = "vane-jit"
-version = "0.1.0"
+
 edition = "2024"
+version.workspace = true #= "0.1.0"
+license.workspace = true #= "MPL-2.0"
+description.workspace = true #= "Risc-V emulator for the Web, WASM, and anything based on them"
 
 [dependencies]
 rv-asm.workspace = true
