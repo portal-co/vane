@@ -1,8 +1,14 @@
 mod utils;
-use vane_jit::*;
+use vane_jit::{template::TemplateJit, Mem};
 
 use std::{
-    cell::{OnceCell, UnsafeCell}, collections::BTreeMap, fmt::Display, mem::transmute, ptr::null_mut, rc::Rc, u64
+    cell::{OnceCell, UnsafeCell},
+    collections::BTreeMap,
+    fmt::Display,
+    mem::transmute,
+    ptr::null_mut,
+    rc::Rc,
+    u64,
 };
 
 use js_sys::Promise;
