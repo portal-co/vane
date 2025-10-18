@@ -7,11 +7,18 @@ macro_rules! renders {
             }
             #[derive(Clone, Copy)]
             pub struct $a<'a,T: ?Sized = dyn [<$a Display>] + 'a>(pub &'a T);
-            impl<T: [<$a Display>] + ?Sized> Display for $a<'_,T>{
-                fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-                    self.0.$a(f)
+            const _: () = {
+                impl<T: [<$a Display>] + ?Sized> Display for $a<'_,T>{
+                    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+                        self.0.$a(f)
+                    }
                 }
-            }
+                impl<'a,T: [<$a Display>] + ?Sized> [<$a Display>] for &'a T{
+                    fn $a(&self, f: &mut Formatter) -> core::fmt::Result{
+                        write!(f,"{}",$a(self))
+                    }
+                }
+            };
         })*
     };
 }
