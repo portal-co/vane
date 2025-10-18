@@ -2,16 +2,21 @@
 
 use core::{cell::UnsafeCell, fmt::Display};
 
-use alloc::collections::btree_map::BTreeMap;
 use alloc::format;
+use alloc::{boxed::Box, collections::btree_map::BTreeMap};
 use rv_asm::{Inst, Reg, Xlen};
 extern crate alloc;
+#[derive(Default)]
 pub struct Mem {
-    pub pages: BTreeMap<u64, [u8; 65536]>,
+    pub pages: BTreeMap<u64, Box<[u8; 65536]>>,
 }
 impl Mem {
     pub fn get_page(&mut self, a: u64) -> *mut u8 {
-        match self.pages.entry((a >> 16)).or_insert_with(|| [0u8; 65536]) {
+        match self
+            .pages
+            .entry((a >> 16))
+            .or_insert_with(|| Box::new([0u8; 65536]))
+        {
             p => &raw mut p[(a & 0xffff) as usize],
         }
     }
@@ -46,12 +51,12 @@ impl<'a> Display for TemplateReg<'a> {
 impl<'a> Display for TemplateJit<'a> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         // if tget(self.react.clone(), self.pc) != JsValue::UNDEFINED {
-        if (self.trial)(self.pc){
+        if (self.trial)(self.pc) {
             return write!(f, "return J({}n);", self.pc);
         }
         let inst_code;
         let i = Inst::decode(
-            match unsafe{&mut *self.react.get()}.get_page(self.pc) as *mut u32 {
+            match unsafe { &mut *self.react.get() }.get_page(self.pc) as *mut u32 {
                 inst_code_ptr => {
                     inst_code = unsafe { *inst_code_ptr };
                     inst_code
@@ -64,7 +69,11 @@ impl<'a> Display for TemplateJit<'a> {
             alloc::collections::btree_map::Entry::Vacant(vacant_entry) => {
                 let label_name = format!("x{}", self.pc);
                 vacant_entry.insert(&label_name);
-                write!(f, "{label_name}: for(;;){{const p={}n;if(d(p).getUInt32(0,true)!={inst_code}){{delete $.p[`{}`];return J(p);}};", self.pc,self.root)?;
+                write!(
+                    f,
+                    "{label_name}: for(;;){{const p={}n;if(d(p).getUInt32(0,true)!={inst_code}){{delete $.p[`{}`];return J(p);}};",
+                    self.pc, self.root
+                )?;
                 match i {
                     Err(e) => write!(f, "throw $.d(`decoding: {e}`);}}"),
                     Ok((a, b)) => {
@@ -305,7 +314,8 @@ impl<'a> Display for TemplateJit<'a> {
                             f,
                             ";{};break;}}",
                             TemplateJit {
-                                react: self.react,trial:self.trial,
+                                react: self.react,
+                                trial: self.trial,
                                 pc: next,
                                 labels: &labels,
                                 root: self.root,
