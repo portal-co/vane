@@ -8,11 +8,12 @@ use std::{
     mem::transmute,
     ptr::null_mut,
     rc::Rc,
+    sync::Mutex,
     u64,
 };
-use vane_jit::arch::Riscv;
 use vane_jit::template::Params;
 use vane_jit::Heat;
+use vane_jit::{arch::Riscv, JitCtx};
 use vane_jit::{template::TemplateJit, Mem};
 use wasm_bindgen::prelude::*;
 #[wasm_bindgen(raw_module = "./vane_bg.wasm")]
@@ -76,7 +77,16 @@ extern "C" {
 #[derive(Clone)]
 pub struct Reactor {
     _handle: (),
-    core: Rc<UnsafeCell<Core>>,
+    core: Rc<Mutex<Core>>,
+}
+impl JitCtx for Reactor {
+    fn bytes(&self, a: u64) -> Box<dyn Iterator<Item = u8> + '_> {
+        Box::new((a..).filter_map(move |a| {
+            let mut lock = self.core.lock().unwrap();
+            let n = lock.mem.bytes(a).next()?;
+            Some(n)
+        }))
+    }
 }
 struct Core {
     mem: Mem,
@@ -437,17 +447,13 @@ impl Reactor {
     }
     #[wasm_bindgen(getter, js_name = "p")]
     pub fn state(&self) -> JsValue {
-        return unsafe { &mut *self.core.get() }
-            .state
-            .get_or_init(|| on())
-            .clone();
+        let mut lock = self.core.lock().unwrap();
+        return lock.state.get_or_init(|| on()).clone();
     }
     #[wasm_bindgen(getter, js_name = "r")]
     pub fn regs(&self) -> JsValue {
-        return unsafe { &mut *self.core.get() }
-            .regs
-            .get_or_init(|| on())
-            .clone();
+        let mut lock = self.core.lock().unwrap();
+        return lock.regs.get_or_init(|| on()).clone();
     }
     #[wasm_bindgen]
     pub fn _sys(&self, a: &str) -> JsValue {
@@ -458,7 +464,8 @@ impl Reactor {
     }
     #[wasm_bindgen]
     pub fn get_page(&self, a: u64) -> *mut u8 {
-        match &mut unsafe { &mut *self.core.get() }.mem {
+        let mut lock = self.core.lock().unwrap();
+        match &mut lock.mem {
             m => m.get_page(a),
         }
     }
@@ -472,9 +479,7 @@ impl Reactor {
             "async ()=>{{let f=$.f,g=0xffff_ffffn,s=a=>BigInt.toIntN(64,a),u=a=>BigInt.toUIntN(64,a),d=>p=>{{p=$.get_page(p);return new DataView($._sys(`memory`),p)}};{}}}",
             Riscv(&TemplateJit {
                 params: Params{
-                    react: unsafe{
-                        &(&*self.core.get()).mem
-                    },
+                    react: self,
                     trial: &|a|match tget(self.clone(), a) != JsValue::UNDEFINED{
                         true => Heat::Cached,
                         false => Heat::New,
