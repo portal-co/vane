@@ -1,10 +1,8 @@
 #![no_std]
-
-use core::fmt::Formatter;
-use core::{cell::UnsafeCell, fmt::Display};
-
 use alloc::format;
 use alloc::{boxed::Box, collections::btree_map::BTreeMap};
+use core::fmt::Formatter;
+use core::{cell::UnsafeCell, fmt::Display};
 use rv_asm::{Inst, Reg, Xlen};
 extern crate alloc;
 #[derive(Default)]

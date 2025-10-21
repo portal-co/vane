@@ -11,7 +11,6 @@ pub struct Params<'a> {
 pub struct TemplateJit<'a> {
     pub params: Params<'a>,
     pub pc: u64,
-
     pub labels: &'a BTreeMap<u64, &'a (dyn Display + 'a)>,
 }
 struct TemplateReg<'a> {
@@ -34,7 +33,6 @@ impl<'a> Display for TemplateReg<'a> {
         }
     }
 }
-
 impl<'a> RiscvDisplay for TemplateJit<'a> {
     fn Riscv(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         // if tget(self.react.clone(), self.pc) != JsValue::UNDEFINED {
@@ -206,9 +204,9 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                                     write!(f,"{};{};break;}}",TemplateReg{
                                         reg: &dest,
                                         value: Some(&format_args!("{}n",next))
-                                    },Riscv(&TemplateJit{ 
-                                        params:self.params, 
-                                        labels: &labels, 
+                                    },Riscv(&TemplateJit{
+                                        params:self.params,
+                                        labels: &labels,
                                         pc: self.pc.wrapping_add_signed(offset.as_i64() * 2),
                                     }))?;
                                     return Ok(());

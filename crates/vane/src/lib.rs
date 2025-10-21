@@ -1,9 +1,6 @@
 mod utils;
-use vane_jit::arch::Riscv;
-use vane_jit::template::Params;
-use vane_jit::Heat;
-use vane_jit::{template::TemplateJit, Mem};
-
+use js_sys::Promise;
+use rv_asm::{Inst, Reg, Xlen};
 use std::{
     cell::{OnceCell, UnsafeCell},
     collections::BTreeMap,
@@ -13,11 +10,11 @@ use std::{
     rc::Rc,
     u64,
 };
-
-use js_sys::Promise;
-use rv_asm::{Inst, Reg, Xlen};
+use vane_jit::arch::Riscv;
+use vane_jit::template::Params;
+use vane_jit::Heat;
+use vane_jit::{template::TemplateJit, Mem};
 use wasm_bindgen::prelude::*;
-
 #[wasm_bindgen(raw_module = "./vane_bg.wasm")]
 extern "C" {
     #[wasm_bindgen(thread_local_v2, js_name = "memory")]
@@ -28,7 +25,6 @@ extern "C" {
 //     #[wasm_bindgen(js_name = "Reactor")]
 //     type Reactor2;
 // }
-
 #[wasm_bindgen(inline_js = r#"
     const suspend = a=>{
         try{
@@ -76,20 +72,17 @@ extern "C" {
     fn reg(a: Reactor, b: u8) -> u64;
     fn set_reg(a: Reactor, b: u8, c: u64) -> u64;
 }
-
 #[wasm_bindgen]
 #[derive(Clone)]
 pub struct Reactor {
     _handle: (),
     core: Rc<UnsafeCell<Core>>,
 }
-
 struct Core {
     mem: Mem,
     state: OnceCell<JsValue>,
     regs: OnceCell<JsValue>,
 }
-
 #[wasm_bindgen]
 impl Reactor {
     fn save_regs(&self) -> [u64; 32] {
@@ -382,13 +375,11 @@ impl Reactor {
                 }
                 //Fence
                 Inst::Fence { fence } => {}
-
                 //Wide
                 //Immediates
                 Inst::AddiW { imm, dest, src1 } => {
                     set_reg32!(dest => reg32!(src1).wrapping_add(imm.as_u32()));
                 }
-
                 Inst::SlliW { imm, dest, src1 } => {
                     set_reg32!(dest => reg32!(src1) << (imm.as_u32() % 32));
                 }
@@ -430,7 +421,6 @@ impl Reactor {
                 Inst::RemuW { src2, dest, src1 } => {
                     set_reg32!(dest => reg32!(src1) % reg32!(src2));
                 }
-
                 //Ecall
                 Inst::Ecall => {
                     self.restore_regs(&regs);
