@@ -473,9 +473,7 @@ impl Reactor {
             Riscv(&TemplateJit {
                 params: Params{
                     react: unsafe{
-                        transmute(unsafe{
-                            &mut (&mut *self.core.get()).mem
-                        })
+                        &(&*self.core.get()).mem
                     },
                     trial: &|a|match tget(self.clone(), a) != JsValue::UNDEFINED{
                         true => Heat::Cached,

@@ -25,5 +25,16 @@ pub enum Heat {
     New,
     Cached,
 }
+pub trait JitCtx{
+    fn bytes(&self, a: u64) -> Box<dyn Iterator<Item = u8> + '_>;
+}
+impl JitCtx for Mem{
+    fn bytes(&self, a: u64) -> Box<dyn Iterator<Item = u8> + '_> {
+        Box::new((a..).map(|a|match self.pages.get(&(a >> 16)){
+            None => 0u8,
+            Some(i) => i[(a & 0xffff) as usize],
+        }))
+    }
+}
 pub mod arch;
 pub mod template;
