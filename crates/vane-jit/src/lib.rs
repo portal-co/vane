@@ -25,16 +25,25 @@ pub enum Heat {
     New,
     Cached,
 }
-pub trait JitCtx{
+pub trait JitCtx {
     fn bytes(&self, a: u64) -> Box<dyn Iterator<Item = u8> + '_>;
 }
-impl JitCtx for Mem{
+impl JitCtx for Mem {
     fn bytes(&self, a: u64) -> Box<dyn Iterator<Item = u8> + '_> {
-        Box::new((a..).map(|a|match self.pages.get(&(a >> 16)){
+        Box::new((a..).map(|a| match self.pages.get(&(a >> 16)) {
             None => 0u8,
             Some(i) => i[(a & 0xffff) as usize],
         }))
     }
+}
+#[derive(Clone)]
+pub enum JitOpcode<'a> {
+    Operator{
+        op: wasmparser::Operator<'a>,
+    }
+}
+pub trait WasmJit {
+    fn jit<'a>(&'a self) -> Box<dyn Iterator<Item = JitOpcode<'a>> + 'a>;
 }
 pub mod arch;
 pub mod template;

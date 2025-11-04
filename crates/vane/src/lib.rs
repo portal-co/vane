@@ -487,7 +487,7 @@ impl Reactor {
                     root:a,
                 },
                 pc: a,
-                labels: &BTreeMap::default()
+                labels: &BTreeMap::default(),depth:0,
             })
         );
     }

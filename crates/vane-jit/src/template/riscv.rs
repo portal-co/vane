@@ -1,25 +1,28 @@
-use super::*;
+use alloc::vec::Vec;
+use wasmparser::Operator;
 
+use crate::arch::RiscvWasmJit;
+
+use super::*;
+impl<'b> RiscvWasmJit for TemplateJit<'b> {
+    fn Riscv<'a>(&'a self) -> Box<dyn Iterator<Item = JitOpcode<'a>> + 'a> {
+        self.jit_wasm(|v, labels, nd| {
+            let mut i = self.params.react.bytes(self.pc);
+            let inst_code = u32::from_le_bytes(array::from_fn(|_| i.next().unwrap()));
+            let i = Inst::decode(inst_code, Xlen::Rv64);
+        })
+    }
+}
 impl<'a> RiscvDisplay for TemplateJit<'a> {
     fn Riscv(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         // if tget(self.react.clone(), self.pc) != JsValue::UNDEFINED {
-        match (self.params.trial)(self.pc) {
-            Heat::New => {}
-            Heat::Cached => {
-                return write!(f, "return J({}n);", self.pc);
-            }
-        }
-        let mut i = self.params.react.bytes(self.pc);
-        let inst_code = u32::from_le_bytes(array::from_fn(|_| i.next().unwrap()));
-        let i = Inst::decode(inst_code, Xlen::Rv64);
-        let mut labels = self.labels.clone();
-        match labels.entry(self.pc) {
-            alloc::collections::btree_map::Entry::Vacant(vacant_entry) => {
-                let label_name = format!("x{}", self.pc);
-                vacant_entry.insert(&label_name);
-                write!(
+        return self.jit_js(f, |f,label_name,labels,nd|{
+               let mut i = self.params.react.bytes(self.pc);
+            let inst_code = u32::from_le_bytes(array::from_fn(|_| i.next().unwrap()));
+            let i = Inst::decode(inst_code, Xlen::Rv64);
+             write!(
                     f,
-                    "{label_name}: for(;;){{const p={}n;if(d(p).getUInt32(0,true)!={inst_code}){{delete $.p[`{}`];return J(p);}};",
+                    "const p={}n;if(d(p).getUInt32(0,true)!={inst_code}){{delete $.p[`{}`];return J(p);}};",
                     self.pc, self.params.root
                 )?;
                 match i {
@@ -119,12 +122,14 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                                      params:self.params,
                                         labels: &labels,
                                         pc: self.pc.wrapping_add_signed(offset.as_i64() * 2),
+                                        depth:nd,
                                         // root:self.root,
                                     }),
                                     Riscv(&TemplateJit{
                                         params:self.params,
                                         labels: &labels,
                                         pc: next,
+                                         depth:nd,
                                             //   root:self.root,
                                     })
                                 )?;
@@ -168,6 +173,7 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                                         params:self.params,
                                         labels: &labels,
                                         pc: self.pc.wrapping_add_signed(offset.as_i64() * 2),
+                                         depth:nd,
                                     }))?;
                                     return Ok(());
                                 }
@@ -317,14 +323,11 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                                 params: self.params,
                                 pc: next,
                                 labels: &labels,
+                                depth: nd,
                             })
                         )
                     }
                 }
-            }
-            alloc::collections::btree_map::Entry::Occupied(occupied_entry) => {
-                write!(f, "continue {};", occupied_entry.get())
-            }
-        }
+            });
     }
 }
