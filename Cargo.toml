@@ -18,6 +18,8 @@ wax-core = { version = "0.1.0", git = "https://github.com/portal-co/wax.git", br
 portal-solutions-asm-semantics = {version = "0.1.0",git = "https://github.com/portal-co/asm-arch.git"}
 asim-core = { version = "0.1.0", git = "https://github.com/portal-co/asim.git", branch = "main" }
 
+portal-pc-asm-common = {version = "0.1.1",git = "https://github.com/portal-co/asm-common.git"}
+
 portal-jsc-common = { git = "https://github.com/portal-co/jsaw-core.git", version = "^0.8.0-pre.7" }
 portal-jsc-swc-cfg = { git = "https://github.com/portal-co/jsaw-core.git", version = "^0.8.0-pre.7" }
 portal-jsc-swc-tac = { git = "https://github.com/portal-co/jsaw-core.git", version = "^0.8.0-pre.7" }
