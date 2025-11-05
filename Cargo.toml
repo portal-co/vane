@@ -11,6 +11,8 @@ description = "Risc-V emulator for the Web, WASM, and anything based on them"
 wasmparser = { version = "0.239.0", default-features = false }
 wasm-encoder = { version = "0.239.0", default-features = false,features = ["wasmparser"] }
 
+wax-core = {version = "0.1.0",git = "https://github.com/portal-co/wax.git",branch = "main"}
+
 portal-jsc-common =   {git="https://github.com/portal-co/jsaw-core.git",version="^0.8.0-pre.7"}
 portal-jsc-swc-cfg =  {git="https://github.com/portal-co/jsaw-core.git",version="^0.8.0-pre.7"}
 portal-jsc-swc-tac =  {git="https://github.com/portal-co/jsaw-core.git",version="^0.8.0-pre.7"}
