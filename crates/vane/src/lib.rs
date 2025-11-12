@@ -96,10 +96,10 @@ struct Core {
     state: OnceCell<JsValue>,
     regs: OnceCell<JsValue>,
 }
-// Non-wasm impl block for testing and internal use
+// Non-wasm impl block for Rust-only APIs
 impl Reactor {
-    /// Create a new Reactor with custom memory (for testing)
-    /// This is not exposed to wasm-bindgen but is available for Rust tests
+    /// Create a new Reactor with custom memory
+    /// This is a safe constructor that allows initializing the reactor with pre-loaded memory
     pub fn new_with_mem(mem: vane_jit::Mem) -> Self {
         Reactor {
             _handle: (),
