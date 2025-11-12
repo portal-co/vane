@@ -31,4 +31,5 @@ wasm-bindgen-futures = "0.4.50"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.34"
+elf = "0.8.0"
 

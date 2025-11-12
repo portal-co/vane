@@ -1,5 +1,8 @@
 mod utils;
 use js_sys::Promise;
+
+// Re-export Mem for use in tests
+pub use vane_jit::Mem;
 use rv_asm::{Inst, Reg, Xlen};
 use std::{
     cell::{OnceCell, UnsafeCell},
@@ -14,7 +17,7 @@ use std::{
 use vane_jit::template::Params;
 use vane_jit::Heat;
 use vane_jit::{arch::Riscv, JitCtx};
-use vane_jit::{template::TemplateJit, Mem};
+use vane_jit::template::TemplateJit;
 use wasm_bindgen::prelude::*;
 #[wasm_bindgen(raw_module = "./vane_bg.wasm")]
 extern "C" {
@@ -93,8 +96,20 @@ struct Core {
     state: OnceCell<JsValue>,
     regs: OnceCell<JsValue>,
 }
-#[wasm_bindgen]
+// Non-wasm impl block for testing and internal use
 impl Reactor {
+    /// Create a new Reactor with custom memory (for testing)
+    /// This is not exposed to wasm-bindgen but is available for Rust tests
+    pub fn new_with_mem(mem: vane_jit::Mem) -> Self {
+        Reactor {
+            _handle: (),
+            core: Rc::new(Mutex::new(Core {
+                mem,
+                state: OnceCell::new(),
+                regs: OnceCell::new(),
+            })),
+        }
+    }
     fn save_regs(&self) -> [u64; 32] {
         std::array::from_fn(|a| reg(self.clone(), a as u8))
     }
@@ -103,6 +118,9 @@ impl Reactor {
             set_reg(self.clone(), i as u8, a);
         }
     }
+}
+#[wasm_bindgen]
+impl Reactor {
     #[wasm_bindgen]
     pub async fn interp(&self, mut pc: u64) -> Result<JsValue, JsValue> {
         let mut regs = self.save_regs();
