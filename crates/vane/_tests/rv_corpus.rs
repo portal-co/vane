@@ -1,5 +1,5 @@
 //! Test suite for RiscV test programs from rv-corpus repository
-//! 
+//!
 //! This test runner loads ELF binaries from the rv-corpus git submodule and
 //! executes them using the vane emulator. The tests use wasm-bindgen-test
 //! to run in a browser environment.
@@ -11,9 +11,9 @@
 //! - Tests are generated using the `rv_test!` macro for easy addition
 //!
 //! ## Adding New Tests
-//! 
+//!
 //! To add a new test from the rv-corpus submodule, use the `rv_test!` macro:
-//! 
+//!
 //! ```rust
 //! rv_test!(
 //!     test_name,           // Test function name
@@ -25,15 +25,16 @@
 #![cfg(target_arch = "wasm32")]
 
 extern crate wasm_bindgen_test;
+
 use wasm_bindgen_test::*;
 
-use vane::Reactor;
+use crate::*;
 use vane_jit::Mem;
 
 wasm_bindgen_test_configure!(run_in_browser);
 
 /// ELF parser for loading RiscV binaries into memory
-/// 
+///
 /// This implementation uses the `elf` crate for safe ELF parsing without
 /// any unsafe code. It loads PT_LOAD segments from the ELF file into the
 /// emulator's memory using the safe `write_byte` interface.
@@ -68,7 +69,7 @@ impl ElfLoader {
                     // which provides safe memory access
                     if file_size > 0 {
                         let segment_data = &self.data[file_offset..file_offset + file_size];
-                        
+
                         for (i, &byte) in segment_data.iter().enumerate() {
                             let addr = vaddr + i as u64;
                             mem.write_byte(addr, byte);
@@ -88,27 +89,25 @@ impl ElfLoader {
     }
 }
 
-
-
 /// Helper to create a Reactor with loaded memory
 fn create_reactor_with_binary(binary_data: &[u8]) -> Result<(Reactor, u64), String> {
     let loader = ElfLoader::new(binary_data.to_vec());
     let mut mem = Mem::default();
     let entry_point = loader.load_into_memory(&mut mem)?;
-    
+
     // Create the reactor
     let reactor = Reactor::new_with_mem(mem);
-    
+
     Ok((reactor, entry_point))
 }
 
 /// Macro to easily create test cases from the rv-corpus submodule
-/// 
+///
 /// This macro generates a wasm-bindgen test function that loads and executes
 /// a binary from the rv-corpus submodule.
-/// 
+///
 /// # Usage
-/// 
+///
 /// ```rust
 /// rv_test!(
 ///     test_function_name,
@@ -118,25 +117,27 @@ fn create_reactor_with_binary(binary_data: &[u8]) -> Result<(Reactor, u64), Stri
 /// );
 /// ```
 macro_rules! rv_test {
-    ($test_name:ident, $isa:expr, $binary:expr, $description:expr) => {
+    ($test_name:ident, $isa:expr, $binary:expr, $description:expr, $kind:ident) => {
         #[wasm_bindgen_test]
         async fn $test_name() {
             let binary_data = include_bytes!(concat!("rv-corpus/", $isa, "/", $binary));
-            
+
             let (reactor, entry_point) = create_reactor_with_binary(binary_data)
                 .expect(&format!("Failed to load {}/{} binary", $isa, $binary));
-            
+
             // Run the test starting from the entry point
-            let result = reactor.interp(entry_point).await;
-            
+            let result = reactor.$kind(entry_point).await;
+
             // Check that execution completes successfully
             match result {
                 Ok(_) => {
                     // Test passed
                 }
                 Err(e) => {
-                    let err_str = format!("{:?}", e);
-                    panic!("{} test failed: {}", $description, err_str);
+                    if !crate::has_success(e.clone()) {
+                        let err_str = format!("{:?}", e);
+                        panic!("{} test failed: {}", $description, err_str);
+                    }
                 }
             }
         }
@@ -148,7 +149,16 @@ rv_test!(
     test_rv64i_basic_64bit,
     "rv64i",
     "01_basic_64bit",
-    "RV64I basic 64-bit operations: 64-bit register operations, word operations (ADDIW, SLLIW, SRLIW, SRAIW, ADDW, SUBW, etc.), 64-bit loads/stores (LD, SD, LWU), sign extension"
+    "RV64I basic 64-bit operations: 64-bit register operations, word operations (ADDIW, SLLIW, SRLIW, SRAIW, ADDW, SUBW, etc.), 64-bit loads/stores (LD, SD, LWU), sign extension",
+    jit_run
+);
+
+rv_test!(
+    test_rv64i_basic_64bit_interp,
+    "rv64i",
+    "01_basic_64bit",
+    "RV64I basic 64-bit operations: 64-bit register operations, word operations (ADDIW, SLLIW, SRLIW, SRAIW, ADDW, SUBW, etc.), 64-bit loads/stores (LD, SD, LWU), sign extension",
+    interp
 );
 
 // RV64IM Tests
@@ -156,5 +166,6 @@ rv_test!(
     test_rv64im_multiply_divide,
     "rv64im",
     "01_multiply_divide_64",
-    "RV64IM multiply/divide: 64-bit multiplication (MUL, MULH, MULHU, MULHSU), division (DIV, DIVU, REM, REMU), word operations (MULW, DIVW, DIVUW, REMW, REMUW), overflow handling"
+    "RV64IM multiply/divide: 64-bit multiplication (MUL, MULH, MULHU, MULHSU), division (DIV, DIVU, REM, REMU), word operations (MULW, DIVW, DIVUW, REMW, REMUW), overflow handling",
+    jit_run
 );

@@ -94,7 +94,7 @@ impl<'b> TemplateJit<'b> {
                 let nd = self.depth + 1;
                 write!(f, "{label_name}: for(;;){{")?;
                 render(f,&label_name,labels,nd)?;
-                write!(f, "break;}}",)
+                write!(f, "break {label_name};}}",)
             }
             alloc::collections::btree_map::Entry::Occupied(occupied_entry) => {
                 write!(f, "continue {};", occupied_entry.get().0)

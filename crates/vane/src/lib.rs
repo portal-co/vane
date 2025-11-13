@@ -2,7 +2,6 @@ mod utils;
 use js_sys::Promise;
 
 // Re-export Mem for use in tests
-pub use vane_jit::Mem;
 use rv_asm::{Inst, Reg, Xlen};
 use std::{
     cell::{OnceCell, UnsafeCell},
@@ -15,15 +14,21 @@ use std::{
     u64,
 };
 use vane_jit::template::Params;
-use vane_jit::Heat;
-use vane_jit::{arch::Riscv, JitCtx};
 use vane_jit::template::TemplateJit;
+use vane_jit::Heat;
+pub use vane_jit::Mem;
+use vane_jit::{arch::Riscv, JitCtx};
 use wasm_bindgen::prelude::*;
-#[wasm_bindgen(raw_module = "./vane_bg.wasm")]
-extern "C" {
-    #[wasm_bindgen(thread_local_v2, js_name = "memory")]
-    static MEM_HANDLE: JsValue;
-}
+
+#[cfg(test)]
+#[path = "../_tests/rv_corpus.rs"]
+mod _tests;
+
+// #[wasm_bindgen(raw_module = "./vane_bg.wasm")]
+// extern "C" {
+//     #[wasm_bindgen(thread_local_v2, js_name = "memory")]
+//     static MEM_HANDLE: JsValue;
+// }
 // #[wasm_bindgen(raw_module = "./vane.js")]
 // extern "C"{
 //     #[wasm_bindgen(js_name = "Reactor")]
@@ -37,11 +42,14 @@ extern "C" {
             return;
         };
     };
-    export function get(a,b){
+    export function get$(a,b){
         const jit = () => {
+            let code;
             try{
-                return (new (get.f ??= Function)("$","J",a.j(b))(a,b=>get(a,b)))
-            }catch{
+                return (new (get$.f ??= Function)("$","J",code = a.j(b))(a,b=>get$(a,b)))
+            }catch(err){
+                console.error(err);
+                console.info('code:',code);
                 return a.interp.bind(a,b);
             }
         };
@@ -67,14 +75,44 @@ extern "C" {
         if(!b)return c;
         return (a._r??=a.r)[`x${b}`]=c;
     }
+    export function get_memory(wasm){
+        return wasm.memory;
+    }
+    export function log_success(){
+        console.log('success: exit');
+        return {__success: true};
+    }
+    export function has_success(err){
+    return '__success' in err;
+    }
+    export async function jit_run(a){
+        try{
+        return await a();
+        }catch(err){
+        console.error(err);
+        throw err;
+        }
+    }
     "#)]
 extern "C" {
+    #[wasm_bindgen(js_name = "get$")]
     fn get(a: Reactor, b: u64) -> JsValue;
     fn tget(a: Reactor, b: u64) -> JsValue;
     fn on() -> JsValue;
     fn l(a: JsValue) -> Promise;
     fn reg(a: Reactor, b: u8) -> u64;
     fn set_reg(a: Reactor, b: u8, c: u64) -> u64;
+    fn get_memory(a: JsValue) -> JsValue;
+    fn log_success() -> JsValue;
+    fn has_success(a: JsValue) -> bool;
+    #[wasm_bindgen(catch)]
+    async fn jit_run(a: JsValue) -> Result<JsValue,JsValue>;
+    //   #[wasm_bindgen(thread_local_v2, js_name = "memory")]
+    // static MEM_HANDLE: JsValue;
+}
+#[wasm_bindgen]
+extern "C" {
+    fn eval(a: &str) -> JsValue;
 }
 #[wasm_bindgen]
 #[derive(Clone)]
@@ -121,6 +159,11 @@ impl Reactor {
 }
 #[wasm_bindgen]
 impl Reactor {
+    #[wasm_bindgen]
+    pub async fn jit_run(&self, mut pc: u64) -> Result<JsValue, JsValue> {
+        let j = self.jit(pc);
+        return jit_run(j).await;
+    }
     #[wasm_bindgen]
     pub async fn interp(&self, mut pc: u64) -> Result<JsValue, JsValue> {
         let mut regs = self.save_regs();
@@ -457,7 +500,7 @@ impl Reactor {
                 }
                 _ => {
                     self.restore_regs(&regs);
-                    return Err(JsValue::from_str(&format!("op:{i}")));
+                    return Err(JsValue::from_str(&format!("iop:{i}")));
                 }
             }
             pc = next;
@@ -476,7 +519,7 @@ impl Reactor {
     #[wasm_bindgen]
     pub fn _sys(&self, a: &str) -> JsValue {
         match a {
-            "memory" => MEM_HANDLE.with(|a| a.clone()),
+            "memory" => get_memory(eval("wasm")),
             _ => JsValue::undefined(),
         }
     }
@@ -494,7 +537,7 @@ impl Reactor {
     #[wasm_bindgen(js_name = "j")]
     pub fn jit_code(&self, a: u64) -> String {
         return format!(
-            "async ()=>{{let f=$.f,g=0xffff_ffffn,s=a=>BigInt.toIntN(64,a),u=a=>BigInt.toUIntN(64,a),d=>p=>{{p=$.get_page(p);return new DataView($._sys(`memory`),p)}};{}}}",
+            "return async function(){{let f=$.f,g=0xffff_ffffn,s=(a=>BigInt.asIntN(64,a)),u=(a=>BigInt.asUintN(64,a)),d=(p=>{{p=$.get_page(p);return new DataView($._sys(`memory`).buffer,p);}});{}}}",
             Riscv(&TemplateJit {
                 params: Params{
                     react: self,
@@ -529,6 +572,9 @@ impl Reactor {
     // }
     #[wasm_bindgen(js_name = "ecall")]
     pub async fn _ecall(&self) -> Result<JsValue, JsValue> {
+        if self.save_regs()[Reg::A7.0 as usize] == 93 {
+            return Err(log_success());
+        }
         Ok(JsValue::undefined())
     }
 }

@@ -22,11 +22,11 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
             let i = Inst::decode(inst_code, Xlen::Rv64);
              write!(
                     f,
-                    "const p={}n;if(d(p).getUInt32(0,true)!={inst_code}){{delete $.p[`{}`];return J(p);}};",
+                    "const p={}n;if(d(p).getUint32(0,true)!={inst_code}){{delete $.p[`{}`];return J(p);}};",
                     self.pc, self.params.root
                 )?;
                 match i {
-                    Err(e) => write!(f, "throw $.d(`decoding: {e}`);}}"),
+                    Err(e) => write!(f, "throw new TypeError(`decoding: {e}`);"),
                     Ok((a, b)) => {
                         let next = match b {
                             rv_asm::IsCompressed::Yes => 2,
@@ -106,7 +106,7 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                                 ),)?
                             )*
                             $(Inst::$j {src1,src2,offset} => {
-                                 write!(f,"if({}){{{}}}else{{{}}};break;}}",
+                                 write!(f,"if({}){{{}}}else{{{}}};",
                                     &format_args!(
                                         $jp,
                                         TemplateReg {
@@ -143,11 +143,14 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                         ops!(a => [
                             Add => "({}+{})&f" i "" w "(({}&g)+({}&g))&g" iw  "(({}&g)+({}&g))&g",
                             Mul => "({}*{})&f" w "(({}&g)*({}&g))&g",
+                            Mulhu => "(({}*{})>>64n)&f",
+                            Mulhsu => "u((s({})*{})>>64n)&f",
+                            Mulh => "u((s({})*s({}))>>64n)&f",
                             Sub => "({}-{})&f" w "(({}&g)-({}&g))&g",
-                            Divu => "({}/{})&f" w "(({}&g)/({}&g))&g",
-                            Remu => "({}%{})&f" w "(({}&g)%({}&g))&g",
-                            Div => "u(s({})/s({}))&f" w "u(s({}&g)/s({}&g))&g",
-                            Rem => "u(s({})%s({}))&f" w "u(s({}&g)%s({}&g))&g",
+                            Divu => "{1}==0?u(-1n):({}/{})&f" w "{1}==0?u(-1n):(({}&g)/({}&g))&g",
+                            Remu => "{1}==0?u(-1n):({}%{})&f" w "{1}==0?u(-1n):(({}&g)%({}&g))&g",
+                            Div => "{1}==0?u(-1n):u(s({})/s({}))&f" w "{1}==0?u(-1n):u(s({}&g)/s({}&g))&g",
+                            Rem => "{1}==0?u(-1n):u(s({})%s({}))&f" w "{1}==0?u(-1n):u(s({}&g)%s({}&g))&g",
                             And => "({}&{})&f" i "",
                             Or => "({}|{})&f" i "",
                             Xor => "({}^{})&f" i "",
@@ -165,6 +168,12 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                                 Blt => "s({})<s({})",
                                 Bge => "s({})>=s({})"
                             ] |a|match a{
+                                Inst::Lui { uimm, dest } => {
+                                    write!(f,"{}",TemplateReg{reg:&dest,value:Some(&format_args!("{}n",uimm.as_u64()))})
+                                }
+                                 Inst::Auipc { uimm, dest } => {
+                                    write!(f,"{}",TemplateReg{reg:&dest,value:Some(&format_args!("{}n",uimm.as_u64().wrapping_add(self.pc)))})
+                                }
                                 Inst::Jal { offset, dest } => {
                                     write!(f,"{};{};break;}}",TemplateReg{
                                         reg: &dest,
@@ -201,7 +210,7 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                                 Inst::Lbu { offset, dest, base } => write!(f,"{}",TemplateReg{
                                     reg:&dest,
                                     value:Some(&format_args!(
-                                        "BigInt(d(({}n+{})&f).getUInt8(0,true))",
+                                        "BigInt(d(({}n+{})&f).getUint8(0,true))",
                                         offset.as_i64() as u64,
                                         TemplateReg{
                                             reg:&base,
@@ -223,7 +232,7 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                                 Inst::Lhu { offset, dest, base } => write!(f,"{}",TemplateReg{
                                     reg:&dest,
                                     value:Some(&format_args!(
-                                        "BigInt(d(({}n+{})&f).getUInt16(0,true))",
+                                        "BigInt(d(({}n+{})&f).getUint16(0,true))",
                                         offset.as_i64() as u64,
                                         TemplateReg{
                                             reg:&base,
@@ -245,7 +254,7 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                                 Inst::Lwu { offset, dest, base } => write!(f,"{}",TemplateReg{
                                     reg:&dest,
                                     value:Some(&format_args!(
-                                        "BigInt(d(({}n+{})&f).getUInt32(0,true))",
+                                        "BigInt(d(({}n+{})&f).getUint32(0,true))",
                                         offset.as_i64() as u64,
                                         TemplateReg{
                                             reg:&base,
@@ -256,7 +265,7 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                                 Inst::Ld { offset, dest, base } => write!(f,"{}",TemplateReg{
                                     reg:&dest,
                                     value:Some(&format_args!(
-                                        "d(({}n+{})&f).getBigUInt64(0,true)",
+                                        "d(({}n+{})&f).getBigUint64(0,true)",
                                         offset.as_i64() as u64,
                                         TemplateReg{
                                             reg:&base,
@@ -265,7 +274,7 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                                     ))
                                 }),
                                 Inst::Sb { offset, src, base } => write!(f,
-                                    "d({}n+{}).setUInt8(0,Number({}&g),true)",
+                                    "d({}n+{}).setUint8(0,Number({}&g),true)",
                                     offset.as_i64() as u64,
                                     TemplateReg{
                                         reg:&base,
@@ -277,7 +286,7 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                                     }
                                 ),
                                 Inst::Sh { offset, src, base } => write!(f,
-                                    "d({}n+{}).setUInt16(0,Number({}&g),true)",
+                                    "d({}n+{}).setUint16(0,Number({}&g),true)",
                                     offset.as_i64() as u64,
                                     TemplateReg{
                                         reg:&base,
@@ -289,7 +298,7 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                                     }
                                 ),
                                 Inst::Sw { offset, src, base } => write!(f,
-                                    "d({}n+{}).setUInt32(0,Number({}&g),true)",
+                                    "d({}n+{}).setUint32(0,Number({}&g),true)",
                                     offset.as_i64() as u64,
                                     TemplateReg{
                                         reg:&base,
@@ -301,7 +310,7 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                                     }
                                 ),
                                 Inst::Sd { offset, src, base } => write!(f,
-                                    "d({}n+{}).setBigUInt64(0,{},true)",
+                                    "d({}n+{}).setBigUint64(0,{},true)",
                                     offset.as_i64() as u64,
                                     TemplateReg{
                                         reg:&base,
@@ -314,11 +323,11 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                                 ),
                                 Inst::Fence{..} => Ok(()),
                                 Inst::Ecall => write!(f,"await $.ecall();"),
-                            op => write!(f,"throw $.d(`op:{op}`)"),
+                            op => write!(f,"throw new TypeError(`op:{op}`)"),
                         })?;
                         write!(
                             f,
-                            ";{};break;}}",
+                            ";{};",
                             Riscv(&TemplateJit {
                                 params: self.params,
                                 pc: next,
