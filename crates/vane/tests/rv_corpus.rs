@@ -1,6 +1,6 @@
 //! Test suite for RiscV test programs from rv-corpus repository
 //! 
-//! This test runner loads ELF binaries from the rv-corpus repository and
+//! This test runner loads ELF binaries from the rv-corpus git submodule and
 //! executes them using the vane emulator. The tests use wasm-bindgen-test
 //! to run in a browser environment.
 //!
@@ -8,7 +8,20 @@
 //! - Uses the `elf` crate for safe ELF parsing (no unsafe code)
 //! - Uses the safe `write_byte` interface from `Mem` for memory initialization
 //! - Leverages existing emulation code from vane/vane-jit (no reimplementation)
-//! - Tests RV64I and RV64IM instruction sets
+//! - Tests are generated using the `rv_test!` macro for easy addition
+//!
+//! ## Adding New Tests
+//! 
+//! To add a new test from the rv-corpus submodule, use the `rv_test!` macro:
+//! 
+//! ```rust
+//! rv_test!(
+//!     test_name,           // Test function name
+//!     "rv64i",             // ISA variant directory (rv32i, rv64i, rv32im, rv64im, etc.)
+//!     "01_basic_64bit",    // Test binary name (without path)
+//!     "Description of what this test covers"
+//! );
+//! ```
 #![cfg(target_arch = "wasm32")]
 
 extern crate wasm_bindgen_test;
@@ -89,63 +102,59 @@ fn create_reactor_with_binary(binary_data: &[u8]) -> Result<(Reactor, u64), Stri
     Ok((reactor, entry_point))
 }
 
-/// Test RV64I basic 64-bit operations
+/// Macro to easily create test cases from the rv-corpus submodule
 /// 
-/// This test loads and executes the rv64i/01_basic_64bit test from rv-corpus
-/// which tests 64-bit specific instructions including:
-/// - 64-bit register operations
-/// - Word operations (ADDIW, SLLIW, SRLIW, SRAIW, ADDW, SUBW, etc.)
-/// - 64-bit loads and stores (LD, SD, LWU)
-/// - Sign extension behavior in 64-bit mode
-#[wasm_bindgen_test]
-async fn test_rv64i_basic_64bit() {
-    let binary_data = include_bytes!("binaries/rv64i_01_basic_64bit");
-    
-    let (reactor, entry_point) = create_reactor_with_binary(binary_data)
-        .expect("Failed to load rv64i_01_basic_64bit binary");
-    
-    // Run the test starting from the entry point
-    let result = reactor.interp(entry_point).await;
-    
-    // Check that execution completes successfully
-    // The test binary should execute without errors
-    match result {
-        Ok(_) => {
-            // Test passed - execution completed successfully
+/// This macro generates a wasm-bindgen test function that loads and executes
+/// a binary from the rv-corpus submodule.
+/// 
+/// # Usage
+/// 
+/// ```rust
+/// rv_test!(
+///     test_function_name,
+///     "isa_variant",        // e.g., "rv64i", "rv32i", "rv64im"
+///     "binary_name",        // e.g., "01_basic_64bit"
+///     "Test description"
+/// );
+/// ```
+macro_rules! rv_test {
+    ($test_name:ident, $isa:expr, $binary:expr, $description:expr) => {
+        #[wasm_bindgen_test]
+        async fn $test_name() {
+            let binary_data = include_bytes!(concat!("rv-corpus/", $isa, "/", $binary));
+            
+            let (reactor, entry_point) = create_reactor_with_binary(binary_data)
+                .expect(&format!("Failed to load {}/{} binary", $isa, $binary));
+            
+            // Run the test starting from the entry point
+            let result = reactor.interp(entry_point).await;
+            
+            // Check that execution completes successfully
+            match result {
+                Ok(_) => {
+                    // Test passed
+                }
+                Err(e) => {
+                    let err_str = format!("{:?}", e);
+                    panic!("{} test failed: {}", $description, err_str);
+                }
+            }
         }
-        Err(e) => {
-            let err_str = format!("{:?}", e);
-            panic!("RV64I basic 64-bit test failed: {}", err_str);
-        }
-    }
+    };
 }
 
-/// Test RV64IM multiply/divide operations
-/// 
-/// This test loads and executes the rv64im/01_multiply_divide_64 test from rv-corpus
-/// which tests the M extension (multiplication and division) including:
-/// - 64-bit multiplication operations (MUL, MULH, MULHU, MULHSU)
-/// - 64-bit division operations (DIV, DIVU, REM, REMU)
-/// - Word operations (MULW, DIVW, DIVUW, REMW, REMUW)
-/// - Overflow and division by zero handling in 64-bit mode
-#[wasm_bindgen_test]
-async fn test_rv64im_multiply_divide() {
-    let binary_data = include_bytes!("binaries/rv64im_01_multiply_divide_64");
-    
-    let (reactor, entry_point) = create_reactor_with_binary(binary_data)
-        .expect("Failed to load rv64im_01_multiply_divide_64 binary");
-    
-    // Run the test starting from the entry point
-    let result = reactor.interp(entry_point).await;
-    
-    // Check that execution completes successfully
-    match result {
-        Ok(_) => {
-            // Test passed - multiply/divide operations work correctly
-        }
-        Err(e) => {
-            let err_str = format!("{:?}", e);
-            panic!("RV64IM multiply/divide test failed: {}", err_str);
-        }
-    }
-}
+// RV64I Tests
+rv_test!(
+    test_rv64i_basic_64bit,
+    "rv64i",
+    "01_basic_64bit",
+    "RV64I basic 64-bit operations: 64-bit register operations, word operations (ADDIW, SLLIW, SRLIW, SRAIW, ADDW, SUBW, etc.), 64-bit loads/stores (LD, SD, LWU), sign extension"
+);
+
+// RV64IM Tests
+rv_test!(
+    test_rv64im_multiply_divide,
+    "rv64im",
+    "01_multiply_divide_64",
+    "RV64IM multiply/divide: 64-bit multiplication (MUL, MULH, MULHU, MULHSU), division (DIV, DIVU, REM, REMU), word operations (MULW, DIVW, DIVUW, REMW, REMUW), overflow handling"
+);
