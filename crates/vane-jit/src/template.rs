@@ -19,6 +19,11 @@ pub struct TemplateJit<'a> {
     pub labels: &'a BTreeMap<u64, (&'a (dyn Display + 'a), u32)>,
     pub depth: u32,
 }
+pub trait TemplateJS{
+    type Ty<'a>: Display;
+    fn template_jit_js<'a>(j: &'a TemplateJit<'_>) -> Self::Ty<'a>;
+}
+
 struct TemplateReg<'a> {
     reg: &'a Reg,
     value: Option<&'a (dyn Display + 'a)>,

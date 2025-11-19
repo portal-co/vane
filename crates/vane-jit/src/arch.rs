@@ -1,4 +1,4 @@
-use crate::*;
+use crate::{template::TemplateJit, *};
 macro_rules! renders {
     ($($a:ident),*) => {
         $(paste::paste!{
