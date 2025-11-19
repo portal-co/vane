@@ -13,8 +13,8 @@ use std::{
     sync::Mutex,
     u64,
 };
-use vane_jit::template::Params;
 use vane_jit::template::TemplateJit;
+use vane_jit::template::{CoreJS, Params};
 use vane_jit::Heat;
 pub use vane_jit::Mem;
 use vane_jit::{arch::Riscv, JitCtx};
@@ -106,7 +106,7 @@ extern "C" {
     fn log_success() -> JsValue;
     fn has_success(a: JsValue) -> bool;
     #[wasm_bindgen(catch)]
-    async fn jit_run(a: JsValue) -> Result<JsValue,JsValue>;
+    async fn jit_run(a: JsValue) -> Result<JsValue, JsValue>;
     //   #[wasm_bindgen(thread_local_v2, js_name = "memory")]
     // static MEM_HANDLE: JsValue;
 }
@@ -536,21 +536,20 @@ impl Reactor {
     }
     #[wasm_bindgen(js_name = "j")]
     pub fn jit_code(&self, a: u64) -> String {
-        return format!(
-            "return async function(){{let f=$.f,g=0xffff_ffffn,s=(a=>BigInt.asIntN(64,a)),u=(a=>BigInt.asUintN(64,a)),d=(p=>{{p=$.get_page(p);return new DataView($._sys(`memory`).buffer,p);}});{}}}",
-            Riscv(&TemplateJit {
-                params: Params{
-                    react: self,
-                    trial: &|a|match tget(self.clone(), a) != JsValue::UNDEFINED{
-                        true => Heat::Cached,
-                        false => Heat::New,
-                    },
-                    root:a,
+        return CoreJS(&Riscv(&TemplateJit {
+            params: Params {
+                react: self,
+                trial: &|a| match tget(self.clone(), a) != JsValue::UNDEFINED {
+                    true => Heat::Cached,
+                    false => Heat::New,
                 },
-                pc: a,
-                labels: &BTreeMap::default(),depth:0,
-            })
-        );
+                root: a,
+            },
+            pc: a,
+            labels: &BTreeMap::default(),
+            depth: 0,
+        }))
+        .to_string();
     }
     #[wasm_bindgen(getter, js_name = "f")]
     pub fn u64_max(&self) -> u64 {

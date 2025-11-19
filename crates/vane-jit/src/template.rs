@@ -19,7 +19,7 @@ pub struct TemplateJit<'a> {
     pub labels: &'a BTreeMap<u64, (&'a (dyn Display + 'a), u32)>,
     pub depth: u32,
 }
-pub trait TemplateJS{
+pub trait TemplateJS {
     type Ty<'a>: Display;
     fn template_jit_js<'a>(&self, j: &'a TemplateJit<'_>) -> Self::Ty<'a>;
 }
@@ -48,7 +48,7 @@ pub mod riscv;
 impl<'b> TemplateJit<'b> {
     pub(crate) fn jit_wasm<'a>(
         &'a self,
-        go: impl FnOnce(&mut Vec<JitOpcode<'_>>,BTreeMap<u64, (&'_ (dyn Display + '_), u32)>,u32),
+        go: impl FnOnce(&mut Vec<JitOpcode<'_>>, BTreeMap<u64, (&'_ (dyn Display + '_), u32)>, u32),
     ) -> Box<dyn Iterator<Item = JitOpcode<'a>> + 'a> {
         let mut labels = self.labels.clone();
         match labels.entry(self.pc) {
@@ -57,7 +57,7 @@ impl<'b> TemplateJit<'b> {
                 vacant_entry.insert((&label_name, self.depth));
                 let nd = self.depth + 1;
                 let mut i: Vec<_> = Default::default();
-                go(&mut i,labels,nd);
+                go(&mut i, labels, nd);
                 Box::new(
                     [JitOpcode::Operator {
                         op: Operator::Loop {
@@ -82,7 +82,12 @@ impl<'b> TemplateJit<'b> {
     pub(crate) fn jit_js(
         &self,
         f: &mut Formatter,
-        render: impl FnOnce(&mut Formatter,&str,BTreeMap<u64, (&'_ (dyn Display + '_), u32)>,u32) -> core::fmt::Result,
+        render: impl FnOnce(
+            &mut Formatter,
+            &str,
+            BTreeMap<u64, (&'_ (dyn Display + '_), u32)>,
+            u32,
+        ) -> core::fmt::Result,
     ) -> core::fmt::Result {
         match (self.params.trial)(self.pc) {
             Heat::New => {}
@@ -98,12 +103,22 @@ impl<'b> TemplateJit<'b> {
                 vacant_entry.insert((&label_name, self.depth));
                 let nd = self.depth + 1;
                 write!(f, "{label_name}: for(;;){{")?;
-                render(f,&label_name,labels,nd)?;
+                render(f, &label_name, labels, nd)?;
                 write!(f, "break {label_name};}}",)
             }
             alloc::collections::btree_map::Entry::Occupied(occupied_entry) => {
                 write!(f, "continue {};", occupied_entry.get().0)
             }
         }
+    }
+}
+pub struct CoreJS<'a>(pub &'a (dyn Display + 'a));
+impl<'a> Display for CoreJS<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "return async function(){{let f=$.f,g=0xffff_ffffn,s=(a=>BigInt.asIntN(64,a)),u=(a=>BigInt.asUintN(64,a)),d=(p=>{{p=$.get_page(p);return new DataView($._sys(`memory`).buffer,p);}});{}}}",
+            &self.0
+        )
     }
 }
