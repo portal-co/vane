@@ -21,7 +21,7 @@ pub struct TemplateJit<'a> {
 }
 pub trait TemplateJS{
     type Ty<'a>: Display;
-    fn template_jit_js<'a>(j: &'a TemplateJit<'_>) -> Self::Ty<'a>;
+    fn template_jit_js<'a>(&self, j: &'a TemplateJit<'_>) -> Self::Ty<'a>;
 }
 
 struct TemplateReg<'a> {

@@ -8,7 +8,7 @@ pub struct TemplateRiscv;
 impl TemplateJS for TemplateRiscv {
     type Ty<'a> = Riscv<'a>;
 
-    fn template_jit_js<'a>(j: &'a TemplateJit<'_>) -> Self::Ty<'a> {
+    fn template_jit_js<'a>(&self, j: &'a TemplateJit<'_>) -> Self::Ty<'a> {
         Riscv(j)
     }
 }
@@ -29,6 +29,7 @@ impl<'a> TemplateJit<'a> {
         labels: BTreeMap<u64, (&(dyn Display + '_), u32)>,
         nd: u32,
         f: &mut Formatter,
+        target: Target,
     ) -> core::fmt::Result {
         macro_rules! ops {
                     ($a:expr => [$($arith:ident => $ap:literal $(i $ip:literal)? $(w $bp:literal)? $(iw $iwp:literal)?),*] [$($j:ident => $jp:literal),*] |$x:pat_param|$e:expr) => {
@@ -116,14 +117,14 @@ impl<'a> TemplateJit<'a> {
                                             value: None
                                         }
                                     ),
-                                    Target::template_jit_js(&TemplateJit{
+                                    target.template_jit_js(&TemplateJit{
                                      params:self.params,
                                         labels: &labels,
                                         pc: self.pc.wrapping_add_signed(offset.as_i64() * 2),
                                         depth:nd,
                                         // root:self.root,
                                     }),
-                                    Target::template_jit_js(&TemplateJit{
+                                    target.template_jit_js(&TemplateJit{
                                         params:self.params,
                                         labels: &labels,
                                         pc: next,
@@ -176,7 +177,7 @@ impl<'a> TemplateJit<'a> {
                     write!(f,"{};{};break;}}",TemplateReg{
                         reg: &dest,
                         value: Some(&format_args!("{}n",next))
-                    },Target::template_jit_js(&TemplateJit{
+                    },target.template_jit_js(&TemplateJit{
                         params:self.params,
                         labels: &labels,
                         pc: self.pc.wrapping_add_signed(offset.as_i64() * 2),
@@ -326,7 +327,7 @@ impl<'a> TemplateJit<'a> {
         write!(
             f,
             ";{};",
-            Target::template_jit_js(&TemplateJit {
+            target.template_jit_js(&TemplateJit {
                 params: self.params,
                 pc: next,
                 labels: &labels,
@@ -354,7 +355,7 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                         rv_asm::IsCompressed::Yes => 2,
                         rv_asm::IsCompressed::No => 4,
                     } + self.pc;
-                    self.rv_core_js::<TemplateRiscv>(a, next, labels, nd, f)?;
+                    self.rv_core_js(a, next, labels, nd, f,TemplateRiscv)?;
                     Ok(())
                 }
             }
