@@ -20,8 +20,8 @@ macro_rules! vane_meta {
         }
         struct $c {
             mem: Mem,
-            state: OnceCell<JsValue>,
-            regs: OnceCell<JsValue>,
+            state: OnceCell<$crate::wasm_bindgen::prelude::JsValue>,
+            regs: OnceCell<$crate::wasm_bindgen::prelude::JsValue>,
         }
 
         const _: () = {
@@ -81,22 +81,28 @@ macro_rules! vane_meta {
     "#,wasm_bindgen = $crate::wasm_bindgen)]
             extern "C" {
                 #[wasm_bindgen(js_name = "get$")]
-                fn get(a: $t, b: u64) -> JsValue;
-                fn tget(a: $t, b: u64) -> JsValue;
-                fn on() -> JsValue;
-                fn l(a: JsValue) -> Promise;
+                fn get(a: $t, b: u64) -> $crate::wasm_bindgen::prelude::JsValue;
+                fn tget(a: $t, b: u64) -> $crate::wasm_bindgen::prelude::JsValue;
+                fn on() -> $crate::wasm_bindgen::prelude::JsValue;
                 fn reg(a: $t, b: u8) -> u64;
                 fn set_reg(a: $t, b: u8, c: u64) -> u64;
-                fn get_memory(a: JsValue) -> JsValue;
+                fn get_memory(
+                    a: $crate::wasm_bindgen::prelude::JsValue,
+                ) -> $crate::wasm_bindgen::prelude::JsValue;
 
                 #[wasm_bindgen(catch)]
-                async fn jit_run(a: JsValue) -> Result<JsValue, JsValue>;
+                async fn jit_run(
+                    a: $crate::wasm_bindgen::prelude::JsValue,
+                ) -> Result<
+                    $crate::wasm_bindgen::prelude::JsValue,
+                    $crate::wasm_bindgen::prelude::JsValue,
+                >;
                 //   #[wasm_bindgen(thread_local_v2, js_name = "memory")]
-                // static MEM_HANDLE: JsValue;
+                // static MEM_HANDLE: $crate::wasm_bindgen::prelude::JsValue;
             }
             #[$crate::wasm_bindgen::prelude::wasm_bindgen(wasm_bindgen = $crate::wasm_bindgen)]
             extern "C" {
-                fn eval(a: &str) -> JsValue;
+                fn eval(a: &str) -> $crate::wasm_bindgen::prelude::JsValue;
             }
             impl $t {
                 fn reg(self, b: u8) -> u64 {
@@ -109,20 +115,20 @@ macro_rules! vane_meta {
             #[$crate::wasm_bindgen::prelude::wasm_bindgen(wasm_bindgen = $crate::wasm_bindgen)]
             impl $t {
                 #[wasm_bindgen(getter, js_name = "p",wasm_bindgen = $crate::wasm_bindgen)]
-                pub fn state(&self) -> JsValue {
+                pub fn state(&self) -> $crate::wasm_bindgen::prelude::JsValue {
                     let mut lock = self.core.lock().unwrap();
                     return lock.state.get_or_init(|| on()).clone();
                 }
                 #[wasm_bindgen(getter, js_name = "r",wasm_bindgen = $crate::wasm_bindgen)]
-                pub fn regs(&self) -> JsValue {
+                pub fn regs(&self) -> $crate::wasm_bindgen::prelude::JsValue {
                     let mut lock = self.core.lock().unwrap();
                     return lock.regs.get_or_init(|| on()).clone();
                 }
                 #[wasm_bindgen(wasm_bindgen = $crate::wasm_bindgen)]
-                pub fn _sys(&self, a: &str) -> JsValue {
+                pub fn _sys(&self, a: &str) -> $crate::wasm_bindgen::prelude::JsValue {
                     match a {
                         "memory" => get_memory(eval("wasm")),
-                        _ => JsValue::undefined(),
+                        _ => $crate::wasm_bindgen::prelude::JsValue::undefined(),
                     }
                 }
                 #[wasm_bindgen(wasm_bindgen = $crate::wasm_bindgen)]
@@ -133,11 +139,17 @@ macro_rules! vane_meta {
                     }
                 }
                 #[wasm_bindgen(js_name = "J",wasm_bindgen = $crate::wasm_bindgen)]
-                pub fn jit(&self, a: u64) -> JsValue {
+                pub fn jit(&self, a: u64) -> $crate::wasm_bindgen::prelude::JsValue {
                     return get(self.clone(), a);
                 }
                 #[wasm_bindgen]
-                pub async fn jit_run(&self, mut pc: u64) -> Result<JsValue, JsValue> {
+                pub async fn jit_run(
+                    &self,
+                    mut pc: u64,
+                ) -> Result<
+                    $crate::wasm_bindgen::prelude::JsValue,
+                    $crate::wasm_bindgen::prelude::JsValue,
+                > {
                     let j = self.jit(pc);
                     return jit_run(j).await;
                 }
@@ -147,7 +159,9 @@ macro_rules! vane_meta {
                         &$crate::vane_jit::template::TemplateJit {
                             params: Params {
                                 react: self,
-                                trial: &|a| match tget(self.clone(), a) != JsValue::UNDEFINED {
+                                trial: &|a| match tget(self.clone(), a)
+                                    != $crate::wasm_bindgen::prelude::JsValue::UNDEFINED
+                                {
                                     true => $crate::vane_jit::Heat::Cached,
                                     false => $crate::vane_jit::Heat::New,
                                 },
