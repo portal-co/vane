@@ -9,7 +9,7 @@ macro_rules! vane_meta {
             _handle: (),
             core: Rc<Mutex<$c>>,
         }
-        impl JitCtx for Reactor {
+        impl $crate::vane_jit::JitCtx for Reactor {
             fn bytes(&self, a: u64) -> Box<dyn Iterator<Item = u8> + '_> {
                 Box::new((a..).filter_map(move |a| {
                     let mut lock = self.core.lock().unwrap();
@@ -143,19 +143,21 @@ macro_rules! vane_meta {
                 }
                 #[wasm_bindgen(js_name = "j",wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn jit_code(&self, a: u64) -> String {
-                    return CoreJS(&$y(&TemplateJit {
-                        params: Params {
-                            react: self,
-                            trial: &|a| match tget(self.clone(), a) != JsValue::UNDEFINED {
-                                true => Heat::Cached,
-                                false => Heat::New,
+                    return $crate::vane_jit::template::CoreJS(&$y(
+                        &$crate::vane_jit::template::TemplateJit {
+                            params: Params {
+                                react: self,
+                                trial: &|a| match tget(self.clone(), a) != JsValue::UNDEFINED {
+                                    true => $crate::vane_jit::Heat::Cached,
+                                    false => $crate::vane_jit::Heat::New,
+                                },
+                                root: a,
                             },
-                            root: a,
+                            pc: a,
+                            labels: &BTreeMap::default(),
+                            depth: 0,
                         },
-                        pc: a,
-                        labels: &BTreeMap::default(),
-                        depth: 0,
-                    }))
+                    ))
                     .to_string();
                 }
                 #[wasm_bindgen(getter, js_name = "f",wasm_bindgen = $crate::wasm_bindgen)]
