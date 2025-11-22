@@ -156,6 +156,7 @@ dependencies = [
  "paste",
  "rv-asm",
  "vane-jit",
+ "vane-meta-gen",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
@@ -168,6 +169,14 @@ dependencies = [
  "paste",
  "rv-asm",
  "wasmparser",
+]
+
+[[package]]
+name = "vane-meta-gen"
+version = "0.1.0"
+dependencies = [
+ "vane-jit",
+ "wasm-bindgen",
 ]
 
 [[package]]

@@ -1,0 +1,10 @@
+[package]
+name = "vane-meta-gen"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+description.workspace = true
+
+[dependencies]
+wasm-bindgen.workspace = true
+vane-jit = {path="../vane-jit",version = "^0.1.0"}
