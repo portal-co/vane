@@ -24,13 +24,14 @@ pub trait TemplateJS {
     fn template_jit_js<'a>(&self, j: &'a TemplateJit<'_>) -> Self::Ty<'a>;
 }
 
-struct TemplateReg<'a> {
+struct TemplateReg<'a, const N: usize = 32> {
     reg: &'a Reg,
     value: Option<&'a (dyn Display + 'a)>,
+    n: [(); N],
 }
-impl<'a> Display for TemplateReg<'a> {
+impl<'a, const N: usize> Display for TemplateReg<'a, N> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let r = self.reg.0 % 32;
+        let r = self.reg.0 & ((N - 1) & 0xff) as u8;
         if r != 0 {
             match self.value.as_deref() {
                 None => write!(f, "(($._r??=$.r)[`x{r}`]??=0n)"),

@@ -39,15 +39,15 @@ impl<'a> TemplateJit<'a> {
                                 Inst::$arith { dest, src1, src2 } => write!(
                                     f,
                                     "{}",
-                                    TemplateReg {
+                                  TemplateReg { n: [(); 32],
                                         reg: &dest,
                                         value: Some(&format_args!(
                                             $ap,
-                                            TemplateReg {
+                                          TemplateReg { n: [(); 32],
                                                 reg: &src1,
                                                 value: None
                                             },
-                                            TemplateReg {
+                                          TemplateReg { n: [(); 32],
                                                 reg: &src2,
                                                 value: None
                                             }
@@ -57,11 +57,11 @@ impl<'a> TemplateJit<'a> {
                                 $(Inst::[<$arith i>] { imm, dest, src1 } => match $ip{_=>write!(
                                     f,
                                     "{}",
-                                    TemplateReg {
+                                  TemplateReg { n: [(); 32],
                                         reg: &dest,
                                         value: Some(&format_args!(
                                             $ap,
-                                            TemplateReg {
+                                          TemplateReg { n: [(); 32],
                                                 reg: &src1,
                                                 value: None
                                             },
@@ -72,15 +72,15 @@ impl<'a> TemplateJit<'a> {
                                 $(Inst::[<$arith W>] { dest, src1, src2 } => write!(
                                     f,
                                     "{}",
-                                    TemplateReg {
+                                  TemplateReg { n: [(); 32],
                                         reg: &dest,
                                         value: Some(&format_args!(
                                             $bp,
-                                            TemplateReg {
+                                          TemplateReg { n: [(); 32],
                                                 reg: &src1,
                                                 value: None
                                             },
-                                            TemplateReg {
+                                          TemplateReg { n: [(); 32],
                                                 reg: &src2,
                                                 value: None
                                             }
@@ -91,11 +91,11 @@ impl<'a> TemplateJit<'a> {
                                 $(Inst::[<$arith iW>] { imm, dest, src1 } => write!(
                                     f,
                                     "{}",
-                                    TemplateReg {
+                                  TemplateReg { n: [(); 32],
                                         reg: &dest,
                                         value: Some(&format_args!(
                                             $iwp,
-                                            TemplateReg {
+                                          TemplateReg { n: [(); 32],
                                                 reg: &src1,
                                                 value: None
                                             },
@@ -108,11 +108,11 @@ impl<'a> TemplateJit<'a> {
                                  write!(f,"if({}){{{}}}else{{{}}};",
                                     &format_args!(
                                         $jp,
-                                        TemplateReg {
+                                      TemplateReg { n: [(); 32],
                                             reg: &src1,
                                             value: None
                                         },
-                                        TemplateReg {
+                                      TemplateReg { n: [(); 32],
                                             reg: &src2,
                                             value: None
                                         }
@@ -168,13 +168,13 @@ impl<'a> TemplateJit<'a> {
                 Bge => "s({})>=s({})"
             ] |a|match a{
                 Inst::Lui { uimm, dest } => {
-                    write!(f,"{}",TemplateReg{reg:&dest,value:Some(&format_args!("{}n",uimm.as_u64()))})
+                    write!(f,"{}",TemplateReg { n: [(); 32],reg:&dest,value:Some(&format_args!("{}n",uimm.as_u64()))})
                 }
                  Inst::Auipc { uimm, dest } => {
-                    write!(f,"{}",TemplateReg{reg:&dest,value:Some(&format_args!("{}n",uimm.as_u64().wrapping_add(self.pc)))})
+                    write!(f,"{}",TemplateReg { n: [(); 32],reg:&dest,value:Some(&format_args!("{}n",uimm.as_u64().wrapping_add(self.pc)))})
                 }
                 Inst::Jal { offset, dest } => {
-                    write!(f,"{};{};break;}}",TemplateReg{
+                    write!(f,"{};{};break;}}",TemplateReg { n: [(); 32],
                         reg: &dest,
                         value: Some(&format_args!("{}n",next))
                     },target.template_jit_js(&TemplateJit{
@@ -186,87 +186,87 @@ impl<'a> TemplateJit<'a> {
                     return Ok(());
                 }
                 Inst::Jalr { offset,base, dest } => {
-                    write!(f,"{};return ()=>J({});}}",TemplateReg{
+                    write!(f,"{};return ()=>J({});}}",TemplateReg { n: [(); 32],
                         reg: &dest,
                         value: Some(&format_args!("{}n",next))
-                    },&format_args!("({}+{})&f",(offset.as_i64() * 2) as u64,TemplateReg{
+                    },&format_args!("({}+{})&f",(offset.as_i64() * 2) as u64,TemplateReg { n: [(); 32],
                         reg: &base,
                         value: None
                     }))?;
                     return Ok(());
                 }
-                Inst::Lb { offset, dest, base } => write!(f,"{}",TemplateReg{
+                Inst::Lb { offset, dest, base } => write!(f,"{}",TemplateReg { n: [(); 32],
                     reg:&dest,
                     value:Some(&format_args!(
                         "u(BigInt(d(({}n+{})&f).getInt8(0,true)))",
                         offset.as_i64() as u64,
-                        TemplateReg{
+                      TemplateReg { n: [(); 32],
                             reg:&base,
                             value:None
                         }
                     ))
                 }),
-                Inst::Lbu { offset, dest, base } => write!(f,"{}",TemplateReg{
+                Inst::Lbu { offset, dest, base } => write!(f,"{}",TemplateReg { n: [(); 32],
                     reg:&dest,
                     value:Some(&format_args!(
                         "BigInt(d(({}n+{})&f).getUint8(0,true))",
                         offset.as_i64() as u64,
-                        TemplateReg{
+                      TemplateReg { n: [(); 32],
                             reg:&base,
                             value:None
                         }
                     ))
                 }),
-                Inst::Lh { offset, dest, base } => write!(f,"{}",TemplateReg{
+                Inst::Lh { offset, dest, base } => write!(f,"{}",TemplateReg { n: [(); 32],
                     reg:&dest,
                     value:Some(&format_args!(
                         "u(BigInt(d(({}n+{})&f).getInt16(0,true)))",
                         offset.as_i64() as u64,
-                        TemplateReg{
+                      TemplateReg { n: [(); 32],
                             reg:&base,
                             value:None
                         }
                     ))
                 }),
-                Inst::Lhu { offset, dest, base } => write!(f,"{}",TemplateReg{
+                Inst::Lhu { offset, dest, base } => write!(f,"{}",TemplateReg { n: [(); 32],
                     reg:&dest,
                     value:Some(&format_args!(
                         "BigInt(d(({}n+{})&f).getUint16(0,true))",
                         offset.as_i64() as u64,
-                        TemplateReg{
+                      TemplateReg { n: [(); 32],
                             reg:&base,
                             value:None
                         }
                     ))
                 }),
-                Inst::Lw { offset, dest, base } => write!(f,"{}",TemplateReg{
+                Inst::Lw { offset, dest, base } => write!(f,"{}",TemplateReg { n: [(); 32],
                     reg:&dest,
                     value:Some(&format_args!(
                         "u(BigInt(d(({}n+{})&f).getInt32(0,true)))",
                         offset.as_i64() as u64,
-                        TemplateReg{
+                      TemplateReg { n: [(); 32],
                             reg:&base,
                             value:None
                         }
                     ))
                 }),
-                Inst::Lwu { offset, dest, base } => write!(f,"{}",TemplateReg{
+                Inst::Lwu { offset, dest, base } => write!(f,"{}",TemplateReg { n: [(); 32],
                     reg:&dest,
                     value:Some(&format_args!(
                         "BigInt(d(({}n+{})&f).getUint32(0,true))",
                         offset.as_i64() as u64,
-                        TemplateReg{
+                      TemplateReg { n: [(); 32],
                             reg:&base,
                             value:None
                         }
                     ))
                 }),
-                Inst::Ld { offset, dest, base } => write!(f,"{}",TemplateReg{
+                Inst::Ld { offset, dest, base } => write!(f,"{}",TemplateReg { n: [(); 32],
                     reg:&dest,
                     value:Some(&format_args!(
                         "d(({}n+{})&f).getBigUint64(0,true)",
                         offset.as_i64() as u64,
-                        TemplateReg{
+                      TemplateReg { n: [(); 32],
                             reg:&base,
                             value:None
                         }
@@ -275,11 +275,11 @@ impl<'a> TemplateJit<'a> {
                 Inst::Sb { offset, src, base } => write!(f,
                     "d({}n+{}).setUint8(0,Number({}&g),true)",
                     offset.as_i64() as u64,
-                    TemplateReg{
+                  TemplateReg { n: [(); 32],
                         reg:&base,
                         value:None
                     },
-                    TemplateReg{
+                  TemplateReg { n: [(); 32],
                         reg:&src,
                         value:None
                     }
@@ -287,11 +287,11 @@ impl<'a> TemplateJit<'a> {
                 Inst::Sh { offset, src, base } => write!(f,
                     "d({}n+{}).setUint16(0,Number({}&g),true)",
                     offset.as_i64() as u64,
-                    TemplateReg{
+                  TemplateReg { n: [(); 32],
                         reg:&base,
                         value:None
                     },
-                    TemplateReg{
+                  TemplateReg { n: [(); 32],
                         reg:&src,
                         value:None
                     }
@@ -299,11 +299,11 @@ impl<'a> TemplateJit<'a> {
                 Inst::Sw { offset, src, base } => write!(f,
                     "d({}n+{}).setUint32(0,Number({}&g),true)",
                     offset.as_i64() as u64,
-                    TemplateReg{
+                  TemplateReg { n: [(); 32],
                         reg:&base,
                         value:None
                     },
-                    TemplateReg{
+                  TemplateReg { n: [(); 32],
                         reg:&src,
                         value:None
                     }
@@ -311,11 +311,11 @@ impl<'a> TemplateJit<'a> {
                 Inst::Sd { offset, src, base } => write!(f,
                     "d({}n+{}).setBigUint64(0,{},true)",
                     offset.as_i64() as u64,
-                    TemplateReg{
+                  TemplateReg { n: [(); 32],
                         reg:&base,
                         value:None
                     },
-                    TemplateReg{
+                  TemplateReg { n: [(); 32],
                         reg:&src,
                         value:None
                     }
