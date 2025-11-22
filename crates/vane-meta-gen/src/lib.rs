@@ -1,5 +1,11 @@
+#![no_std]
+#[doc(hidden)]
+pub use core;
+#[doc(hidden)]
+pub extern crate alloc;
 pub use vane_jit;
 pub use wasm_bindgen;
+pub use spin;
 #[macro_export]
 macro_rules! vane_meta {
     ($t:ident, $c:ident, $y:expr) => {
@@ -7,21 +13,21 @@ macro_rules! vane_meta {
         #[derive(Clone)]
         pub struct $t {
             _handle: (),
-            core: Rc<Mutex<$c>>,
+            core: $crate::alloc::rc::Rc<$crate::spin::Mutex<$c>>,
         }
         impl $crate::vane_jit::JitCtx for Reactor {
-            fn bytes(&self, a: u64) -> Box<dyn Iterator<Item = u8> + '_> {
-                Box::new((a..).filter_map(move |a| {
-                    let mut lock = self.core.lock().unwrap();
+            fn bytes(&self, a: u64) -> $crate::alloc::boxed::Box<dyn Iterator<Item = u8> + '_> {
+                $crate::alloc::boxed::Box::new((a..).filter_map(move |a| {
+                    let mut lock = self.core.lock();
                     let n = lock.mem.bytes(a).next()?;
                     Some(n)
                 }))
             }
         }
         struct $c {
-            mem: Mem,
-            state: OnceCell<$crate::wasm_bindgen::prelude::JsValue>,
-            regs: OnceCell<$crate::wasm_bindgen::prelude::JsValue>,
+            mem: $crate::vane_jit::Mem,
+            state: $crate::core::cell::OnceCell<$crate::wasm_bindgen::prelude::JsValue>,
+            regs: $crate::core::cell::OnceCell<$crate::wasm_bindgen::prelude::JsValue>,
         }
 
         const _: () = {
@@ -116,12 +122,12 @@ macro_rules! vane_meta {
             impl $t {
                 #[wasm_bindgen(getter, js_name = "p",wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn state(&self) -> $crate::wasm_bindgen::prelude::JsValue {
-                    let mut lock = self.core.lock().unwrap();
+                    let mut lock = self.core.lock();
                     return lock.state.get_or_init(|| on()).clone();
                 }
                 #[wasm_bindgen(getter, js_name = "r",wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn regs(&self) -> $crate::wasm_bindgen::prelude::JsValue {
-                    let mut lock = self.core.lock().unwrap();
+                    let mut lock = self.core.lock();
                     return lock.regs.get_or_init(|| on()).clone();
                 }
                 #[wasm_bindgen(wasm_bindgen = $crate::wasm_bindgen)]
@@ -133,7 +139,7 @@ macro_rules! vane_meta {
                 }
                 #[wasm_bindgen(wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn get_page(&self, a: u64) -> *mut u8 {
-                    let mut lock = self.core.lock().unwrap();
+                    let mut lock = self.core.lock();
                     match &mut lock.mem {
                         m => m.get_page(a),
                     }

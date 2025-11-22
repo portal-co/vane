@@ -45,7 +45,7 @@ impl Reactor {
     pub fn new_with_mem(mem: vane_jit::Mem) -> Self {
         Reactor {
             _handle: (),
-            core: Rc::new(Mutex::new(Core {
+            core: Rc::new(spin::Mutex::new(Core {
                 mem,
                 state: OnceCell::new(),
                 regs: OnceCell::new(),

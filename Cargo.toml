@@ -54,6 +54,8 @@ portal-solutions-swibb = "^0.2.6"
 rv-asm = "0.2.1"
 
 wasm-bindgen = "0.2.100"
+spin = "0.10.0"
+
 
 [profile.release]
 # Tell `rustc` to optimize for small code size.

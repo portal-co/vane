@@ -4,7 +4,10 @@ use alloc::{boxed::Box, collections::btree_map::BTreeMap};
 use core::fmt::Formatter;
 use core::{cell::UnsafeCell, fmt::Display};
 use rv_asm::{Inst, Reg, Xlen};
-extern crate alloc;
+#[doc(hidden)]
+pub use core;
+#[doc(hidden)]
+pub extern crate alloc;
 #[derive(Default)]
 pub struct Mem {
     pub pages: BTreeMap<u64, Box<[u8; 65536]>>,
