@@ -26,7 +26,9 @@ pub struct TemplateJit<'a> {
 }
 pub trait TemplateJS {
     type Ty<'a>: Display;
+    type Wasm<'a>: WasmJit;
     fn template_jit_js<'a>(&self, j: &'a TemplateJit<'_>) -> Self::Ty<'a>;
+     fn template_jit_wasm<'a>(&self, j: &'a TemplateJit<'_>) -> Self::Wasm<'a>;
 }
 
 struct TemplateReg<'a, const N: usize = 32> {

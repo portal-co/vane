@@ -1,17 +1,10 @@
 use alloc::vec::Vec;
 use wasmparser::Operator;
 
-use crate::arch::RiscvWasmJit;
+use crate::arch::{RiscvWasmJit, TemplateRiscv};
 
 use super::*;
-pub struct TemplateRiscv;
-impl TemplateJS for TemplateRiscv {
-    type Ty<'a> = Riscv<'a>;
 
-    fn template_jit_js<'a>(&self, j: &'a TemplateJit<'_>) -> Self::Ty<'a> {
-        Riscv(j)
-    }
-}
 impl<'b> RiscvWasmJit for TemplateJit<'b> {
     fn Riscv<'a>(&'a self) -> Box<dyn Iterator<Item = JitOpcode<'a>> + 'a> {
         self.jit_wasm(|v, labels, nd| {
