@@ -13,7 +13,7 @@ use std::{
     sync::Mutex,
     u64,
 };
-use vane_jit::template::TemplateJit;
+use vane_jit::{flate::ReleaseFlate, template::TemplateJit};
 use vane_jit::template::{CoreJS, Params};
 use vane_jit::Heat;
 pub use vane_jit::Mem;
@@ -23,7 +23,7 @@ use wasm_bindgen::prelude::*;
 #[cfg(test)]
 #[path = "../_tests/rv_corpus.rs"]
 mod _tests;
-vane_meta_gen::vane_meta!(Reactor, Core, Riscv);
+vane_meta_gen::vane_meta!(Reactor, Core, Riscv, ReleaseFlate{});
 
 #[wasm_bindgen(inline_js = r#"
             export function log_success(){

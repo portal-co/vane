@@ -8,6 +8,7 @@ use rv_asm::{Inst, Reg, Xlen};
 pub use core;
 #[doc(hidden)]
 pub extern crate alloc;
+pub mod flate;
 #[derive(Default)]
 pub struct Mem {
     pub pages: BTreeMap<u64, Box<[u8; 65536]>>,

@@ -5,14 +5,17 @@ use wasmparser::Operator;
 
 use crate::{
     arch::{Riscv, RiscvDisplay},
+    flate::Flate,
     *,
 };
 #[derive(Clone, Default)]
 pub struct Labels<'a>(pub BTreeMap<u64, (&'a (dyn Display + 'a), u32)>);
+
 #[derive(Clone, Copy)]
 pub struct Params<'a> {
     pub react: &'a (dyn JitCtx + 'a),
     pub trial: &'a (dyn Fn(u64) -> Heat + 'a),
+    pub flate: &'a (dyn Flate + 'a),
     pub root: u64,
 }
 pub struct TemplateJit<'a> {
@@ -30,6 +33,7 @@ struct TemplateReg<'a, const N: usize = 32> {
     reg: &'a Reg,
     value: Option<&'a (dyn Display + 'a)>,
     n: [(); N],
+    flate: &'a (dyn Flate + 'a),
 }
 impl<'a, const N: usize> Display for TemplateReg<'a, N> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -110,12 +114,17 @@ impl<'b> TemplateJit<'b> {
         }
     }
 }
-pub struct CoreJS<'a>(pub &'a (dyn Display + 'a));
+pub struct CoreJS<'a>(pub &'a (dyn Display + 'a), pub &'a (dyn Flate + 'a));
 impl<'a> Display for CoreJS<'a> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+    fn fmt(&self, fmt: &mut Formatter<'_>) -> core::fmt::Result {
+        let f = self.1.flate("max64");
+        let g = self.1.flate("max32");
+        let s = self.1.flate("signed");
+        let u = self.1.flate("unsigned");
+        let d = self.1.flate("data");
         write!(
-            f,
-            "return async function(){{let f=$.f,g=0xffff_ffffn,s=(a=>BigInt.asIntN(64,a)),u=(a=>BigInt.asUintN(64,a)),d=(p=>{{p=$.get_page(p);return new DataView($._sys(`memory`).buffer,p);}});{}}}",
+            fmt,
+            "return async function(){{let {f}=$.f,{g}=0xffff_ffffn,{s}=(a=>BigInt.asIntN(64,a)),{u}=(a=>BigInt.asUintN(64,a)),{d}=(p=>{{p=$.get_page(p);return new DataView($._sys(`memory`).buffer,p);}});{}}}",
             &self.0
         )
     }

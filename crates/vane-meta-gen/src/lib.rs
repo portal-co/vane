@@ -3,12 +3,12 @@
 pub use core;
 #[doc(hidden)]
 pub extern crate alloc;
+pub use spin;
 pub use vane_jit;
 pub use wasm_bindgen;
-pub use spin;
 #[macro_export]
 macro_rules! vane_meta {
-    ($t:ident, $c:ident, $y:expr) => {
+    ($t:ident, $c:ident, $y:expr, $flate:expr) => {
         #[$crate::wasm_bindgen::prelude::wasm_bindgen(wasm_bindgen = $crate::wasm_bindgen)]
         #[derive(Clone)]
         pub struct $t {
@@ -161,7 +161,8 @@ macro_rules! vane_meta {
                 }
                 #[wasm_bindgen(js_name = "j",wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn jit_code(&self, a: u64) -> String {
-                    return $crate::vane_jit::template::CoreJS(&$y(
+                    let f = $flate;
+                    return ($crate::vane_jit::template::CoreJS(&$y(
                         &$crate::vane_jit::template::TemplateJit {
                             params: Params {
                                 react: self,
@@ -172,13 +173,14 @@ macro_rules! vane_meta {
                                     false => $crate::vane_jit::Heat::New,
                                 },
                                 root: a,
+                                flate: &f,
                             },
                             pc: a,
                             labels: &$crate::vane_jit::template::Labels::default(),
                             depth: 0,
                         },
-                    ))
-                    .to_string();
+                    ),&f)
+                    .to_string());
                 }
                 #[wasm_bindgen(getter, js_name = "f",wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn u64_max(&self) -> u64 {
