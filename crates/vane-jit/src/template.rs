@@ -7,6 +7,8 @@ use crate::{
     arch::{Riscv, RiscvDisplay},
     *,
 };
+#[derive(Clone, Default)]
+pub struct Labels<'a>(pub BTreeMap<u64, (&'a (dyn Display + 'a), u32)>);
 #[derive(Clone, Copy)]
 pub struct Params<'a> {
     pub react: &'a (dyn JitCtx + 'a),
@@ -16,7 +18,7 @@ pub struct Params<'a> {
 pub struct TemplateJit<'a> {
     pub params: Params<'a>,
     pub pc: u64,
-    pub labels: &'a BTreeMap<u64, (&'a (dyn Display + 'a), u32)>,
+    pub labels: &'a Labels<'a>,
     pub depth: u32,
 }
 pub trait TemplateJS {
@@ -49,10 +51,10 @@ pub mod riscv;
 impl<'b> TemplateJit<'b> {
     pub(crate) fn jit_wasm<'a>(
         &'a self,
-        go: impl FnOnce(&mut Vec<JitOpcode<'_>>, BTreeMap<u64, (&'_ (dyn Display + '_), u32)>, u32),
+        go: impl FnOnce(&mut Vec<JitOpcode<'_>>, Labels<'_>, u32),
     ) -> Box<dyn Iterator<Item = JitOpcode<'a>> + 'a> {
         let mut labels = self.labels.clone();
-        match labels.entry(self.pc) {
+        match labels.0.entry(self.pc) {
             alloc::collections::btree_map::Entry::Vacant(vacant_entry) => {
                 let label_name = format!("x{}", self.pc);
                 vacant_entry.insert((&label_name, self.depth));
@@ -83,12 +85,7 @@ impl<'b> TemplateJit<'b> {
     pub(crate) fn jit_js(
         &self,
         f: &mut Formatter,
-        render: impl FnOnce(
-            &mut Formatter,
-            &str,
-            BTreeMap<u64, (&'_ (dyn Display + '_), u32)>,
-            u32,
-        ) -> core::fmt::Result,
+        render: impl FnOnce(&mut Formatter, &str, Labels<'_>, u32) -> core::fmt::Result,
     ) -> core::fmt::Result {
         match (self.params.trial)(self.pc) {
             Heat::New => {}
@@ -98,7 +95,7 @@ impl<'b> TemplateJit<'b> {
         }
 
         let mut labels = self.labels.clone();
-        match labels.entry(self.pc) {
+        match labels.0.entry(self.pc) {
             alloc::collections::btree_map::Entry::Vacant(vacant_entry) => {
                 let label_name = format!("x{}", self.pc);
                 vacant_entry.insert((&label_name, self.depth));

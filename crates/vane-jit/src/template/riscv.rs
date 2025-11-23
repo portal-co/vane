@@ -26,7 +26,7 @@ impl<'a> TemplateJit<'a> {
         &self,
         a: Inst,
         next: u64,
-        labels: BTreeMap<u64, (&(dyn Display + '_), u32)>,
+        labels: Labels<'_>,
         nd: u32,
         f: &mut Formatter,
         target: Target,

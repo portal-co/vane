@@ -174,7 +174,7 @@ macro_rules! vane_meta {
                                 root: a,
                             },
                             pc: a,
-                            labels: &BTreeMap::default(),
+                            labels: &$crate::vane_jit::template::Labels::default(),
                             depth: 0,
                         },
                     ))
