@@ -7,6 +7,8 @@ use rv_asm::{Inst, Reg, Xlen};
 #[doc(hidden)]
 pub use core;
 #[doc(hidden)]
+pub use paste;
+#[doc(hidden)]
 pub extern crate alloc;
 pub mod flate;
 #[derive(Default)]
@@ -57,6 +59,9 @@ impl JitCtx for Mem {
         }))
     }
 }
+pub trait WasmJitCtx{
+
+}
 #[derive(Clone)]
 pub enum JitOpcode<'a> {
     Operator{
@@ -64,7 +69,7 @@ pub enum JitOpcode<'a> {
     }
 }
 pub trait WasmJit {
-    fn jit<'a>(&'a self) -> Box<dyn Iterator<Item = JitOpcode<'a>> + 'a>;
+    fn jit<'a>(&'a self, ctx: &'a (dyn WasmJitCtx + 'a)) -> Box<dyn Iterator<Item = JitOpcode<'a>> + 'a>;
 }
 pub mod arch;
 pub mod template;

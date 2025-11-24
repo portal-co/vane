@@ -2,12 +2,12 @@ use crate::{template::TemplateJit, *};
 #[macro_export]
 macro_rules! renders {
     ($($a:ident),*) => {
-        $(paste::paste!{
+        $($crate::paste::paste!{
             pub trait [<$a Display>]{
                 fn $a(&self, f: &mut $crate::core::fmt::Formatter) -> $crate::core::fmt::Result;
             }
             pub trait [<$a WasmJit>]{
-                fn $a<'a>(&'a self) -> $crate::alloc::boxed::Box<dyn $crate::core::iter::Iterator<Item = $crate::JitOpcode<'a>> + 'a>;
+                fn $a<'a>(&'a self, ctx: &'a (dyn $crate::WasmJitCtx + 'a)) -> $crate::alloc::boxed::Box<dyn $crate::core::iter::Iterator<Item = $crate::JitOpcode<'a>> + 'a>;
             }
             pub struct [<Template $a>];
             #[derive(Clone, Copy)]
@@ -24,13 +24,13 @@ macro_rules! renders {
                     }
                 }
                 impl<'b,T: [<$a WasmJit>] + ?Sized> [<$a WasmJit>] for &'b T{
-                    fn $a<'a>(&'a self) -> $crate::alloc::boxed::Box<dyn $crate::core::iter::Iterator<Item = $crate::JitOpcode<'a>> + 'a>{
-                        (&**self).$a()
+                    fn $a<'a>(&'a self, ctx: &'a (dyn $crate::WasmJitCtx + 'a)) -> $crate::alloc::boxed::Box<dyn $crate::core::iter::Iterator<Item = $crate::JitOpcode<'a>> + 'a>{
+                        (&**self).$a(ctx)
                     }
                 }
                 impl<T: [<$a WasmJit>] + ?Sized> $crate::WasmJit for $a<'_,T>{
-                    fn jit<'a>(&'a self) -> $crate::alloc::boxed::Box<dyn $crate::core::iter::Iterator<Item = $crate::JitOpcode<'a>> + 'a>{
-                        self.0.$a()
+                    fn jit<'a>(&'a self, ctx: &'a (dyn $crate::WasmJitCtx + 'a)) -> $crate::alloc::boxed::Box<dyn $crate::core::iter::Iterator<Item = $crate::JitOpcode<'a>> + 'a>{
+                        self.0.$a(ctx)
                     }
                 }
                 impl $crate::template::TemplateJS for [<Template $a>]{
