@@ -28,7 +28,7 @@ pub trait TemplateJS {
     type Ty<'a>: Display;
     type Wasm<'a>: WasmJit;
     fn template_jit_js<'a>(&self, j: &'a TemplateJit<'_>) -> Self::Ty<'a>;
-     fn template_jit_wasm<'a>(&self, j: &'a TemplateJit<'_>) -> Self::Wasm<'a>;
+    fn template_jit_wasm<'a>(&self, j: &'a TemplateJit<'_>) -> Self::Wasm<'a>;
 }
 
 struct TemplateReg<'a, const N: usize = 32> {
@@ -119,14 +119,14 @@ impl<'b> TemplateJit<'b> {
 pub struct CoreJS<'a>(pub &'a (dyn Display + 'a), pub &'a (dyn Flate + 'a));
 impl<'a> Display for CoreJS<'a> {
     fn fmt(&self, fmt: &mut Formatter<'_>) -> core::fmt::Result {
-        let f = self.1.flate("max64");
-        let g = self.1.flate("max32");
-        let s = self.1.flate("signed");
-        let u = self.1.flate("unsigned");
-        let d = self.1.flate("data");
+        let max64 = self.1.flate("max64");
+        let max32 = self.1.flate("max32");
+        let signed = self.1.flate("signed");
+        let unsigned = self.1.flate("unsigned");
+        let data = self.1.flate("data");
         write!(
             fmt,
-            "return async function(){{let {f}=$.f,{g}=0xffff_ffffn,{s}=(a=>BigInt.asIntN(64,a)),{u}=(a=>BigInt.asUintN(64,a)),{d}=(p=>{{p=$.get_page(p);return new DataView($._sys(`memory`).buffer,p);}});{}}}",
+            "return async function(){{let {max64}=$.f,{max32}=0xffff_ffffn,{signed}=(a=>BigInt.asIntN(64,a)),{unsigned}=(a=>BigInt.asUintN(64,a)),{data}=(p=>{{p=$.get_page(p);return new DataView($._sys(`memory`).buffer,p);}});{}}}",
             &self.0
         )
     }

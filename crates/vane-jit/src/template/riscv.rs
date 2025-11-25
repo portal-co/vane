@@ -24,11 +24,11 @@ impl<'a> TemplateJit<'a> {
         f: &mut Formatter,
         target: Target,
     ) -> core::fmt::Result {
-        let f2 = self.params.flate.flate("max64");
-        let g = self.params.flate.flate("max32");
-        let s = self.params.flate.flate("signed");
-        let u = self.params.flate.flate("unsigned");
-        let d = self.params.flate.flate("data");
+        let max64 = self.params.flate.flate("max64");
+        let max32 = self.params.flate.flate("max32");
+        let signed = self.params.flate.flate("signed");
+        let unsigned = self.params.flate.flate("unsigned");
+        let data = self.params.flate.flate("data");
         macro_rules! ops {
                     ($a:expr => [$($arith:ident => $ap:literal $(i $ip:literal)? $(w $bp:literal)? $(iw $iwp:literal)?),*] [$($j:ident => $jp:literal),*] |$x:pat_param|$e:expr) => {
                         paste::paste!{
@@ -138,32 +138,32 @@ impl<'a> TemplateJit<'a> {
                     };
                 }
         ops!(a => [
-            Add => "({}+{})&{f2}" i "" w "(({}&{g})+({}&{g}))&{g}" iw  "(({}&{g})+({}&{g}))&{g}",
-            Mul => "({}*{})&{f2}" w "(({}&{g})*({}&{g}))&{g}",
-            Mulhu => "(({}*{})>>64n)&{f2}",
-            Mulhsu => "{u}(({s}({})*{})>>64n)&{f2}",
-            Mulh => "{u}(({s}({})*{s}({}))>>64n)&{f2}",
-            Sub => "({}-{})&{f2}" w "(({}&{g})-({}&{g}))&{g}",
-            Divu => "{1}==0?{u}(-1n):({}/{})&{f2}" w "{1}==0?{u}(-1n):(({}&{g})/({}&{g}))&{g}",
-            Remu => "{1}==0?{u}(-1n):({}%{})&{f2}" w "{1}==0?{u}(-1n):(({}&{g})%({}&{g}))&{g}",
-            Div => "{1}==0?{u}(-1n):{u}({s}({})/{s}({}))&{f2}" w "{1}==0?{u}(-1n):{u}({s}({}&{g})/{s}({}&{g}))&{g}",
-            Rem => "{1}==0?{u}(-1n):{u}({s}({})%{s}({}))&{f2}" w "{1}==0?{u}(-1n):{u}({s}({}&{g})%{s}({}&{g}))&{g}",
-            And => "({}&{})&{f2}" i "",
-            Or => "({}|{})&{f2}" i "",
-            Xor => "({}^{})&{f2}" i "",
-            Sll => "({}<<{})&{f2}" i "" w "(({}&{g})<<({}&{g}))&{g}" iw  "(({}&{g})<<({}&{g}))&{g}",
-            Srl => "({}>>{})&{f2}" i "" w "(({}&{g})>>({}&{g}))&{g}" iw  "(({}&{g})>>({}&{g}))&{g}",
-            Sra => "{u}({s}({})>>{s}({}))&{f2}" i "" w "{u}({s}({}&{g})>>{s}({}&{g}))&{g}" iw  "{u}({s}({}&{g})>>{s}({}&{g}))&{g}",
+            Add => "({}+{})&{max64}" i "" w "(({}&{max32})+({}&{max32}))&{max32}" iw  "(({}&{max32})+({}&{max32}))&{max32}",
+            Mul => "({}*{})&{max64}" w "(({}&{max32})*({}&{max32}))&{max32}",
+            Mulhu => "(({}*{})>>64n)&{max64}",
+            Mulhsu => "{unsigned}(({signed}({})*{})>>64n)&{max64}",
+            Mulh => "{unsigned}(({signed}({})*{signed}({}))>>64n)&{max64}",
+            Sub => "({}-{})&{max64}" w "(({}&{max32})-({}&{max32}))&{max32}",
+            Divu => "{1}==0?{unsigned}(-1n):({}/{})&{max64}" w "{1}==0?{unsigned}(-1n):(({}&{max32})/({}&{max32}))&{max32}",
+            Remu => "{1}==0?{unsigned}(-1n):({}%{})&{max64}" w "{1}==0?{unsigned}(-1n):(({}&{max32})%({}&{max32}))&{max32}",
+            Div => "{1}==0?{unsigned}(-1n):{unsigned}({signed}({})/{signed}({}))&{max64}" w "{1}==0?{unsigned}(-1n):{unsigned}({signed}({}&{max32})/{signed}({}&{max32}))&{max32}",
+            Rem => "{1}==0?{unsigned}(-1n):{unsigned}({signed}({})%{signed}({}))&{max64}" w "{1}==0?{unsigned}(-1n):{unsigned}({signed}({}&{max32})%{signed}({}&{max32}))&{max32}",
+            And => "({}&{})&{max64}" i "",
+            Or => "({}|{})&{max64}" i "",
+            Xor => "({}^{})&{max64}" i "",
+            Sll => "({}<<{})&{max64}" i "" w "(({}&{max32})<<({}&{max32}))&{max32}" iw  "(({}&{max32})<<({}&{max32}))&{max32}",
+            Srl => "({}>>{})&{max64}" i "" w "(({}&{max32})>>({}&{max32}))&{max32}" iw  "(({}&{max32})>>({}&{max32}))&{max32}",
+            Sra => "{unsigned}({signed}({})>>{signed}({}))&{max64}" i "" w "{unsigned}({signed}({}&{max32})>>{signed}({}&{max32}))&{max32}" iw  "{unsigned}({signed}({}&{max32})>>{signed}({}&{max32}))&{max32}",
             Sltu => "(({})<({}))?1n:0n",
-            Slt => "({s}({})<{s}({}))?1n:0n" i ""
+            Slt => "({signed}({})<{signed}({}))?1n:0n" i ""
             ]
             [
                 Beq => "{}==={}",
                 Bne => "{}!=={}",
                 Bltu => "{}<{}",
                 Bgeu => "{}>={}",
-                Blt => "{s}({})<{s}({})",
-                Bge => "{s}({})>={s}({})"
+                Blt => "{signed}({})<{signed}({})",
+                Bge => "{signed}({})>={signed}({})"
             ] |a|match a{
                 Inst::Lui { uimm, dest } => {
                     write!(f,"{}",TemplateReg{flate: self.params.flate, n: [(); 32],reg:&dest,value:Some(&format_args!("{}n",uimm.as_u64()))})
@@ -187,7 +187,7 @@ impl<'a> TemplateJit<'a> {
                     write!(f,"{};return ()=>J({});}}",TemplateReg{flate: self.params.flate, n: [(); 32],
                         reg: &dest,
                         value: Some(&format_args!("{}n",next))
-                    },&format_args!("({}+{})&{f2}",(offset.as_i64() * 2) as u64,TemplateReg{flate: self.params.flate, n: [(); 32],
+                    },&format_args!("({}+{})&{max64}",(offset.as_i64() * 2) as u64,TemplateReg{flate: self.params.flate, n: [(); 32],
                         reg: &base,
                         value: None
                     }))?;
@@ -196,7 +196,7 @@ impl<'a> TemplateJit<'a> {
                 Inst::Lb { offset, dest, base } => write!(f,"{}",TemplateReg{flate: self.params.flate, n: [(); 32],
                     reg:&dest,
                     value:Some(&format_args!(
-                        "{u}(BigInt({d}(({}n+{})&f).getInt8(0,true)))",
+                        "{unsigned}(BigInt({data}(({}n+{})&f).getInt8(0,true)))",
                         offset.as_i64() as u64,
                       TemplateReg{flate: self.params.flate, n: [(); 32],
                             reg:&base,
@@ -207,7 +207,7 @@ impl<'a> TemplateJit<'a> {
                 Inst::Lbu { offset, dest, base } => write!(f,"{}",TemplateReg{flate: self.params.flate, n: [(); 32],
                     reg:&dest,
                     value:Some(&format_args!(
-                        "BigInt({d}(({}n+{})&f).getUint8(0,true))",
+                        "BigInt({data}(({}n+{})&f).getUint8(0,true))",
                         offset.as_i64() as u64,
                       TemplateReg{flate: self.params.flate, n: [(); 32],
                             reg:&base,
@@ -218,7 +218,7 @@ impl<'a> TemplateJit<'a> {
                 Inst::Lh { offset, dest, base } => write!(f,"{}",TemplateReg{flate: self.params.flate, n: [(); 32],
                     reg:&dest,
                     value:Some(&format_args!(
-                        "{u}(BigInt({d}(({}n+{})&f).getInt16(0,true)))",
+                        "{unsigned}(BigInt({data}(({}n+{})&f).getInt16(0,true)))",
                         offset.as_i64() as u64,
                       TemplateReg{flate: self.params.flate, n: [(); 32],
                             reg:&base,
@@ -229,7 +229,7 @@ impl<'a> TemplateJit<'a> {
                 Inst::Lhu { offset, dest, base } => write!(f,"{}",TemplateReg{flate: self.params.flate, n: [(); 32],
                     reg:&dest,
                     value:Some(&format_args!(
-                        "BigInt({d}(({}n+{})&f).getUint16(0,true))",
+                        "BigInt({data}(({}n+{})&f).getUint16(0,true))",
                         offset.as_i64() as u64,
                       TemplateReg{flate: self.params.flate, n: [(); 32],
                             reg:&base,
@@ -240,7 +240,7 @@ impl<'a> TemplateJit<'a> {
                 Inst::Lw { offset, dest, base } => write!(f,"{}",TemplateReg{flate: self.params.flate, n: [(); 32],
                     reg:&dest,
                     value:Some(&format_args!(
-                        "{u}(BigInt({d}(({}n+{})&f).getInt32(0,true)))",
+                        "{unsigned}(BigInt({data}(({}n+{})&f).getInt32(0,true)))",
                         offset.as_i64() as u64,
                       TemplateReg{flate: self.params.flate, n: [(); 32],
                             reg:&base,
@@ -251,7 +251,7 @@ impl<'a> TemplateJit<'a> {
                 Inst::Lwu { offset, dest, base } => write!(f,"{}",TemplateReg{flate: self.params.flate, n: [(); 32],
                     reg:&dest,
                     value:Some(&format_args!(
-                        "BigInt({d}(({}n+{})&f).getUint32(0,true))",
+                        "BigInt({data}(({}n+{})&f).getUint32(0,true))",
                         offset.as_i64() as u64,
                       TemplateReg{flate: self.params.flate, n: [(); 32],
                             reg:&base,
@@ -262,7 +262,7 @@ impl<'a> TemplateJit<'a> {
                 Inst::Ld { offset, dest, base } => write!(f,"{}",TemplateReg{flate: self.params.flate, n: [(); 32],
                     reg:&dest,
                     value:Some(&format_args!(
-                        "{d}(({}n+{})&f).getBigUint64(0,true)",
+                        "{data}(({}n+{})&f).getBigUint64(0,true)",
                         offset.as_i64() as u64,
                       TemplateReg{flate: self.params.flate, n: [(); 32],
                             reg:&base,
@@ -271,7 +271,7 @@ impl<'a> TemplateJit<'a> {
                     ))
                 }),
                 Inst::Sb { offset, src, base } => write!(f,
-                    "{d}({}n+{}).setUint8(0,Number({}&{g}),true)",
+                    "{data}({}n+{}).setUint8(0,Number({}&{max32}),true)",
                     offset.as_i64() as u64,
                   TemplateReg{flate: self.params.flate, n: [(); 32],
                         reg:&base,
@@ -283,7 +283,7 @@ impl<'a> TemplateJit<'a> {
                     }
                 ),
                 Inst::Sh { offset, src, base } => write!(f,
-                    "{d}({}n+{}).setUint16(0,Number({}&{g}),true)",
+                    "{data}({}n+{}).setUint16(0,Number({}&{max32}),true)",
                     offset.as_i64() as u64,
                   TemplateReg{flate: self.params.flate, n: [(); 32],
                         reg:&base,
@@ -295,7 +295,7 @@ impl<'a> TemplateJit<'a> {
                     }
                 ),
                 Inst::Sw { offset, src, base } => write!(f,
-                    "{d}({}n+{}).setUint32(0,Number({}&{g}),true)",
+                    "{data}({}n+{}).setUint32(0,Number({}&{max32}),true)",
                     offset.as_i64() as u64,
                   TemplateReg{flate: self.params.flate, n: [(); 32],
                         reg:&base,
@@ -307,7 +307,7 @@ impl<'a> TemplateJit<'a> {
                     }
                 ),
                 Inst::Sd { offset, src, base } => write!(f,
-                    "{d}({}n+{}).setBigUint64(0,{},true)",
+                    "{data}({}n+{}).setBigUint64(0,{},true)",
                     offset.as_i64() as u64,
                   TemplateReg{flate: self.params.flate, n: [(); 32],
                         reg:&base,
