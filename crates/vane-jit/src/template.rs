@@ -57,7 +57,7 @@ pub mod riscv;
 impl<'b> TemplateJit<'b> {
     pub(crate) fn jit_wasm<'a>(
         &'a self,
-        go: impl FnOnce(&mut Vec<JitOpcode<'_>>, Labels<'_>, u32),
+        go: impl for<'c>FnOnce(Labels<'c>, u32)->Box<dyn Iterator<Item = JitOpcode<'a>> + 'a>,
     ) -> Box<dyn Iterator<Item = JitOpcode<'a>> + 'a> {
         let mut labels = self.labels.clone();
         match labels.0.entry(self.pc) {
@@ -65,8 +65,8 @@ impl<'b> TemplateJit<'b> {
                 let label_name = format!("x{}", self.pc);
                 vacant_entry.insert((&label_name, self.depth));
                 let nd = self.depth + 1;
-                let mut i: Vec<_> = Default::default();
-                go(&mut i, labels, nd);
+                // let mut i: Vec<_> = Default::default();
+                let i = go(labels, nd);
                 Box::new(
                     [JitOpcode::Operator {
                         op: Operator::Loop {
