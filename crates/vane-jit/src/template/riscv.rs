@@ -143,6 +143,287 @@ impl<'a> TemplateJit<'a> {
                         }
                     };
                 }
+        macro_rules! miscop {
+            ($a:expr) => {
+                match $a {
+                    a => match a {
+                        Inst::Lui { uimm, dest } => {
+                            write!(
+                                f,
+                                "{}",
+                                TemplateReg {
+                                    flate: self.params.flate,
+                                    n: [(); 32],
+                                    reg: &dest,
+                                    value: Some(&format_args!("{}n", uimm.as_u64()))
+                                }
+                            )
+                        }
+                        Inst::Auipc { uimm, dest } => {
+                            write!(
+                                f,
+                                "{}",
+                                TemplateReg {
+                                    flate: self.params.flate,
+                                    n: [(); 32],
+                                    reg: &dest,
+                                    value: Some(&format_args!(
+                                        "{}n",
+                                        uimm.as_u64().wrapping_add(self.pc)
+                                    ))
+                                }
+                            )
+                        }
+                        Inst::Jal { offset, dest } => {
+                            write!(
+                                f,
+                                "{};{};break;}}",
+                                TemplateReg {
+                                    flate: self.params.flate,
+                                    n: [(); 32],
+                                    reg: &dest,
+                                    value: Some(&format_args!("{}n", next))
+                                },
+                                target.template_jit_js(&TemplateJit {
+                                    params: self.params,
+                                    labels: &labels,
+                                    pc: self.pc.wrapping_add_signed(offset.as_i64() * 2),
+                                    depth: nd,
+                                })
+                            )?;
+                            return Ok(());
+                        }
+                        Inst::Jalr { offset, base, dest } => {
+                            write!(
+                                f,
+                                "{};return ()=>J({});}}",
+                                TemplateReg {
+                                    flate: self.params.flate,
+                                    n: [(); 32],
+                                    reg: &dest,
+                                    value: Some(&format_args!("{}n", next))
+                                },
+                                &format_args!(
+                                    "({}+{})&{max64}",
+                                    (offset.as_i64() * 2) as u64,
+                                    TemplateReg {
+                                        flate: self.params.flate,
+                                        n: [(); 32],
+                                        reg: &base,
+                                        value: None
+                                    }
+                                )
+                            )?;
+                            return Ok(());
+                        }
+                        Inst::Lb { offset, dest, base } => write!(
+                            f,
+                            "{}",
+                            TemplateReg {
+                                flate: self.params.flate,
+                                n: [(); 32],
+                                reg: &dest,
+                                value: Some(&format_args!(
+                                    "{unsigned}(BigInt({data}(({}n+{})&f).getInt8(0,true)))",
+                                    offset.as_i64() as u64,
+                                    TemplateReg {
+                                        flate: self.params.flate,
+                                        n: [(); 32],
+                                        reg: &base,
+                                        value: None
+                                    }
+                                ))
+                            }
+                        ),
+                        Inst::Lbu { offset, dest, base } => write!(
+                            f,
+                            "{}",
+                            TemplateReg {
+                                flate: self.params.flate,
+                                n: [(); 32],
+                                reg: &dest,
+                                value: Some(&format_args!(
+                                    "BigInt({data}(({}n+{})&f).getUint8(0,true))",
+                                    offset.as_i64() as u64,
+                                    TemplateReg {
+                                        flate: self.params.flate,
+                                        n: [(); 32],
+                                        reg: &base,
+                                        value: None
+                                    }
+                                ))
+                            }
+                        ),
+                        Inst::Lh { offset, dest, base } => write!(
+                            f,
+                            "{}",
+                            TemplateReg {
+                                flate: self.params.flate,
+                                n: [(); 32],
+                                reg: &dest,
+                                value: Some(&format_args!(
+                                    "{unsigned}(BigInt({data}(({}n+{})&f).getInt16(0,true)))",
+                                    offset.as_i64() as u64,
+                                    TemplateReg {
+                                        flate: self.params.flate,
+                                        n: [(); 32],
+                                        reg: &base,
+                                        value: None
+                                    }
+                                ))
+                            }
+                        ),
+                        Inst::Lhu { offset, dest, base } => write!(
+                            f,
+                            "{}",
+                            TemplateReg {
+                                flate: self.params.flate,
+                                n: [(); 32],
+                                reg: &dest,
+                                value: Some(&format_args!(
+                                    "BigInt({data}(({}n+{})&f).getUint16(0,true))",
+                                    offset.as_i64() as u64,
+                                    TemplateReg {
+                                        flate: self.params.flate,
+                                        n: [(); 32],
+                                        reg: &base,
+                                        value: None
+                                    }
+                                ))
+                            }
+                        ),
+                        Inst::Lw { offset, dest, base } => write!(
+                            f,
+                            "{}",
+                            TemplateReg {
+                                flate: self.params.flate,
+                                n: [(); 32],
+                                reg: &dest,
+                                value: Some(&format_args!(
+                                    "{unsigned}(BigInt({data}(({}n+{})&f).getInt32(0,true)))",
+                                    offset.as_i64() as u64,
+                                    TemplateReg {
+                                        flate: self.params.flate,
+                                        n: [(); 32],
+                                        reg: &base,
+                                        value: None
+                                    }
+                                ))
+                            }
+                        ),
+                        Inst::Lwu { offset, dest, base } => write!(
+                            f,
+                            "{}",
+                            TemplateReg {
+                                flate: self.params.flate,
+                                n: [(); 32],
+                                reg: &dest,
+                                value: Some(&format_args!(
+                                    "BigInt({data}(({}n+{})&f).getUint32(0,true))",
+                                    offset.as_i64() as u64,
+                                    TemplateReg {
+                                        flate: self.params.flate,
+                                        n: [(); 32],
+                                        reg: &base,
+                                        value: None
+                                    }
+                                ))
+                            }
+                        ),
+                        Inst::Ld { offset, dest, base } => write!(
+                            f,
+                            "{}",
+                            TemplateReg {
+                                flate: self.params.flate,
+                                n: [(); 32],
+                                reg: &dest,
+                                value: Some(&format_args!(
+                                    "{data}(({}n+{})&f).getBigUint64(0,true)",
+                                    offset.as_i64() as u64,
+                                    TemplateReg {
+                                        flate: self.params.flate,
+                                        n: [(); 32],
+                                        reg: &base,
+                                        value: None
+                                    }
+                                ))
+                            }
+                        ),
+                        Inst::Sb { offset, src, base } => write!(
+                            f,
+                            "{data}({}n+{}).setUint8(0,Number({}&{max32}),true)",
+                            offset.as_i64() as u64,
+                            TemplateReg {
+                                flate: self.params.flate,
+                                n: [(); 32],
+                                reg: &base,
+                                value: None
+                            },
+                            TemplateReg {
+                                flate: self.params.flate,
+                                n: [(); 32],
+                                reg: &src,
+                                value: None
+                            }
+                        ),
+                        Inst::Sh { offset, src, base } => write!(
+                            f,
+                            "{data}({}n+{}).setUint16(0,Number({}&{max32}),true)",
+                            offset.as_i64() as u64,
+                            TemplateReg {
+                                flate: self.params.flate,
+                                n: [(); 32],
+                                reg: &base,
+                                value: None
+                            },
+                            TemplateReg {
+                                flate: self.params.flate,
+                                n: [(); 32],
+                                reg: &src,
+                                value: None
+                            }
+                        ),
+                        Inst::Sw { offset, src, base } => write!(
+                            f,
+                            "{data}({}n+{}).setUint32(0,Number({}&{max32}),true)",
+                            offset.as_i64() as u64,
+                            TemplateReg {
+                                flate: self.params.flate,
+                                n: [(); 32],
+                                reg: &base,
+                                value: None
+                            },
+                            TemplateReg {
+                                flate: self.params.flate,
+                                n: [(); 32],
+                                reg: &src,
+                                value: None
+                            }
+                        ),
+                        Inst::Sd { offset, src, base } => write!(
+                            f,
+                            "{data}({}n+{}).setBigUint64(0,{},true)",
+                            offset.as_i64() as u64,
+                            TemplateReg {
+                                flate: self.params.flate,
+                                n: [(); 32],
+                                reg: &base,
+                                value: None
+                            },
+                            TemplateReg {
+                                flate: self.params.flate,
+                                n: [(); 32],
+                                reg: &src,
+                                value: None
+                            }
+                        ),
+                        Inst::Fence { .. } => Ok(()),
+                        Inst::Ecall => write!(f, "await $.ecall();"),
+                        op => write!(f, "throw new TypeError(`op:{op}`)"),
+                    },
+                }
+            };
+        }
         ops!(a => [
             Add => "({}+{})&{max64}" i "" w "(({}&{max32})+({}&{max32}))&{max32}" iw  "(({}&{max32})+({}&{max32}))&{max32}",
             Mul => "({}*{})&{max64}" w "(({}&{max32})*({}&{max32}))&{max32}",
@@ -170,164 +451,7 @@ impl<'a> TemplateJit<'a> {
                 Bgeu => "{}>={}",
                 Blt => "{signed}({})<{signed}({})",
                 Bge => "{signed}({})>={signed}({})"
-            ] |a|match a{
-                Inst::Lui { uimm, dest } => {
-                    write!(f,"{}",TemplateReg{flate: self.params.flate, n: [(); 32],reg:&dest,value:Some(&format_args!("{}n",uimm.as_u64()))})
-                }
-                 Inst::Auipc { uimm, dest } => {
-                    write!(f,"{}",TemplateReg{flate: self.params.flate, n: [(); 32],reg:&dest,value:Some(&format_args!("{}n",uimm.as_u64().wrapping_add(self.pc)))})
-                }
-                Inst::Jal { offset, dest } => {
-                    write!(f,"{};{};break;}}",TemplateReg{flate: self.params.flate, n: [(); 32],
-                        reg: &dest,
-                        value: Some(&format_args!("{}n",next))
-                    },target.template_jit_js(&TemplateJit{
-                        params:self.params,
-                        labels: &labels,
-                        pc: self.pc.wrapping_add_signed(offset.as_i64() * 2),
-                         depth:nd,
-                    }))?;
-                    return Ok(());
-                }
-                Inst::Jalr { offset,base, dest } => {
-                    write!(f,"{};return ()=>J({});}}",TemplateReg{flate: self.params.flate, n: [(); 32],
-                        reg: &dest,
-                        value: Some(&format_args!("{}n",next))
-                    },&format_args!("({}+{})&{max64}",(offset.as_i64() * 2) as u64,TemplateReg{flate: self.params.flate, n: [(); 32],
-                        reg: &base,
-                        value: None
-                    }))?;
-                    return Ok(());
-                }
-                Inst::Lb { offset, dest, base } => write!(f,"{}",TemplateReg{flate: self.params.flate, n: [(); 32],
-                    reg:&dest,
-                    value:Some(&format_args!(
-                        "{unsigned}(BigInt({data}(({}n+{})&f).getInt8(0,true)))",
-                        offset.as_i64() as u64,
-                      TemplateReg{flate: self.params.flate, n: [(); 32],
-                            reg:&base,
-                            value:None
-                        }
-                    ))
-                }),
-                Inst::Lbu { offset, dest, base } => write!(f,"{}",TemplateReg{flate: self.params.flate, n: [(); 32],
-                    reg:&dest,
-                    value:Some(&format_args!(
-                        "BigInt({data}(({}n+{})&f).getUint8(0,true))",
-                        offset.as_i64() as u64,
-                      TemplateReg{flate: self.params.flate, n: [(); 32],
-                            reg:&base,
-                            value:None
-                        }
-                    ))
-                }),
-                Inst::Lh { offset, dest, base } => write!(f,"{}",TemplateReg{flate: self.params.flate, n: [(); 32],
-                    reg:&dest,
-                    value:Some(&format_args!(
-                        "{unsigned}(BigInt({data}(({}n+{})&f).getInt16(0,true)))",
-                        offset.as_i64() as u64,
-                      TemplateReg{flate: self.params.flate, n: [(); 32],
-                            reg:&base,
-                            value:None
-                        }
-                    ))
-                }),
-                Inst::Lhu { offset, dest, base } => write!(f,"{}",TemplateReg{flate: self.params.flate, n: [(); 32],
-                    reg:&dest,
-                    value:Some(&format_args!(
-                        "BigInt({data}(({}n+{})&f).getUint16(0,true))",
-                        offset.as_i64() as u64,
-                      TemplateReg{flate: self.params.flate, n: [(); 32],
-                            reg:&base,
-                            value:None
-                        }
-                    ))
-                }),
-                Inst::Lw { offset, dest, base } => write!(f,"{}",TemplateReg{flate: self.params.flate, n: [(); 32],
-                    reg:&dest,
-                    value:Some(&format_args!(
-                        "{unsigned}(BigInt({data}(({}n+{})&f).getInt32(0,true)))",
-                        offset.as_i64() as u64,
-                      TemplateReg{flate: self.params.flate, n: [(); 32],
-                            reg:&base,
-                            value:None
-                        }
-                    ))
-                }),
-                Inst::Lwu { offset, dest, base } => write!(f,"{}",TemplateReg{flate: self.params.flate, n: [(); 32],
-                    reg:&dest,
-                    value:Some(&format_args!(
-                        "BigInt({data}(({}n+{})&f).getUint32(0,true))",
-                        offset.as_i64() as u64,
-                      TemplateReg{flate: self.params.flate, n: [(); 32],
-                            reg:&base,
-                            value:None
-                        }
-                    ))
-                }),
-                Inst::Ld { offset, dest, base } => write!(f,"{}",TemplateReg{flate: self.params.flate, n: [(); 32],
-                    reg:&dest,
-                    value:Some(&format_args!(
-                        "{data}(({}n+{})&f).getBigUint64(0,true)",
-                        offset.as_i64() as u64,
-                      TemplateReg{flate: self.params.flate, n: [(); 32],
-                            reg:&base,
-                            value:None
-                        }
-                    ))
-                }),
-                Inst::Sb { offset, src, base } => write!(f,
-                    "{data}({}n+{}).setUint8(0,Number({}&{max32}),true)",
-                    offset.as_i64() as u64,
-                  TemplateReg{flate: self.params.flate, n: [(); 32],
-                        reg:&base,
-                        value:None
-                    },
-                  TemplateReg{flate: self.params.flate, n: [(); 32],
-                        reg:&src,
-                        value:None
-                    }
-                ),
-                Inst::Sh { offset, src, base } => write!(f,
-                    "{data}({}n+{}).setUint16(0,Number({}&{max32}),true)",
-                    offset.as_i64() as u64,
-                  TemplateReg{flate: self.params.flate, n: [(); 32],
-                        reg:&base,
-                        value:None
-                    },
-                  TemplateReg{flate: self.params.flate, n: [(); 32],
-                        reg:&src,
-                        value:None
-                    }
-                ),
-                Inst::Sw { offset, src, base } => write!(f,
-                    "{data}({}n+{}).setUint32(0,Number({}&{max32}),true)",
-                    offset.as_i64() as u64,
-                  TemplateReg{flate: self.params.flate, n: [(); 32],
-                        reg:&base,
-                        value:None
-                    },
-                  TemplateReg{flate: self.params.flate, n: [(); 32],
-                        reg:&src,
-                        value:None
-                    }
-                ),
-                Inst::Sd { offset, src, base } => write!(f,
-                    "{data}({}n+{}).setBigUint64(0,{},true)",
-                    offset.as_i64() as u64,
-                  TemplateReg{flate: self.params.flate, n: [(); 32],
-                        reg:&base,
-                        value:None
-                    },
-                  TemplateReg{flate: self.params.flate, n: [(); 32],
-                        reg:&src,
-                        value:None
-                    }
-                ),
-                Inst::Fence{..} => Ok(()),
-                Inst::Ecall => write!(f,"await $.ecall();"),
-            op => write!(f,"throw new TypeError(`op:{op}`)"),
-        })?;
+            ] |a|miscop!(a))?;
         write!(
             f,
             ";{};",
