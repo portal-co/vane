@@ -35,114 +35,125 @@ impl<'a> TemplateJit<'a> {
         let signed = self.params.flate.flate("signed");
         let unsigned = self.params.flate.flate("unsigned");
         let data = self.params.flate.flate("data");
+        macro_rules! j {
+            ($jp:literal, $src1:ident, $src2:ident, $offset:ident) => {{
+                write!(
+                    f,
+                    "if({}){{{}}}else{{{}}};",
+                    &format_args!(
+                        $jp,
+                        TemplateReg {
+                            flate: self.params.flate,
+                            n: [(); 32],
+                            reg: &$src1,
+                            value: None
+                        },
+                        TemplateReg {
+                            flate: self.params.flate,
+                            n: [(); 32],
+                            reg: &$src2,
+                            value: None
+                        }
+                    ),
+                    target.template_jit_js(&TemplateJit {
+                        params: self.params,
+                        labels: &labels,
+                        pc: self.pc.wrapping_add_signed(($offset).as_i64() * 2),
+                        depth: nd,
+                        // root:self.root,
+                    }),
+                    target.template_jit_js(&TemplateJit {
+                        params: self.params,
+                        labels: &labels,
+                        pc: next,
+                        depth: nd,
+                        //   root:self.root,
+                    })
+                )?;
+                return Ok(());
+            }};
+        }
         macro_rules! ops {
-                    ($a:expr => [$($arith:ident => $ap:literal $(i $ip:literal)? $(w $bp:literal)? $(iw $iwp:literal)?),*] [$($j:ident => $jp:literal),*] |$x:pat_param|$e:expr) => {
-                        paste::paste!{
-                        match $a{
-                            $(
-                                Inst::$arith { dest, src1, src2 } => write!(
-                                    f,
-                                    "{}",
-                                  TemplateReg{flate: self.params.flate, n: [(); 32],
-                                        reg: &dest,
-                                        value: Some(&format_args!(
-                                            $ap,
-                                          TemplateReg{flate: self.params.flate, n: [(); 32],
-                                                reg: &src1,
-                                                value: None
-                                            },
-                                          TemplateReg{flate: self.params.flate, n: [(); 32],
-                                                reg: &src2,
-                                                value: None
-                                            }
-                                        ))
-                                    }
-                                ),
-                                $(Inst::[<$arith i>] { imm, dest, src1 } => match $ip{_=>write!(
-                                    f,
-                                    "{}",
-                                  TemplateReg{flate: self.params.flate, n: [(); 32],
-                                        reg: &dest,
-                                        value: Some(&format_args!(
-                                            $ap,
-                                          TemplateReg{flate: self.params.flate, n: [(); 32],
-                                                reg: &src1,
-                                                value: None
-                                            },
-                                            &format_args!("{}n",imm.as_i64() as u64)
-                                        ))
-                                    }
-                                )},)?
-                                $(Inst::[<$arith W>] { dest, src1, src2 } => write!(
-                                    f,
-                                    "{}",
-                                  TemplateReg{flate: self.params.flate, n: [(); 32],
-                                        reg: &dest,
-                                        value: Some(&format_args!(
-                                            $bp,
-                                          TemplateReg{flate: self.params.flate, n: [(); 32],
-                                                reg: &src1,
-                                                value: None
-                                            },
-                                          TemplateReg{flate: self.params.flate, n: [(); 32],
-                                                reg: &src2,
-                                                value: None
-                                            }
-                                        ))
-                                    }
-                                ),
-                                )?
-                                $(Inst::[<$arith iW>] { imm, dest, src1 } => write!(
-                                    f,
-                                    "{}",
-                                  TemplateReg{flate: self.params.flate, n: [(); 32],
-                                        reg: &dest,
-                                        value: Some(&format_args!(
-                                            $iwp,
-                                          TemplateReg{flate: self.params.flate, n: [(); 32],
-                                                reg: &src1,
-                                                value: None
-                                            },
-                                            &format_args!("{}n",imm.as_i64() as u64)
-                                        ))
-                                    }
-                                ),)?
-                            )*
-                            $(Inst::$j {src1,src2,offset} => {
-                                 write!(f,"if({}){{{}}}else{{{}}};",
-                                    &format_args!(
-                                        $jp,
-                                      TemplateReg{flate: self.params.flate, n: [(); 32],
+            ($a:expr => [$($arith:ident => $ap:literal $(i $ip:literal)? $(w $bp:literal)? $(iw $iwp:literal)?),*] [$($j:ident => $jp:literal),*] |$x:pat_param|$e:expr) => {
+                'a: {match paste::paste!{
+                    match $a{
+                        $(
+                            Inst::$arith { dest, src1, src2 } => break 'a write!(
+                                f,
+                                "{}",
+                                TemplateReg{flate: self.params.flate, n: [(); 32],
+                                    reg: &dest,
+                                    value: Some(&format_args!(
+                                        $ap,
+                                        TemplateReg{flate: self.params.flate, n: [(); 32],
                                             reg: &src1,
                                             value: None
                                         },
-                                      TemplateReg{flate: self.params.flate, n: [(); 32],
+                                        TemplateReg{flate: self.params.flate, n: [(); 32],
                                             reg: &src2,
                                             value: None
                                         }
-                                    ),
-                                    target.template_jit_js(&TemplateJit{
-                                     params:self.params,
-                                        labels: &labels,
-                                        pc: self.pc.wrapping_add_signed(offset.as_i64() * 2),
-                                        depth:nd,
-                                        // root:self.root,
-                                    }),
-                                    target.template_jit_js(&TemplateJit{
-                                        params:self.params,
-                                        labels: &labels,
-                                        pc: next,
-                                         depth:nd,
-                                            //   root:self.root,
-                                    })
-                                )?;
-                                return Ok(());
-                            },)*
-                            $x => $e
-                        }
-                        }
-                    };
-                }
+                                    ))
+                                }
+                            ),
+                            $(Inst::[<$arith i>] { imm, dest, src1 } => break 'a match $ip{_=>write!(
+                                f,
+                                "{}",
+                                TemplateReg{flate: self.params.flate, n: [(); 32],
+                                    reg: &dest,
+                                    value: Some(&format_args!(
+                                        $ap,
+                                        TemplateReg{flate: self.params.flate, n: [(); 32],
+                                            reg: &src1,
+                                            value: None
+                                        },
+                                        &format_args!("{}n",imm.as_i64() as u64)
+                                    ))
+                                }
+                            )},)?
+                            $(Inst::[<$arith W>] { dest, src1, src2 } => break 'a write!(
+                                f,
+                                "{}",
+                                TemplateReg{flate: self.params.flate, n: [(); 32],
+                                    reg: &dest,
+                                    value: Some(&format_args!(
+                                        $bp,
+                                        TemplateReg{flate: self.params.flate, n: [(); 32],
+                                            reg: &src1,
+                                            value: None
+                                        },
+                                        TemplateReg{flate: self.params.flate, n: [(); 32],
+                                            reg: &src2,
+                                            value: None
+                                        }
+                                    ))
+                                }
+                            ),
+                            )?
+                            $(Inst::[<$arith iW>] { imm, dest, src1 } => break 'a write!(
+                                f,
+                                "{}",
+                                TemplateReg{flate: self.params.flate, n: [(); 32],
+                                    reg: &dest,
+                                    value: Some(&format_args!(
+                                        $iwp,
+                                        TemplateReg{flate: self.params.flate, n: [(); 32],
+                                            reg: &src1,
+                                            value: None
+                                        },
+                                        &format_args!("{}n",imm.as_i64() as u64)
+                                    ))
+                                }
+                            ),)?
+                        )*
+                        $(Inst::$j {src1,src2,offset} => j!($jp,src1,src2,offset),)*
+                        a => a
+                    }
+                }{
+                    $x => $e
+                }}
+            };
+        }
         macro_rules! miscop {
             ($a:expr) => {
                 match $a {
