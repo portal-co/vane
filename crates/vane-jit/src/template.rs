@@ -9,7 +9,7 @@ use crate::{
     *,
 };
 #[derive(Clone, Default)]
-pub struct Labels<'a>(pub BTreeMap<u64, (&'a (dyn Display + 'a), u32)>);
+pub struct Labels<'a>(BTreeMap<u64, (&'a (dyn Display + 'a), u32)>);
 
 #[derive(Clone, Copy)]
 pub struct Params<'a> {
@@ -55,7 +55,7 @@ impl<'a, const N: usize> Display for TemplateReg<'a, N> {
 }
 pub mod riscv;
 impl<'b> TemplateJit<'b> {
-    pub(crate) fn jit_wasm<'a>(
+    pub fn jit_wasm<'a>(
         &'a self,
         go: impl for<'c>FnOnce(Labels<'c>, u32)->Box<dyn Iterator<Item = JitOpcode<'a>> + 'a>,
     ) -> Box<dyn Iterator<Item = JitOpcode<'a>> + 'a> {
@@ -88,7 +88,7 @@ impl<'b> TemplateJit<'b> {
             ),
         }
     }
-    pub(crate) fn jit_js(
+    pub fn jit_js(
         &self,
         f: &mut Formatter,
         render: impl FnOnce(&mut Formatter, &str, Labels<'_>, u32) -> core::fmt::Result,
