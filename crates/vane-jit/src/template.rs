@@ -8,8 +8,13 @@ use crate::{
     flate::Flate,
     *,
 };
+#[derive(Clone)]
+pub struct Label<'a> {
+    ident_name: &'a (dyn Display + 'a),
+    index: u32,
+}
 #[derive(Clone, Default)]
-pub struct Labels<'a>(BTreeMap<u64, (&'a (dyn Display + 'a), u32)>);
+pub struct Labels<'a>(BTreeMap<u64, Label<'a>>);
 
 #[derive(Clone, Copy)]
 pub struct Params<'a> {
@@ -57,13 +62,16 @@ pub mod riscv;
 impl<'b> TemplateJit<'b> {
     pub fn jit_wasm<'a>(
         &'a self,
-        go: impl for<'c>FnOnce(Labels<'c>, u32)->Box<dyn Iterator<Item = JitOpcode<'a>> + 'a>,
+        go: impl for<'c> FnOnce(Labels<'c>, u32) -> Box<dyn Iterator<Item = JitOpcode<'a>> + 'a>,
     ) -> Box<dyn Iterator<Item = JitOpcode<'a>> + 'a> {
         let mut labels = self.labels.clone();
         match labels.0.entry(self.pc) {
             alloc::collections::btree_map::Entry::Vacant(vacant_entry) => {
                 let label_name = format!("x{}", self.pc);
-                vacant_entry.insert((&label_name, self.depth));
+                vacant_entry.insert(Label {
+                    ident_name: &label_name,
+                    index: self.depth,
+                });
                 let nd = self.depth + 1;
                 // let mut i: Vec<_> = Default::default();
                 let i = go(labels, nd);
@@ -78,14 +86,17 @@ impl<'b> TemplateJit<'b> {
                     .chain([JitOpcode::Operator { op: Operator::End }]),
                 )
             }
-            alloc::collections::btree_map::Entry::Occupied(occupied_entry) => Box::new(
-                [JitOpcode::Operator {
-                    op: Operator::Br {
-                        relative_depth: self.depth - occupied_entry.get().1,
-                    },
-                }]
-                .into_iter(),
-            ),
+            alloc::collections::btree_map::Entry::Occupied(occupied_entry) => {
+                let Label { index, ident_name } = occupied_entry.get();
+                Box::new(
+                    [JitOpcode::Operator {
+                        op: Operator::Br {
+                            relative_depth: self.depth - index,
+                        },
+                    }]
+                    .into_iter(),
+                )
+            }
         }
     }
     pub fn jit_js(
@@ -104,14 +115,18 @@ impl<'b> TemplateJit<'b> {
         match labels.0.entry(self.pc) {
             alloc::collections::btree_map::Entry::Vacant(vacant_entry) => {
                 let label_name = format!("x{}", self.pc);
-                vacant_entry.insert((&label_name, self.depth));
+                vacant_entry.insert(Label {
+                    ident_name: &label_name,
+                    index: self.depth,
+                });
                 let nd = self.depth + 1;
                 write!(f, "{label_name}: for(;;){{")?;
                 render(f, &label_name, labels, nd)?;
                 write!(f, "break {label_name};}}",)
             }
             alloc::collections::btree_map::Entry::Occupied(occupied_entry) => {
-                write!(f, "continue {};", occupied_entry.get().0)
+                let Label { index, ident_name } = occupied_entry.get();
+                write!(f, "continue {};", &**ident_name)
             }
         }
     }
