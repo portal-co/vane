@@ -22,6 +22,13 @@ pub struct Params<'a> {
     pub trial: &'a (dyn Fn(u64) -> Heat + 'a),
     pub flate: &'a (dyn Flate + 'a),
     pub root: u64,
+    pub flags: Flags,
+}
+
+#[derive(Clone, Copy,Default)]
+#[non_exhaustive]
+pub struct Flags{
+    pub test_mode: bool,
 }
 pub struct TemplateJit<'a> {
     pub params: Params<'a>,

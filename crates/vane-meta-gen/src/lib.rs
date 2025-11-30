@@ -174,6 +174,7 @@ macro_rules! vane_meta {
                                 },
                                 root: a,
                                 flate: &f,
+                                flags: $crate::core::default::Default::default()
                             },
                             pc: a,
                             labels: &$crate::vane_jit::template::Labels::default(),
