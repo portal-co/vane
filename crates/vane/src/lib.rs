@@ -54,6 +54,7 @@ impl Reactor {
                 mem,
                 state: OnceCell::new(),
                 regs: OnceCell::new(),
+                test_mode: false,
             })),
         }
     }
@@ -69,23 +70,8 @@ impl Reactor {
 #[wasm_bindgen]
 impl Reactor {
     #[wasm_bindgen]
-    pub async fn interp(&self, pc: u64) -> Result<JsValue, JsValue> {
-        self.interp_internal(pc, false).await
-    }
-    
-    /// Interpret with test mode enabled - logs HINT instructions used for test case markers
-    /// in rv-corpus test suite.
-    ///
-    /// When a HINT instruction is detected (addi x0, x0, N where N != 0), it logs the test
-    /// case number to the console. This is useful for debugging test execution.
-    #[wasm_bindgen]
-    pub async fn interp_test_mode(&self, pc: u64) -> Result<JsValue, JsValue> {
-        self.interp_internal(pc, true).await
-    }
-    
-    /// Internal interpreter implementation with optional test_mode flag.
-    /// When test_mode is true, HINT instructions are logged to the console.
-    async fn interp_internal(&self, mut pc: u64, test_mode: bool) -> Result<JsValue, JsValue> {
+    pub async fn interp(&self, mut pc: u64) -> Result<JsValue, JsValue> {
+        let test_mode = self.core.lock().test_mode;
         let mut regs = self.save_regs();
         loop {
             regs[0] = 0;

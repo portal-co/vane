@@ -28,6 +28,7 @@ macro_rules! vane_meta {
             mem: $crate::vane_jit::Mem,
             state: $crate::core::cell::OnceCell<$crate::wasm_bindgen::prelude::JsValue>,
             regs: $crate::core::cell::OnceCell<$crate::wasm_bindgen::prelude::JsValue>,
+            test_mode: bool,
         }
 
         const _: () = {
@@ -130,6 +131,14 @@ macro_rules! vane_meta {
                     let mut lock = self.core.lock();
                     return lock.regs.get_or_init(|| on()).clone();
                 }
+                #[wasm_bindgen(getter, js_name = "test_mode",wasm_bindgen = $crate::wasm_bindgen)]
+                pub fn get_test_mode(&self) -> bool {
+                    self.core.lock().test_mode
+                }
+                #[wasm_bindgen(setter, js_name = "test_mode",wasm_bindgen = $crate::wasm_bindgen)]
+                pub fn set_test_mode(&self, value: bool) {
+                    self.core.lock().test_mode = value;
+                }
                 #[wasm_bindgen(wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn _sys(&self, a: &str) -> $crate::wasm_bindgen::prelude::JsValue {
                     match a {
@@ -162,6 +171,7 @@ macro_rules! vane_meta {
                 #[wasm_bindgen(js_name = "j",wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn jit_code(&self, a: u64) -> String {
                     let f = $flate;
+                    let test_mode = self.core.lock().test_mode;
                     return ($crate::vane_jit::template::CoreJS(&$y(
                         &$crate::vane_jit::template::TemplateJit {
                             params: Params {
@@ -174,34 +184,7 @@ macro_rules! vane_meta {
                                 },
                                 root: a,
                                 flate: &f,
-                                flags: $crate::core::default::Default::default()
-                            },
-                            pc: a,
-                            labels: &$crate::vane_jit::template::Labels::default(),
-                            depth: 0,
-                        },
-                    ),&f)
-                    .to_string());
-                }
-                /// Generate JIT code with test_mode enabled for HINT instruction logging.
-                /// When test_mode is true, HINT instructions (`addi x0, x0, N`) will emit
-                /// console.log statements to mark test case boundaries.
-                #[wasm_bindgen(js_name = "j_test_mode",wasm_bindgen = $crate::wasm_bindgen)]
-                pub fn jit_code_test_mode(&self, a: u64) -> String {
-                    let f = $flate;
-                    return ($crate::vane_jit::template::CoreJS(&$y(
-                        &$crate::vane_jit::template::TemplateJit {
-                            params: Params {
-                                react: self,
-                                trial: &|a| match tget(self.clone(), a)
-                                    != $crate::wasm_bindgen::prelude::JsValue::UNDEFINED
-                                {
-                                    true => $crate::vane_jit::Heat::Cached,
-                                    false => $crate::vane_jit::Heat::New,
-                                },
-                                root: a,
-                                flate: &f,
-                                flags: $crate::vane_jit::template::Flags::new_with_test_mode(true)
+                                flags: $crate::vane_jit::template::Flags::new_with_test_mode(test_mode)
                             },
                             pc: a,
                             labels: &$crate::vane_jit::template::Labels::default(),
