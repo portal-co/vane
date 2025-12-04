@@ -169,3 +169,22 @@ rv_test!(
     "RV64IM multiply/divide: 64-bit multiplication (MUL, MULH, MULHU, MULHSU), division (DIV, DIVU, REM, REMU), word operations (MULW, DIVW, DIVUW, REMW, REMUW), overflow handling",
     jit_run
 );
+
+// RV32I Tests - NOP and HINT instructions with test_mode enabled
+// This test exercises the HINT instruction parsing and logging behavior
+rv_test!(
+    test_rv32i_nop_and_hints_test_mode,
+    "rv32i",
+    "06_nop_and_hints",
+    "RV32I NOP and HINT instructions with test_mode: logs HINT markers (addi x0, x0, N) to console",
+    interp_test_mode
+);
+
+// RV32I Tests - NOP and HINT with regular interpreter (no logging)
+rv_test!(
+    test_rv32i_nop_and_hints_interp,
+    "rv32i",
+    "06_nop_and_hints",
+    "RV32I NOP and HINT instructions: verifies NOPs and HINTs execute correctly without affecting state",
+    interp
+);

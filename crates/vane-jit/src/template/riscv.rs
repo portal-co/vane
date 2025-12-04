@@ -1,9 +1,7 @@
 use core::iter::empty;
 
-use alloc::vec::Vec;
-use wasmparser::Operator;
-
 use crate::arch::{RiscvWasmJit, TemplateRiscv};
+use crate::hint;
 
 use super::*;
 
@@ -478,7 +476,7 @@ impl<'a> TemplateJit<'a> {
 impl<'a> RiscvDisplay for TemplateJit<'a> {
     fn Riscv(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         // if tget(self.react.clone(), self.pc) != JsValue::UNDEFINED {
-        return self.jit_js(f, |f,label_name,labels,nd|{
+        return self.jit_js(f, |f,_label_name,labels,nd|{
                let d =  self.params.flate.flate("data");
             let mut i = self.params.react.bytes(self.pc);
             let inst_code = u32::from_le_bytes(array::from_fn(|_| i.next().unwrap()));
@@ -491,6 +489,16 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
             match i {
                 Err(e) => write!(f, "throw new TypeError(`decoding: {e}`);"),
                 Ok((a, b)) => {
+                    // Emit HINT logging if test_mode is enabled
+                    if self.params.flags.test_mode {
+                        if let Some(hint_value) = hint::detect_test_marker(&a) {
+                            write!(
+                                f,
+                                "console.log(`[HINT] PC=0x{:x}: Test case {}`);;",
+                                self.pc, hint_value
+                            )?;
+                        }
+                    }
                     let next = match b {
                         rv_asm::IsCompressed::Yes => 2,
                         rv_asm::IsCompressed::No => 4,

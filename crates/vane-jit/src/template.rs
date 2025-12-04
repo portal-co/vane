@@ -30,6 +30,16 @@ pub struct Params<'a> {
 pub struct Flags{
     pub test_mode: bool,
 }
+
+impl Flags {
+    /// Create a new Flags with the specified test_mode value.
+    /// This is the preferred way to create Flags with non-default values
+    /// since the struct is non-exhaustive.
+    pub fn new_with_test_mode(test_mode: bool) -> Self {
+        Self { test_mode }
+    }
+}
+
 pub struct TemplateJit<'a> {
     pub params: Params<'a>,
     pub pc: u64,

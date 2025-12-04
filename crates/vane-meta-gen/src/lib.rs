@@ -183,6 +183,33 @@ macro_rules! vane_meta {
                     ),&f)
                     .to_string());
                 }
+                /// Generate JIT code with test_mode enabled for HINT instruction logging.
+                /// When test_mode is true, HINT instructions (`addi x0, x0, N`) will emit
+                /// console.log statements to mark test case boundaries.
+                #[wasm_bindgen(js_name = "j_test_mode",wasm_bindgen = $crate::wasm_bindgen)]
+                pub fn jit_code_test_mode(&self, a: u64) -> String {
+                    let f = $flate;
+                    return ($crate::vane_jit::template::CoreJS(&$y(
+                        &$crate::vane_jit::template::TemplateJit {
+                            params: Params {
+                                react: self,
+                                trial: &|a| match tget(self.clone(), a)
+                                    != $crate::wasm_bindgen::prelude::JsValue::UNDEFINED
+                                {
+                                    true => $crate::vane_jit::Heat::Cached,
+                                    false => $crate::vane_jit::Heat::New,
+                                },
+                                root: a,
+                                flate: &f,
+                                flags: $crate::vane_jit::template::Flags::new_with_test_mode(true)
+                            },
+                            pc: a,
+                            labels: &$crate::vane_jit::template::Labels::default(),
+                            depth: 0,
+                        },
+                    ),&f)
+                    .to_string());
+                }
                 #[wasm_bindgen(getter, js_name = "f",wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn u64_max(&self) -> u64 {
                     u64::MAX

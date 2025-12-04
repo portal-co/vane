@@ -2,7 +2,7 @@
 use alloc::format;
 use alloc::{boxed::Box, collections::btree_map::BTreeMap};
 use core::fmt::Formatter;
-use core::{cell::UnsafeCell, fmt::Display};
+use core::fmt::Display;
 use rv_asm::{Inst, Reg, Xlen};
 #[doc(hidden)]
 pub use core;
@@ -11,6 +11,7 @@ pub use paste;
 #[doc(hidden)]
 pub extern crate alloc;
 pub mod flate;
+pub mod hint;
 #[derive(Default)]
 pub struct Mem {
     pub pages: BTreeMap<u64, Box<[u8; 65536]>>,
