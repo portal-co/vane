@@ -142,6 +142,34 @@ macro_rules! rv_test {
             }
         }
     };
+    ($test_name:ident, $isa:expr, $binary:expr, $description:expr, $kind:ident, test_mode) => {
+        #[wasm_bindgen_test]
+        async fn $test_name() {
+            let binary_data = include_bytes!(concat!("rv-corpus/", $isa, "/", $binary));
+
+            let (reactor, entry_point) = create_reactor_with_binary(binary_data)
+                .expect(&format!("Failed to load {}/{} binary", $isa, $binary));
+
+            // Enable test_mode for HINT logging
+            reactor.set_test_mode(true);
+
+            // Run the test starting from the entry point
+            let result = reactor.$kind(entry_point).await;
+
+            // Check that execution completes successfully
+            match result {
+                Ok(_) => {
+                    // Test passed
+                }
+                Err(e) => {
+                    if !crate::has_success(e.clone()) {
+                        let err_str = format!("{:?}", e);
+                        panic!("{} test failed: {}", $description, err_str);
+                    }
+                }
+            }
+        }
+    };
 }
 
 // RV64I Tests
@@ -168,4 +196,24 @@ rv_test!(
     "01_multiply_divide_64",
     "RV64IM multiply/divide: 64-bit multiplication (MUL, MULH, MULHU, MULHSU), division (DIV, DIVU, REM, REMU), word operations (MULW, DIVW, DIVUW, REMW, REMUW), overflow handling",
     jit_run
+);
+
+// RV32I Tests - NOP and HINT instructions with test_mode enabled
+// This test exercises the HINT instruction parsing and logging behavior
+rv_test!(
+    test_rv32i_nop_and_hints_test_mode,
+    "rv32i",
+    "06_nop_and_hints",
+    "RV32I NOP and HINT instructions with test_mode: logs HINT markers (addi x0, x0, N) to console",
+    interp,
+    test_mode
+);
+
+// RV32I Tests - NOP and HINT with regular interpreter (no logging)
+rv_test!(
+    test_rv32i_nop_and_hints_interp,
+    "rv32i",
+    "06_nop_and_hints",
+    "RV32I NOP and HINT instructions: verifies NOPs and HINTs execute correctly without affecting state",
+    interp
 );

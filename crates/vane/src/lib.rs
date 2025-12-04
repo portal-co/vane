@@ -18,6 +18,7 @@ use vane_jit::template::{CoreJS, Params};
 use vane_jit::Heat;
 pub use vane_jit::Mem;
 use vane_jit::{arch::Riscv, JitCtx};
+pub use vane_jit::hint;
 use wasm_bindgen::prelude::*;
 
 #[cfg(test)]
@@ -32,10 +33,14 @@ vane_meta_gen::vane_meta!(Reactor, Core, Riscv, ReleaseFlate{});
     }
     export function has_success(err){
     return '__success' in err;
+    }
+    export function log_test_hint(pc, hint_value){
+        console.log(`[HINT] PC=0x${pc.toString(16)}: Test case ${hint_value}`);
     }"#)]
 extern "C" {
     fn log_success() -> JsValue;
     fn has_success(a: JsValue) -> bool;
+    fn log_test_hint(pc: u64, hint_value: i64);
 }
 
 // Non-wasm impl block for Rust-only APIs
@@ -49,6 +54,7 @@ impl Reactor {
                 mem,
                 state: OnceCell::new(),
                 regs: OnceCell::new(),
+                test_mode: false,
             })),
         }
     }
@@ -65,6 +71,7 @@ impl Reactor {
 impl Reactor {
     #[wasm_bindgen]
     pub async fn interp(&self, mut pc: u64) -> Result<JsValue, JsValue> {
+        let test_mode = self.core.lock().test_mode;
         let mut regs = self.save_regs();
         loop {
             regs[0] = 0;
@@ -78,6 +85,14 @@ impl Reactor {
                     return Err(JsValue::from_str(&format!("{e}")));
                 }
             };
+            
+            // Check for test marker HINTs when test_mode is enabled
+            if test_mode {
+                if let Some(hint_value) = hint::detect_test_marker(&i) {
+                    log_test_hint(pc, hint_value);
+                }
+            }
+            
             let next = match b {
                 rv_asm::IsCompressed::Yes => 2,
                 rv_asm::IsCompressed::No => 4,
