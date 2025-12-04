@@ -494,7 +494,7 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
                         if let Some(hint_value) = hint::detect_test_marker(&a) {
                             write!(
                                 f,
-                                "console.log(`[HINT] PC=0x{:x}: Test case {}`);;",
+                                "console.log(`[HINT] PC=0x{:x}: Test case {}`);",
                                 self.pc, hint_value
                             )?;
                         }
