@@ -148,6 +148,22 @@ impl<'b> TemplateJit<'b> {
         }
     }
 }
+/// Core JavaScript code generator with paging support
+///
+/// This struct generates JavaScript code that includes:
+/// - Helper functions for 64-bit arithmetic
+/// - Memory access through the paging system via `$.get_page()`
+///
+/// # Paging in JavaScript
+/// The generated `data` function performs address translation:
+/// ```javascript
+/// data = (p => {
+///     p = $.get_page(p);  // Translate virtual address to physical pointer
+///     return new DataView($._sys(`memory`).buffer, p);
+/// })
+/// ```
+///
+/// See PAGING.md for detailed documentation on the paging system.
 pub struct CoreJS<'a>(pub &'a (dyn Display + 'a), pub &'a (dyn Flate + 'a));
 impl<'a> Display for CoreJS<'a> {
     fn fmt(&self, fmt: &mut Formatter<'_>) -> core::fmt::Result {
