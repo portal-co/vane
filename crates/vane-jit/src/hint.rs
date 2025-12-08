@@ -128,3 +128,188 @@ pub fn detect_test_marker(inst: &Inst) -> Option<i64> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rv_asm::{Imm, Reg};
+
+    #[test]
+    fn test_detect_hint_addi() {
+        let inst = Inst::Addi {
+            dest: Reg(0),
+            src1: Reg(1),
+            imm: Imm::new_i32(42),
+        };
+        let hint = detect_hint(&inst);
+        assert!(hint.is_some());
+        let hint = hint.unwrap();
+        assert_eq!(hint.value, 42);
+        assert_eq!(hint.kind, HintKind::Addi);
+    }
+
+    #[test]
+    fn test_detect_hint_not_x0() {
+        let inst = Inst::Addi {
+            dest: Reg(1),
+            src1: Reg(2),
+            imm: Imm::new_i32(10),
+        };
+        assert!(detect_hint(&inst).is_none());
+    }
+
+    #[test]
+    fn test_detect_hint_andi() {
+        let inst = Inst::Andi {
+            dest: Reg(0),
+            src1: Reg(5),
+            imm: Imm::new_u32(255),
+        };
+        let hint = detect_hint(&inst);
+        assert!(hint.is_some());
+        assert_eq!(hint.unwrap().kind, HintKind::Andi);
+    }
+
+    #[test]
+    fn test_detect_hint_ori() {
+        let inst = Inst::Ori {
+            dest: Reg(0),
+            src1: Reg(3),
+            imm: Imm::new_u32(16),
+        };
+        let hint = detect_hint(&inst);
+        assert!(hint.is_some());
+        assert_eq!(hint.unwrap().kind, HintKind::Ori);
+    }
+
+    #[test]
+    fn test_detect_hint_xori() {
+        let inst = Inst::Xori {
+            dest: Reg(0),
+            src1: Reg(4),
+            imm: Imm::new_i32(-1),
+        };
+        let hint = detect_hint(&inst);
+        assert!(hint.is_some());
+        assert_eq!(hint.unwrap().kind, HintKind::Xori);
+    }
+
+    #[test]
+    fn test_detect_hint_lui() {
+        let inst = Inst::Lui {
+            dest: Reg(0),
+            uimm: Imm::new_u32(0x12345),
+        };
+        let hint = detect_hint(&inst);
+        assert!(hint.is_some());
+        assert_eq!(hint.unwrap().kind, HintKind::Lui);
+    }
+
+    #[test]
+    fn test_detect_hint_add() {
+        let inst = Inst::Add {
+            dest: Reg(0),
+            src1: Reg(2),
+            src2: Reg(3),
+        };
+        let hint = detect_hint(&inst);
+        assert!(hint.is_some());
+        assert_eq!(hint.unwrap().kind, HintKind::RegReg);
+        assert_eq!(hint.unwrap().value, 0);
+    }
+
+    #[test]
+    fn test_detect_hint_sub() {
+        let inst = Inst::Sub {
+            dest: Reg(0),
+            src1: Reg(1),
+            src2: Reg(2),
+        };
+        let hint = detect_hint(&inst);
+        assert!(hint.is_some());
+        assert_eq!(hint.unwrap().kind, HintKind::RegReg);
+    }
+
+    #[test]
+    fn test_detect_test_marker_valid() {
+        let inst = Inst::Addi {
+            dest: Reg(0),
+            src1: Reg(0),
+            imm: Imm::new_i32(100),
+        };
+        let marker = detect_test_marker(&inst);
+        assert!(marker.is_some());
+        assert_eq!(marker.unwrap(), 100);
+    }
+
+    #[test]
+    fn test_detect_test_marker_zero_imm() {
+        let inst = Inst::Addi {
+            dest: Reg(0),
+            src1: Reg(0),
+            imm: Imm::ZERO,
+        };
+        assert!(detect_test_marker(&inst).is_none());
+    }
+
+    #[test]
+    fn test_detect_test_marker_wrong_src() {
+        let inst = Inst::Addi {
+            dest: Reg(0),
+            src1: Reg(1),
+            imm: Imm::new_i32(50),
+        };
+        assert!(detect_test_marker(&inst).is_none());
+    }
+
+    #[test]
+    fn test_detect_test_marker_wrong_dest() {
+        let inst = Inst::Addi {
+            dest: Reg(1),
+            src1: Reg(0),
+            imm: Imm::new_i32(50),
+        };
+        assert!(detect_test_marker(&inst).is_none());
+    }
+
+    #[test]
+    fn test_detect_test_marker_negative() {
+        let inst = Inst::Addi {
+            dest: Reg(0),
+            src1: Reg(0),
+            imm: Imm::new_i32(-5),
+        };
+        let marker = detect_test_marker(&inst);
+        assert!(marker.is_some());
+        assert_eq!(marker.unwrap(), -5);
+    }
+
+    #[test]
+    fn test_detect_hint_non_hint_instruction() {
+        let inst = Inst::Add {
+            dest: Reg(5),
+            src1: Reg(1),
+            src2: Reg(2),
+        };
+        assert!(detect_hint(&inst).is_none());
+    }
+
+    #[test]
+    fn test_hint_eq() {
+        let hint1 = Hint {
+            value: 42,
+            kind: HintKind::Addi,
+        };
+        let hint2 = Hint {
+            value: 42,
+            kind: HintKind::Addi,
+        };
+        let hint3 = Hint {
+            value: 43,
+            kind: HintKind::Addi,
+        };
+        
+        assert_eq!(hint1, hint2);
+        assert_ne!(hint1, hint3);
+    }
+}

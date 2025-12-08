@@ -484,3 +484,167 @@ pub trait WasmJit {
 }
 pub mod arch;
 pub mod template;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mem_write_read_byte() {
+        let mut mem = Mem::default();
+        
+        // Write and read a single byte
+        mem.write_byte(0x1000, 0x42);
+        assert_eq!(mem.read_byte(0x1000), 0x42);
+        
+        // Reading uninitialized memory returns 0
+        assert_eq!(mem.read_byte(0x2000), 0);
+    }
+
+    #[test]
+    fn test_mem_page_allocation() {
+        let mut mem = Mem::default();
+        
+        // Write to different pages
+        mem.write_byte(0x0000_0100, 0xAA);
+        mem.write_byte(0x0001_0100, 0xBB);
+        mem.write_byte(0x0010_0000, 0xCC);
+        
+        // Verify pages are allocated and contain correct data
+        assert_eq!(mem.read_byte(0x0000_0100), 0xAA);
+        assert_eq!(mem.read_byte(0x0001_0100), 0xBB);
+        assert_eq!(mem.read_byte(0x0010_0000), 0xCC);
+        
+        // Verify page boundaries (64KB pages)
+        assert_eq!(mem.pages.len(), 3);
+    }
+
+    #[test]
+    fn test_mem_page_offset() {
+        let mut mem = Mem::default();
+        
+        // Test page offset calculation (bits [15:0])
+        mem.write_byte(0x0000_0000, 0x11);
+        mem.write_byte(0x0000_FFFF, 0x22);
+        
+        assert_eq!(mem.read_byte(0x0000_0000), 0x11);
+        assert_eq!(mem.read_byte(0x0000_FFFF), 0x22);
+    }
+
+    #[test]
+    fn test_mem_translate_to_wasm_legacy() {
+        let mem = Mem::default();
+        let wasm_base = 0x1000_0000;
+        
+        // Test address translation
+        // vaddr = 0x0001_2345
+        // page_num = 0x1, page_offset = 0x2345
+        // physical = wasm_base + (1 * 65536) + 0x2345
+        let vaddr = 0x0001_2345;
+        let expected = wasm_base + (1 * 65536) + 0x2345;
+        assert_eq!(mem.translate_to_wasm_legacy(vaddr, wasm_base), expected);
+        
+        // Test zero address
+        assert_eq!(mem.translate_to_wasm_legacy(0, wasm_base), wasm_base);
+    }
+
+    #[test]
+    fn test_mem_shared_paging_translation() {
+        let mut mem = Mem::default();
+        mem.paging_mode = PagingMode::Both;
+        mem.shared_page_table_vaddr = Some(0x1000);
+        
+        // Setup page table entry
+        // Virtual page 2 -> Physical page at 0x200000
+        let page_table_entry_addr = 0x1000 + (2 * 8);
+        let phys_page_base = 0x20_0000u64;
+        
+        for (i, byte) in phys_page_base.to_le_bytes().iter().enumerate() {
+            mem.write_byte(page_table_entry_addr + i as u64, *byte);
+        }
+        
+        // Test translation: vaddr 0x2_1234 should map to phys 0x20_1234
+        let vaddr = 0x2_1234;
+        let phys = mem.translate_shared(vaddr);
+        assert_eq!(phys, 0x20_1234);
+    }
+
+    #[test]
+    fn test_mem_shared_paging_32bit() {
+        let mut mem = Mem::default();
+        mem.paging_mode = PagingMode::Both;
+        mem.shared_page_table_vaddr = Some(0x1000);
+        
+        // Setup page table entry for 32-bit addresses
+        let page_table_entry_addr = 0x1000 + (3 * 4);
+        let phys_page_base = 0x30_0000u32;
+        
+        for (i, byte) in phys_page_base.to_le_bytes().iter().enumerate() {
+            mem.write_byte(page_table_entry_addr + i as u64, *byte);
+        }
+        
+        // Test translation
+        let vaddr = 0x3_5678;
+        let phys = mem.translate_shared_32(vaddr);
+        assert_eq!(phys, 0x30_5678);
+    }
+
+    #[test]
+    fn test_mem_multilevel_paging() {
+        let mut mem = Mem::default();
+        let l3_table_base = 0x10_0000;
+        
+        // Setup L3 -> L2 -> L1 -> Physical mapping
+        // Virtual address: 0x0001_0002_0003_1234
+        // L3 index (bits 63:48): 0x1
+        // L2 index (bits 47:32): 0x2
+        // L1 index (bits 31:16): 0x3
+        // Page offset (bits 15:0): 0x1234
+        
+        let l2_table_base = 0x20_0000u64;
+        let l1_table_base = 0x30_0000u64;
+        let phys_page_base = 0x40_0000u64;
+        
+        // L3[1] = L2 table address
+        let l3_entry_addr = l3_table_base + (1 * 8);
+        for (i, byte) in l2_table_base.to_le_bytes().iter().enumerate() {
+            mem.write_byte(l3_entry_addr + i as u64, *byte);
+        }
+        
+        // L2[2] = L1 table address
+        let l2_entry_addr = l2_table_base + (2 * 8);
+        for (i, byte) in l1_table_base.to_le_bytes().iter().enumerate() {
+            mem.write_byte(l2_entry_addr + i as u64, *byte);
+        }
+        
+        // L1[3] = Physical page base
+        let l1_entry_addr = l1_table_base + (3 * 8);
+        for (i, byte) in phys_page_base.to_le_bytes().iter().enumerate() {
+            mem.write_byte(l1_entry_addr + i as u64, *byte);
+        }
+        
+        // Test translation
+        let vaddr = 0x0001_0002_0003_1234;
+        let phys = mem.translate_shared_multilevel(vaddr, l3_table_base);
+        assert_eq!(phys, 0x40_1234);
+    }
+
+    #[test]
+    fn test_paging_mode_default() {
+        let mem = Mem::default();
+        assert_eq!(mem.paging_mode, PagingMode::Legacy);
+    }
+
+    #[test]
+    fn test_mem_boundary_conditions() {
+        let mut mem = Mem::default();
+        
+        // Test maximum offset within a page
+        mem.write_byte(0xFFFF, 0xEE);
+        assert_eq!(mem.read_byte(0xFFFF), 0xEE);
+        
+        // Test page boundary crossing
+        mem.write_byte(0x0001_0000, 0xDD);
+        assert_eq!(mem.read_byte(0x0001_0000), 0xDD);
+    }
+}
