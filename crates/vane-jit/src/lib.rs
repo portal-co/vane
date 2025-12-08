@@ -76,6 +76,9 @@ pub struct Mem {
     /// Shared paging: virtual address of page table base (in legacy address space)
     /// When using Both mode, this address is translated through legacy system
     pub shared_page_table_vaddr: Option<u64>,
+    
+    /// Shared paging: virtual address of security directory (in legacy address space)
+    pub shared_security_directory_vaddr: Option<u64>,
 }
 impl Mem {
     /// Get a pointer to a specific address in memory (legacy system)
@@ -104,65 +107,40 @@ impl Mem {
     }
 
     /// Translate address through shared page table (nested in legacy memory)
-    ///
-    /// This performs two-level translation when using PagingMode::Both:
-    /// 1. Use shared page table (stored at shared_page_table_vaddr in legacy space)
-    /// 2. Look up physical page base using shared table
-    /// 3. Return final address
-    ///
-    /// The page table is accessed through get_page(), so it benefits from
-    /// legacy on-demand allocation.
-    ///
-    /// # Arguments
-    /// * `vaddr` - Virtual address to translate via shared system
-    ///
-    /// # Returns
-    /// Physical address after shared page table translation
-    ///
-    /// # Panics
-    /// Panics if paging_mode is not Both or shared_page_table_vaddr is None
     pub fn translate_shared(&mut self, vaddr: u64) -> u64 {
-        let pt_base = self
-            .shared_page_table_vaddr
-            .expect("shared_page_table_vaddr must be set for shared translation");
+        let pt_base = self.shared_page_table_vaddr.expect("shared_page_table_vaddr must be set");
+        let sec_dir_base = self.shared_security_directory_vaddr.expect("shared_security_directory_vaddr must be set");
 
-        // Extract page number from virtual address
         let page_num = vaddr >> 16;
         let page_offset = vaddr & 0xFFFF;
 
-        // Calculate page table entry address (in legacy virtual space)
-        // Each entry is 8 bytes (u64), so: pt_base + (page_num * 8)
         let entry_vaddr = pt_base + (page_num * 8);
-
-        // Read physical page base from page table (via legacy system)
-        // This will automatically allocate pages as needed via get_page()
-        let mut phys_page_bytes = [0u8; 8];
+        let mut page_pointer_bytes = [0u8; 8];
         for i in 0u64..8 {
-            phys_page_bytes[i as usize] = self.read_byte(entry_vaddr + i);
+            page_pointer_bytes[i as usize] = self.read_byte(entry_vaddr + i);
         }
-        let phys_page = u64::from_le_bytes(phys_page_bytes);
+        let page_pointer = u64::from_le_bytes(page_pointer_bytes);
 
-        // Combine physical page base with offset
-        phys_page + page_offset
+        let sec_idx = page_pointer & 0xFFFF;
+        let page_base_low48 = page_pointer >> 16;
+
+        let sec_entry_vaddr = sec_dir_base + (sec_idx * 8);
+        let mut sec_entry_bytes = [0u8; 8];
+        for i in 0u64..8 {
+            sec_entry_bytes[i as usize] = self.read_byte(sec_entry_vaddr + i);
+        }
+        let sec_entry = u64::from_le_bytes(sec_entry_bytes);
+        let page_base_top16 = sec_entry >> 48;
+
+        let phys_page_base = (page_base_top16 << 48) | page_base_low48;
+        phys_page_base + page_offset
     }
 
     /// Translate address using multi-level page table (nested in legacy memory)
-    ///
-    /// This performs two-level translation with a 3-level page table structure:
-    /// 1. Page table stored at l3_table_vaddr in legacy address space
-    /// 2. Walk through L3 → L2 → L1 tables
-    /// 3. Return final physical address
-    ///
-    /// All table accesses go through legacy system for on-demand allocation.
-    ///
-    /// # Arguments
-    /// * `vaddr` - Virtual address to translate
-    /// * `l3_table_vaddr` - Virtual address of level 3 table (in legacy space)
-    ///
-    /// # Returns
-    /// Physical address after multi-level translation
-    pub fn translate_shared_multilevel(&mut self, vaddr: u64, l3_table_vaddr: u64) -> u64 {
-        // Helper to read u64 from legacy virtual memory
+    pub fn translate_shared_multilevel(&mut self, vaddr: u64) -> u64 {
+        let l3_table_vaddr = self.shared_page_table_vaddr.expect("shared_page_table_vaddr must be set");
+        let sec_dir_base = self.shared_security_directory_vaddr.expect("shared_security_directory_vaddr must be set");
+
         let read_u64 = |mem: &mut Self, addr: u64| -> u64 {
             let mut bytes = [0u8; 8];
             for i in 0u64..8 {
@@ -171,48 +149,37 @@ impl Mem {
             u64::from_le_bytes(bytes)
         };
 
-        // Level 3: bits [63:48]
+        // L3
         let l3_idx = (vaddr >> 48) & 0xFFFF;
         let l3_entry_addr = l3_table_vaddr + (l3_idx * 8);
         let l2_table_vaddr = read_u64(self, l3_entry_addr);
 
-        // Level 2: bits [47:32]
+        // L2
         let l2_idx = (vaddr >> 32) & 0xFFFF;
         let l2_entry_addr = l2_table_vaddr + (l2_idx * 8);
         let l1_table_vaddr = read_u64(self, l2_entry_addr);
 
-        // Level 1: bits [31:16]
+        // L1
         let l1_idx = (vaddr >> 16) & 0xFFFF;
         let l1_entry_addr = l1_table_vaddr + (l1_idx * 8);
-        let phys_page = read_u64(self, l1_entry_addr);
+        let page_pointer = read_u64(self, l1_entry_addr);
 
-        // Page offset: bits [15:0]
-        let page_offset = vaddr & 0xFFFF;
+        let sec_idx = page_pointer & 0xFFFF;
+        let page_base_low48 = page_pointer >> 16;
+        
+        let sec_entry_vaddr = sec_dir_base + (sec_idx * 4);
+        let mut sec_entry_bytes = [0u8; 4];
+        for i in 0u64..4 {
+            sec_entry_bytes[i as usize] = self.read_byte(sec_entry_vaddr + i);
+        }
+        let sec_entry = u32::from_le_bytes(sec_entry_bytes);
+        let page_base_top16 = (sec_entry >> 16) as u64;
 
-        phys_page + page_offset
+        let phys_page_base = (page_base_top16 << 48) | page_base_low48;
+        phys_page_base + (vaddr & 0xFFFF)
     }
 
     /// Translate a virtual address to a physical address for WASM memory (legacy mode)
-    ///
-    /// This function provides address translation for targeting WebAssembly linear memory
-    /// using identity mapping (no page table lookup).
-    ///
-    /// # Arguments
-    /// * `vaddr` - Virtual address to translate
-    /// * `wasm_memory_base` - Base offset in WASM linear memory where pages are mapped
-    ///
-    /// # Returns
-    /// Physical offset in WASM linear memory
-    ///
-    /// # Page Mapping
-    /// The physical address is computed as:
-    /// ```text
-    /// physical = wasm_memory_base + (page_number * 65536) + page_offset
-    /// ```
-    ///
-    /// Where:
-    /// - `page_number = vaddr >> 16`
-    /// - `page_offset = vaddr & 0xFFFF`
     pub fn translate_to_wasm_legacy(&self, vaddr: u64, wasm_memory_base: u64) -> u64 {
         let page_num = vaddr >> 16;
         let page_offset = vaddr & 0xFFFF;
@@ -220,221 +187,183 @@ impl Mem {
     }
 
     /// Generate JavaScript code for shared page table lookup (nested in legacy)
-    ///
-    /// This generates inline JavaScript code that performs page table translation
-    /// where the page table is stored in the legacy system's virtual memory.
-    /// Each page table access goes through $.get_page() for proper nesting.
-    ///
-    /// # Arguments
-    /// * `vaddr_var` - Name of JavaScript variable containing virtual address
-    /// * `page_table_vaddr_var` - Virtual address of page table (in legacy space)
-    ///
-    /// # Returns
-    /// JavaScript expression string that evaluates to the physical address
-    ///
-    /// # Example
-    /// ```ignore
-    /// let js = mem.generate_shared_paging_js("vaddr", "pt_base");
-    /// // Reads page table entry via $.get_page(), then translates
-    /// ```
     pub fn generate_shared_paging_js<'a>(
         &'a self,
         vaddr_var: &'a (dyn Display + 'a),
         page_table_vaddr_var: &'a (dyn Display + 'a),
+        security_directory_vaddr_var: &'a (dyn Display + 'a),
     ) -> impl Display + 'a {
         struct SharedPaging<'a> {
             vaddr: &'a (dyn Display + 'a),
             pt_base: &'a (dyn Display + 'a),
+            sec_dir_base: &'a (dyn Display + 'a),
         }
         impl<'a> Display for SharedPaging<'a> {
             fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
                 write!(
                     f,
-                    "((v,pt)=>{{let page_num=v>>16n,page_offset=v&0xFFFFn,entry_addr=pt+(page_num<<3n);let phys_page=0n;for(let i=0n;i<8n;i++){{phys_page|=(BigInt(new Uint8Array($._sys('memory').buffer,$.get_page(entry_addr+i),1)[0])<<(i*8n));}}return phys_page+page_offset;}})({},{})",
-                    self.vaddr, self.pt_base
+                    "((v,pt,sd)=>{{let page_num=v>>16n;let entry_addr=pt+(page_num<<3n);let page_pointer=0n;for(let i=0n;i<8n;i++){{page_pointer|=(BigInt(new Uint8Array($._sys('memory').buffer,$.get_page(entry_addr+i),1)[0])<<(i*8n));}}let sec_idx=page_pointer&0xFFFFn;let page_base_low48=page_pointer>>16n;let sec_entry_addr=sd+(sec_idx<<2n);let sec_entry=0;for(let i=0;i<4;i++){{sec_entry|=(new Uint8Array($._sys('memory').buffer,$.get_page(sec_entry_addr+BigInt(i)),1)[0]<<(i*8));}}let page_base_top16=BigInt(sec_entry>>16);let phys_page_base=(page_base_top16<<48n)|page_base_low48;return phys_page_base+(v&0xFFFFn);}})({},{},{})",
+                    self.vaddr, self.pt_base, self.sec_dir_base
                 )
             }
         }
         SharedPaging {
             vaddr: vaddr_var,
             pt_base: page_table_vaddr_var,
+            sec_dir_base: security_directory_vaddr_var,
         }
     }
 
     /// Generate JavaScript code for multi-level page table lookup (nested in legacy)
-    ///
-    /// This generates inline JavaScript code that performs 3-level page table translation
-    /// where all page tables are stored in legacy system's virtual memory.
-    /// All table accesses go through $.get_page() for proper nesting.
-    ///
-    /// # Arguments
-    /// * `vaddr_var` - Name of JavaScript variable containing virtual address
-    /// * `l3_table_vaddr_var` - Virtual address of level 3 table (in legacy space)
-    ///
-    /// # Returns
-    /// JavaScript expression string that evaluates to the physical address
     pub fn generate_multilevel_paging_js<'a>(
         &'a self,
         vaddr_var: &'a (dyn Display + 'a),
         l3_table_vaddr_var: &'a (dyn Display + 'a),
+        security_directory_vaddr_var: &'a (dyn Display + 'a),
     ) -> impl Display + 'a {
         struct MultilevelPaging<'a> {
             vaddr: &'a (dyn Display + 'a),
-            l3_table_vaddr: &'a (dyn Display + 'a),
+            l3_base: &'a (dyn Display + 'a),
+            sec_dir_base: &'a (dyn Display + 'a),
         }
         impl<'a> Display for MultilevelPaging<'a> {
             fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
                 write!(
                     f,
-                    "((v,l3)=>{{let read_u64=(addr)=>{{let val=0n;for(let i=0n;i<8n;i++){{val|=(BigInt(new Uint8Array($._sys('memory').buffer,$.get_page(addr+i),1)[0])<<(i*8n));}}return val;}};let l3_idx=(v>>48n)&0xFFFFn,l3_entry_addr=l3+(l3_idx<<3n);let l2_table_vaddr=read_u64(l3_entry_addr);let l2_idx=(v>>32n)&0xFFFFn,l2_entry_addr=l2_table_vaddr+(l2_idx<<3n);let l1_table_vaddr=read_u64(l2_entry_addr);let l1_idx=(v>>16n)&0xFFFFn,l1_entry_addr=l1_table_vaddr+(l1_idx<<3n);let phys_page=read_u64(l1_entry_addr);let page_offset=v&0xFFFFn;return phys_page+page_offset;}})({},{})",
-                    self.vaddr, self.l3_table_vaddr
+                    "((v,l3,sd)=>{{let read_u64=(addr)=>{{let val=0n;for(let i=0n;i<8n;i++){{val|=(BigInt(new Uint8Array($._sys('memory').buffer,$.get_page(addr+i),1)[0])<<(i*8n));}}return val;}};let l3_idx=(v>>48n)&0xFFFFn;let l2_table_vaddr=read_u64(l3+(l3_idx<<3n));let l2_idx=(v>>32n)&0xFFFFn;let l1_table_vaddr=read_u64(l2_table_vaddr+(l2_idx<<3n));let l1_idx=(v>>16n)&0xFFFFn;let page_pointer=read_u64(l1_table_vaddr+(l1_idx<<3n));let sec_idx=page_pointer&0xFFFFn;let page_base_low48=page_pointer>>16n;let sec_entry_addr=sd+(sec_idx<<2n);let sec_entry=0;for(let i=0;i<4;i++){{sec_entry|=(new Uint8Array($._sys('memory').buffer,$.get_page(sec_entry_addr+BigInt(i)),1)[0]<<(i*8));}}let page_base_top16=BigInt(sec_entry>>16);let phys_page_base=(page_base_top16<<48n)|page_base_low48;return phys_page_base+(v&0xFFFFn);}})({},{},{})",
+                    self.vaddr, self.l3_base, self.sec_dir_base
                 )
             }
         }
         MultilevelPaging {
             vaddr: vaddr_var,
-            l3_table_vaddr: l3_table_vaddr_var,
+            l3_base: l3_table_vaddr_var,
+            sec_dir_base: security_directory_vaddr_var,
         }
     }
 
     /// Translate address through shared page table with 32-bit physical addresses
-    ///
-    /// This variant uses 4-byte page table entries for 32-bit physical addresses,
-    /// supporting up to 4 GiB of physical memory.
-    ///
-    /// # Arguments
-    /// * `vaddr` - Virtual address to translate (64-bit)
-    ///
-    /// # Returns
-    /// Physical address (32-bit, returned as u64)
     pub fn translate_shared_32(&mut self, vaddr: u64) -> u64 {
-        let pt_base = self
-            .shared_page_table_vaddr
-            .expect("shared_page_table_vaddr must be set for shared translation");
+        let pt_base = self.shared_page_table_vaddr.expect("shared_page_table_vaddr must be set");
+        let sec_dir_base = self.shared_security_directory_vaddr.expect("shared_security_directory_vaddr must be set");
 
         let page_num = vaddr >> 16;
         let page_offset = vaddr & 0xFFFF;
 
-        // Calculate page table entry address (4 bytes per entry)
         let entry_vaddr = pt_base + (page_num * 4);
-
-        // Read 32-bit physical page base from page table (via legacy system)
-        let mut phys_page_bytes = [0u8; 4];
+        let mut page_pointer_bytes = [0u8; 4];
         for i in 0u64..4 {
-            phys_page_bytes[i as usize] = self.read_byte(entry_vaddr + i);
+            page_pointer_bytes[i as usize] = self.read_byte(entry_vaddr + i);
         }
-        let phys_page = u32::from_le_bytes(phys_page_bytes) as u64;
+        let page_pointer = u32::from_le_bytes(page_pointer_bytes);
 
-        phys_page + page_offset
+        let sec_idx = (page_pointer & 0xFF) as u64;
+        let page_base_low24 = (page_pointer >> 8) as u64;
+        
+        let sec_entry_vaddr = sec_dir_base + (sec_idx * 4);
+        let mut sec_entry_bytes = [0u8; 4];
+        for i in 0u64..4 {
+            sec_entry_bytes[i as usize] = self.read_byte(sec_entry_vaddr + i);
+        }
+        let sec_entry = u32::from_le_bytes(sec_entry_bytes);
+        let page_base_top8 = (sec_entry >> 24) as u64;
+
+        let phys_page_base = (page_base_top8 << 24) | page_base_low24;
+        phys_page_base + page_offset
     }
 
     /// Translate address using multi-level page table with 32-bit physical addresses
-    ///
-    /// This variant uses 4-byte page table entries for 32-bit physical addresses
-    /// in a 3-level page table structure.
-    ///
-    /// # Arguments
-    /// * `vaddr` - Virtual address to translate (64-bit)
-    /// * `l3_table_vaddr` - Virtual address of level 3 table (in legacy space)
-    ///
-    /// # Returns
-    /// Physical address (32-bit, returned as u64)
-    pub fn translate_shared_multilevel_32(&mut self, vaddr: u64, l3_table_vaddr: u64) -> u64 {
-        // Helper to read u32 from legacy virtual memory
-        let read_u32 = |mem: &mut Self, addr: u64| -> u64 {
+    pub fn translate_shared_multilevel_32(&mut self, vaddr: u64) -> u64 {
+        let l3_table_vaddr = self.shared_page_table_vaddr.expect("shared_page_table_vaddr must be set");
+        let sec_dir_base = self.shared_security_directory_vaddr.expect("shared_security_directory_vaddr must be set");
+        
+        let read_u32 = |mem: &mut Self, addr: u64| -> u32 {
             let mut bytes = [0u8; 4];
             for i in 0u64..4 {
                 bytes[i as usize] = mem.read_byte(addr + i);
             }
-            u32::from_le_bytes(bytes) as u64
+            u32::from_le_bytes(bytes)
         };
 
-        // Level 3: bits [63:48]
+        // L3
         let l3_idx = (vaddr >> 48) & 0xFFFF;
         let l3_entry_addr = l3_table_vaddr + (l3_idx * 4);
-        let l2_table_vaddr = read_u32(self, l3_entry_addr);
+        let l2_table_vaddr = read_u32(self, l3_entry_addr) as u64;
 
-        // Level 2: bits [47:32]
+        // L2
         let l2_idx = (vaddr >> 32) & 0xFFFF;
         let l2_entry_addr = l2_table_vaddr + (l2_idx * 4);
-        let l1_table_vaddr = read_u32(self, l2_entry_addr);
+        let l1_table_vaddr = read_u32(self, l2_entry_addr) as u64;
 
-        // Level 1: bits [31:16]
+        // L1
         let l1_idx = (vaddr >> 16) & 0xFFFF;
         let l1_entry_addr = l1_table_vaddr + (l1_idx * 4);
-        let phys_page = read_u32(self, l1_entry_addr);
+        let page_pointer = read_u32(self, l1_entry_addr);
 
-        // Page offset: bits [15:0]
-        let page_offset = vaddr & 0xFFFF;
+        let sec_idx = (page_pointer & 0xFF) as u64;
+        let page_base_low24 = (page_pointer >> 8) as u64;
 
-        phys_page + page_offset
+        let sec_entry_vaddr = sec_dir_base + (sec_idx * 4);
+        let sec_entry = read_u32(self, sec_entry_vaddr);
+        let page_base_top8 = (sec_entry >> 24) as u64;
+
+        let phys_page_base = (page_base_top8 << 24) | page_base_low24;
+        phys_page_base + (vaddr & 0xFFFF)
     }
 
     /// Generate JavaScript code for shared page table lookup with 32-bit physical addresses
-    ///
-    /// This variant generates code that uses 4-byte page table entries.
-    ///
-    /// # Arguments
-    /// * `vaddr_var` - Name of JavaScript variable containing virtual address
-    /// * `page_table_vaddr_var` - Virtual address of page table (in legacy space)
-    ///
-    /// # Returns
-    /// JavaScript expression string that evaluates to the physical address
     pub fn generate_shared_paging_js_32<'a>(
         &'a self,
         vaddr_var: &'a (dyn Display + 'a),
         page_table_vaddr_var: &'a (dyn Display + 'a),
+        security_directory_vaddr_var: &'a (dyn Display + 'a),
     ) -> impl Display + 'a {
         struct SharedPaging32<'a> {
             vaddr: &'a (dyn Display + 'a),
             pt_base: &'a (dyn Display + 'a),
+            sec_dir_base: &'a (dyn Display + 'a),
         }
         impl<'a> Display for SharedPaging32<'a> {
             fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
                 write!(
                     f,
-                    "((v,pt)=>{{let page_num=v>>16n,page_offset=v&0xFFFFn,entry_addr=pt+(page_num<<2n);let phys_page=0n;for(let i=0n;i<4n;i++){{phys_page|=(BigInt(new Uint8Array($._sys('memory').buffer,$.get_page(entry_addr+i),1)[0])<<(i*8n));}}return phys_page+page_offset;}})({},{})",
-                    self.vaddr, self.pt_base
+                    "((v,pt,sd)=>{{let page_num=v>>16n;let entry_addr=pt+(page_num<<2n);let page_pointer=0;for(let i=0;i<4;i++){{page_pointer|=(new Uint8Array($._sys('memory').buffer,$.get_page(entry_addr+BigInt(i)),1)[0]<<(i*8));}}let sec_idx=page_pointer&0xFF;let page_base_low24=page_pointer>>8;let sec_entry_addr=sd+BigInt(sec_idx<<2);let sec_entry=0;for(let i=0;i<4;i++){{sec_entry|=(new Uint8Array($._sys('memory').buffer,$.get_page(sec_entry_addr+BigInt(i)),1)[0]<<(i*8));}}let page_base_top8=sec_entry>>24;let phys_page_base=BigInt((page_base_top8<<24)|page_base_low24);return phys_page_base+(v&0xFFFFn);}})({},{},{})",
+                    self.vaddr, self.pt_base, self.sec_dir_base
                 )
             }
         }
         SharedPaging32 {
             vaddr: vaddr_var,
             pt_base: page_table_vaddr_var,
+            sec_dir_base: security_directory_vaddr_var,
         }
     }
 
     /// Generate JavaScript code for multi-level page table lookup with 32-bit physical addresses
-    ///
-    /// This variant generates code that uses 4-byte page table entries in a 3-level structure.
-    ///
-    /// # Arguments
-    /// * `vaddr_var` - Name of JavaScript variable containing virtual address
-    /// * `l3_table_vaddr_var` - Virtual address of level 3 table (in legacy space)
-    ///
-    /// # Returns
-    /// JavaScript expression string that evaluates to the physical address
     pub fn generate_multilevel_paging_js_32<'a>(
         &'a self,
         vaddr_var: &'a (dyn Display + 'a),
         l3_table_vaddr_var: &'a (dyn Display + 'a),
+        security_directory_vaddr_var: &'a (dyn Display + 'a),
     ) -> impl Display + 'a {
         struct MultilevelPaging32<'a> {
             vaddr: &'a (dyn Display + 'a),
-            l3_table_vaddr: &'a (dyn Display + 'a),
+            l3_base: &'a (dyn Display + 'a),
+            sec_dir_base: &'a (dyn Display + 'a),
         }
         impl<'a> Display for MultilevelPaging32<'a> {
             fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
                 write!(
                     f,
-                    "((v,l3)=>{{let read_u32=(addr)=>{{let val=0n;for(let i=0n;i<4n;i++){{val|=(BigInt(new Uint8Array($._sys('memory').buffer,$.get_page(addr+i),1)[0])<<(i*8n));}}return val;}};let l3_idx=(v>>48n)&0xFFFFn,l3_entry_addr=l3+(l3_idx<<2n);let l2_table_vaddr=read_u32(l3_entry_addr);let l2_idx=(v>>32n)&0xFFFFn,l2_entry_addr=l2_table_vaddr+(l2_idx<<2n);let l1_table_vaddr=read_u32(l2_entry_addr);let l1_idx=(v>>16n)&0xFFFFn,l1_entry_addr=l1_table_vaddr+(l1_idx<<2n);let phys_page=read_u32(l1_entry_addr);let page_offset=v&0xFFFFn;return phys_page+page_offset;}})({},{})",
-                    self.vaddr, self.l3_table_vaddr
+                    "((v,l3,sd)=>{{let read_u32=(addr)=>{{let val=0;for(let i=0;i<4;i++){{val|=(new Uint8Array($._sys('memory').buffer,$.get_page(addr+BigInt(i)),1)[0]<<(i*8));}}return val;}};let l3_idx=(v>>48n)&0xFFFFn;let l2_table_vaddr=BigInt(read_u32(l3+(l3_idx<<2n)));let l2_idx=(v>>32n)&0xFFFFn;let l1_table_vaddr=BigInt(read_u32(l2_table_vaddr+(l2_idx<<2n)));let l1_idx=(v>>16n)&0xFFFFn;let page_pointer=read_u32(l1_table_vaddr+(l1_idx<<2n));let sec_idx=page_pointer&0xFF;let page_base_low24=page_pointer>>8;let sec_entry_addr=sd+BigInt(sec_idx<<2);let sec_entry=read_u32(sec_entry_addr);let page_base_top8=sec_entry>>24;let phys_page_base=BigInt((page_base_top8<<24)|page_base_low24);return phys_page_base+(v&0xFFFFn);}})({},{},{})",
+                    self.vaddr, self.l3_base, self.sec_dir_base
                 )
             }
         }
         MultilevelPaging32 {
             vaddr: vaddr_var,
             l3_table_vaddr: l3_table_vaddr_var,
+            sec_dir_base: security_directory_vaddr_var,
         }
     }
 

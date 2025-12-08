@@ -31,6 +31,7 @@ pub struct Flags {
     pub test_mode: bool,
     pub paging_mode: Option<PagingMode>,
     pub shared_page_table_vaddr: Option<u64>,
+    pub shared_security_directory_vaddr: Option<u64>,
     pub use_32bit_paging: bool,
     pub use_multilevel_paging: bool,
 }
@@ -51,6 +52,7 @@ impl Flags {
         test_mode: bool,
         paging_mode: PagingMode,
         shared_page_table_vaddr: Option<u64>,
+        shared_security_directory_vaddr: Option<u64>,
         use_32bit_paging: bool,
         use_multilevel_paging: bool,
     ) -> Self {
@@ -58,6 +60,7 @@ impl Flags {
             test_mode,
             paging_mode: Some(paging_mode),
             shared_page_table_vaddr,
+            shared_security_directory_vaddr,
             use_32bit_paging,
             use_multilevel_paging,
         }
@@ -214,26 +217,22 @@ impl<'a> CoreJS<'a> {
     fn write_data_function(&self, f: &mut Formatter<'_>, data_var: &dyn Display) -> core::fmt::Result {
         match self.flags.paging_mode {
             Some(PagingMode::Shared) | Some(PagingMode::Both) => {
-                // Generate shared page table translation
-                if let Some(pt_vaddr) = self.flags.shared_page_table_vaddr {
-                    if self.flags.use_multilevel_paging {
-                        // Multi-level paging
-                        if self.flags.use_32bit_paging {
-                            write!(f, "{data_var}=(v=>{{let read_u32=(addr)=>{{let val=0n;for(let i=0n;i<4n;i++){{val|=(BigInt(new Uint8Array($._sys('memory').buffer,$.get_page(addr+i),1)[0])<<(i*8n));}}return val;}};let l3_idx=(v>>48n)&0xFFFFn,l3_entry_addr={pt_vaddr}n+(l3_idx<<2n);let l2_table_vaddr=read_u32(l3_entry_addr);let l2_idx=(v>>32n)&0xFFFFn,l2_entry_addr=l2_table_vaddr+(l2_idx<<2n);let l1_table_vaddr=read_u32(l2_entry_addr);let l1_idx=(v>>16n)&0xFFFFn,l1_entry_addr=l1_table_vaddr+(l1_idx<<2n);let phys_page=read_u32(l1_entry_addr);let page_offset=v&0xFFFFn;let p=phys_page+page_offset;return new DataView($._sys(`memory`).buffer,$.get_page(p));}})")
-                        } else {
-                            write!(f, "{data_var}=(v=>{{let read_u64=(addr)=>{{let val=0n;for(let i=0n;i<8n;i++){{val|=(BigInt(new Uint8Array($._sys('memory').buffer,$.get_page(addr+i),1)[0])<<(i*8n));}}return val;}};let l3_idx=(v>>48n)&0xFFFFn,l3_entry_addr={pt_vaddr}n+(l3_idx<<3n);let l2_table_vaddr=read_u64(l3_entry_addr);let l2_idx=(v>>32n)&0xFFFFn,l2_entry_addr=l2_table_vaddr+(l2_idx<<3n);let l1_table_vaddr=read_u64(l2_entry_addr);let l1_idx=(v>>16n)&0xFFFFn,l1_entry_addr=l1_table_vaddr+(l1_idx<<3n);let phys_page=read_u64(l1_entry_addr);let page_offset=v&0xFFFFn;let p=phys_page+page_offset;return new DataView($._sys(`memory`).buffer,$.get_page(p));}})")
-                        }
+                let pt_vaddr = self.flags.shared_page_table_vaddr.unwrap_or(0);
+                let sd_vaddr = self.flags.shared_security_directory_vaddr.unwrap_or(0);
+
+                if self.flags.use_multilevel_paging {
+                    if self.flags.use_32bit_paging {
+                        write!(f, "{data_var}=(v=>{{let read_u32=(addr)=>{{let val=0;for(let i=0;i<4;i++){{val|=(new Uint8Array($._sys('memory').buffer,$.get_page(addr+BigInt(i)),1)[0]<<(i*8));}}return val;}};let l3_idx=(v>>48n)&0xFFFFn;let l2_table_vaddr=BigInt(read_u32({pt_vaddr}n+(l3_idx<<2n)));let l2_idx=(v>>32n)&0xFFFFn;let l1_table_vaddr=BigInt(read_u32(l2_table_vaddr+(l2_idx<<2n)));let l1_idx=(v>>16n)&0xFFFFn;let page_pointer=read_u32(l1_table_vaddr+(l1_idx<<2n));let sec_idx=page_pointer&0xFF;let page_base_low24=page_pointer>>8;let sec_entry_addr={sd_vaddr}n+BigInt(sec_idx<<2);let sec_entry=read_u32(sec_entry_addr);let page_base_top8=sec_entry>>24;let phys_page_base=BigInt((page_base_top8<<24)|page_base_low24);let p=phys_page_base+(v&0xFFFFn);return new DataView($._sys(`memory`).buffer,$.get_page(p));}})")
                     } else {
-                        // Single-level paging
-                        if self.flags.use_32bit_paging {
-                            write!(f, "{data_var}=(v=>{{let page_num=v>>16n,page_offset=v&0xFFFFn,entry_addr={pt_vaddr}n+(page_num<<2n);let phys_page=0n;for(let i=0n;i<4n;i++){{phys_page|=(BigInt(new Uint8Array($._sys('memory').buffer,$.get_page(entry_addr+i),1)[0])<<(i*8n));}}let p=phys_page+page_offset;return new DataView($._sys(`memory`).buffer,$.get_page(p));}})")
-                        } else {
-                            write!(f, "{data_var}=(v=>{{let page_num=v>>16n,page_offset=v&0xFFFFn,entry_addr={pt_vaddr}n+(page_num<<3n);let phys_page=0n;for(let i=0n;i<8n;i++){{phys_page|=(BigInt(new Uint8Array($._sys('memory').buffer,$.get_page(entry_addr+i),1)[0])<<(i*8n));}}let p=phys_page+page_offset;return new DataView($._sys(`memory`).buffer,$.get_page(p));}})")
-                        }
+                        write!(f, "{data_var}=(v=>{{let read_u64=(addr)=>{{let val=0n;for(let i=0n;i<8n;i++){{val|=(BigInt(new Uint8Array($._sys('memory').buffer,$.get_page(addr+i),1)[0])<<(i*8n));}}return val;}};let l3_idx=(v>>48n)&0xFFFFn;let l2_table_vaddr=read_u64({pt_vaddr}n+(l3_idx<<3n));let l2_idx=(v>>32n)&0xFFFFn;let l1_table_vaddr=read_u64(l2_table_vaddr+(l2_idx<<3n));let l1_idx=(v>>16n)&0xFFFFn;let page_pointer=read_u64(l1_table_vaddr+(l1_idx<<3n));let sec_idx=page_pointer&0xFFFFn;let page_base_low48=page_pointer>>16n;let sec_entry_addr={sd_vaddr}n+(sec_idx<<2n);let sec_entry=0;for(let i=0;i<4;i++){{sec_entry|=(new Uint8Array($._sys('memory').buffer,$.get_page(sec_entry_addr+BigInt(i)),1)[0]<<(i*8));}}let page_base_top16=BigInt(sec_entry>>16);let phys_page_base=(page_base_top16<<48n)|page_base_low48;let p=phys_page_base+(v&0xFFFFn);return new DataView($._sys(`memory`).buffer,$.get_page(p));}})")
                     }
                 } else {
-                    // Fallback to legacy mode if no page table address configured
-                    write!(f, "{data_var}=(p=>{{p=$.get_page(p);return new DataView($._sys(`memory`).buffer,p);}})")
+                    // Single-level
+                    if self.flags.use_32bit_paging {
+                        write!(f, "{data_var}=(v=>{{let page_num=v>>16n;let entry_addr={pt_vaddr}n+(page_num<<2n);let page_pointer=0;for(let i=0;i<4;i++){{page_pointer|=(new Uint8Array($._sys('memory').buffer,$.get_page(entry_addr+BigInt(i)),1)[0]<<(i*8));}}let sec_idx=page_pointer&0xFF;let page_base_low24=page_pointer>>8;let sec_entry_addr={sd_vaddr}n+BigInt(sec_idx<<2);let sec_entry=0;for(let i=0;i<4;i++){{sec_entry|=(new Uint8Array($._sys('memory').buffer,$.get_page(sec_entry_addr+BigInt(i)),1)[0]<<(i*8));}}let page_base_top8=sec_entry>>24;let phys_page_base=BigInt((page_base_top8<<24)|page_base_low24);let p=phys_page_base+(v&0xFFFFn);return new DataView($._sys(`memory`).buffer,$.get_page(p));}})")
+                    } else {
+                        write!(f, "{data_var}=(v=>{{let page_num=v>>16n;let entry_addr={pt_vaddr}n+(page_num<<3n);let page_pointer=0n;for(let i=0n;i<8n;i++){{page_pointer|=(BigInt(new Uint8Array($._sys('memory').buffer,$.get_page(entry_addr+i),1)[0])<<(i*8n));}}let sec_idx=page_pointer&0xFFFFn;let page_base_low48=page_pointer>>16n;let sec_entry_addr={sd_vaddr}n+(sec_idx<<2n);let sec_entry=0;for(let i=0;i<4;i++){{sec_entry|=(new Uint8Array($._sys('memory').buffer,$.get_page(sec_entry_addr+BigInt(i)),1)[0]<<(i*8));}}let page_base_top16=BigInt(sec_entry>>16);let phys_page_base=(page_base_top16<<48n)|page_base_low48;let p=phys_page_base+(v&0xFFFFn);return new DataView($._sys(`memory`).buffer,$.get_page(p));}})")
+                    }
                 }
             }
             _ => {
@@ -243,3 +242,4 @@ impl<'a> CoreJS<'a> {
         }
     }
 }
+
