@@ -136,8 +136,8 @@ impl Mem {
         // Read physical page base from page table (via legacy system)
         // This will automatically allocate pages as needed via get_page()
         let mut phys_page_bytes = [0u8; 8];
-        for i in 0..8 {
-            phys_page_bytes[i] = self.read_byte(entry_vaddr + i);
+        for i in 0u64..8 {
+            phys_page_bytes[i as usize] = self.read_byte(entry_vaddr + i);
         }
         let phys_page = u64::from_le_bytes(phys_page_bytes);
         
@@ -164,8 +164,8 @@ impl Mem {
         // Helper to read u64 from legacy virtual memory
         let read_u64 = |mem: &mut Self, addr: u64| -> u64 {
             let mut bytes = [0u8; 8];
-            for i in 0..8 {
-                bytes[i] = mem.read_byte(addr + i);
+            for i in 0u64..8 {
+                bytes[i as usize] = mem.read_byte(addr + i);
             }
             u64::from_le_bytes(bytes)
         };
