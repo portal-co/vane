@@ -205,12 +205,14 @@ macro_rules! vane_meta {
                     let test_mode = lock.test_mode;
                     let paging_mode = lock.mem.paging_mode;
                     let shared_page_table_vaddr = lock.mem.shared_page_table_vaddr;
+                    let shared_security_directory_vaddr = lock.mem.shared_security_directory_vaddr;
                     drop(lock);
                     
                     let flags = $crate::vane_jit::template::Flags::with_paging(
                         test_mode,
                         paging_mode,
                         shared_page_table_vaddr,
+                        shared_security_directory_vaddr,
                         false, // use_32bit_paging
                         false, // use_multilevel_paging
                     );

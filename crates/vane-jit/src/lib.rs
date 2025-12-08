@@ -311,61 +311,6 @@ impl Mem {
         phys_page_base + (vaddr & 0xFFFF)
     }
 
-    /// Generate JavaScript code for shared page table lookup with 32-bit physical addresses
-    pub fn generate_shared_paging_js_32<'a>(
-        &'a self,
-        vaddr_var: &'a (dyn Display + 'a),
-        page_table_vaddr_var: &'a (dyn Display + 'a),
-        security_directory_vaddr_var: &'a (dyn Display + 'a),
-    ) -> impl Display + 'a {
-        struct SharedPaging32<'a> {
-            vaddr: &'a (dyn Display + 'a),
-            pt_base: &'a (dyn Display + 'a),
-            sec_dir_base: &'a (dyn Display + 'a),
-        }
-        impl<'a> Display for SharedPaging32<'a> {
-            fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-                write!(
-                    f,
-                    "((v,pt,sd)=>{{let page_num=v>>16n;let entry_addr=pt+(page_num<<2n);let page_pointer=0;for(let i=0;i<4;i++){{page_pointer|=(new Uint8Array($._sys('memory').buffer,$.get_page(entry_addr+BigInt(i)),1)[0]<<(i*8));}}let sec_idx=page_pointer&0xFF;let page_base_low24=page_pointer>>8;let sec_entry_addr=sd+BigInt(sec_idx<<2);let sec_entry=0;for(let i=0;i<4;i++){{sec_entry|=(new Uint8Array($._sys('memory').buffer,$.get_page(sec_entry_addr+BigInt(i)),1)[0]<<(i*8));}}let page_base_top8=sec_entry>>24;let phys_page_base=BigInt((page_base_top8<<24)|page_base_low24);return phys_page_base+(v&0xFFFFn);}})({},{},{})",
-                    self.vaddr, self.pt_base, self.sec_dir_base
-                )
-            }
-        }
-        SharedPaging32 {
-            vaddr: vaddr_var,
-            pt_base: page_table_vaddr_var,
-            sec_dir_base: security_directory_vaddr_var,
-        }
-    }
-
-    /// Generate JavaScript code for multi-level page table lookup with 32-bit physical addresses
-    pub fn generate_multilevel_paging_js_32<'a>(
-        &'a self,
-        vaddr_var: &'a (dyn Display + 'a),
-        l3_table_vaddr_var: &'a (dyn Display + 'a),
-        security_directory_vaddr_var: &'a (dyn Display + 'a),
-    ) -> impl Display + 'a {
-        struct MultilevelPaging32<'a> {
-            vaddr: &'a (dyn Display + 'a),
-            l3_base: &'a (dyn Display + 'a),
-            sec_dir_base: &'a (dyn Display + 'a),
-        }
-        impl<'a> Display for MultilevelPaging32<'a> {
-            fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-                write!(
-                    f,
-                    "((v,l3,sd)=>{{let read_u32=(addr)=>{{let val=0;for(let i=0;i<4;i++){{val|=(new Uint8Array($._sys('memory').buffer,$.get_page(addr+BigInt(i)),1)[0]<<(i*8));}}return val;}};let l3_idx=(v>>48n)&0xFFFFn;let l2_table_vaddr=BigInt(read_u32(l3+(l3_idx<<2n)));let l2_idx=(v>>32n)&0xFFFFn;let l1_table_vaddr=BigInt(read_u32(l2_table_vaddr+(l2_idx<<2n)));let l1_idx=(v>>16n)&0xFFFFn;let page_pointer=read_u32(l1_table_vaddr+(l1_idx<<2n));let sec_idx=page_pointer&0xFF;let page_base_low24=page_pointer>>8;let sec_entry_addr=sd+BigInt(sec_idx<<2);let sec_entry=read_u32(sec_entry_addr);let page_base_top8=sec_entry>>24;let phys_page_base=BigInt((page_base_top8<<24)|page_base_low24);return phys_page_base+(v&0xFFFFn);}})({},{},{})",
-                    self.vaddr, self.l3_base, self.sec_dir_base
-                )
-            }
-        }
-        MultilevelPaging32 {
-            vaddr: vaddr_var,
-            l3_table_vaddr: l3_table_vaddr_var,
-            sec_dir_base: security_directory_vaddr_var,
-        }
-    }
 
     /// Safe interface to write a byte to memory
     pub fn write_byte(&mut self, addr: u64, value: u8) {
