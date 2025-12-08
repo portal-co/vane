@@ -172,8 +172,8 @@ macro_rules! vane_meta {
                 pub fn jit_code(&self, a: u64) -> String {
                     let f = $flate;
                     let test_mode = self.core.lock().test_mode;
-                    return ($crate::vane_jit::template::CoreJS(&$y(
-                        &$crate::vane_jit::template::TemplateJit {
+                    return ($crate::vane_jit::template::CoreJS {
+                        content: &$y(&$crate::vane_jit::template::TemplateJit {
                             params: Params {
                                 react: self,
                                 trial: &|a| match tget(self.clone(), a)
@@ -184,13 +184,16 @@ macro_rules! vane_meta {
                                 },
                                 root: a,
                                 flate: &f,
-                                flags: $crate::vane_jit::template::Flags::new_with_test_mode(test_mode)
+                                flags: $crate::vane_jit::template::Flags::new_with_test_mode(
+                                    test_mode,
+                                ),
                             },
                             pc: a,
                             labels: &$crate::vane_jit::template::Labels::default(),
                             depth: 0,
-                        },
-                    ),&f)
+                        }),
+                        flate: &f,
+                    }
                     .to_string());
                 }
                 #[wasm_bindgen(getter, js_name = "f",wasm_bindgen = $crate::wasm_bindgen)]

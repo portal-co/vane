@@ -25,9 +25,9 @@ pub struct Params<'a> {
     pub flags: Flags,
 }
 
-#[derive(Clone, Copy,Default)]
+#[derive(Clone, Copy, Default)]
 #[non_exhaustive]
-pub struct Flags{
+pub struct Flags {
     pub test_mode: bool,
 }
 
@@ -164,18 +164,21 @@ impl<'b> TemplateJit<'b> {
 /// ```
 ///
 /// See PAGING.md for detailed documentation on the paging system.
-pub struct CoreJS<'a>(pub &'a (dyn Display + 'a), pub &'a (dyn Flate + 'a));
+pub struct CoreJS<'a> {
+    pub content: &'a (dyn Display + 'a),
+    pub flate: &'a (dyn Flate + 'a),
+}
 impl<'a> Display for CoreJS<'a> {
     fn fmt(&self, fmt: &mut Formatter<'_>) -> core::fmt::Result {
-        let max64 = self.1.flate("max64");
-        let max32 = self.1.flate("max32");
-        let signed = self.1.flate("signed");
-        let unsigned = self.1.flate("unsigned");
-        let data = self.1.flate("data");
+        let max64 = self.flate.flate("max64");
+        let max32 = self.flate.flate("max32");
+        let signed = self.flate.flate("signed");
+        let unsigned = self.flate.flate("unsigned");
+        let data = self.flate.flate("data");
         write!(
             fmt,
             "return async function(){{let {max64}=$.f,{max32}=0xffff_ffffn,{signed}=(a=>BigInt.asIntN(64,a)),{unsigned}=(a=>BigInt.asUintN(64,a)),{data}=(p=>{{p=$.get_page(p);return new DataView($._sys(`memory`).buffer,p);}});{}}}",
-            &self.0
+            &self.content
         )
     }
 }
