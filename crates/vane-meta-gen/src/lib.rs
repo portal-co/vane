@@ -139,6 +139,36 @@ macro_rules! vane_meta {
                 pub fn set_test_mode(&self, value: bool) {
                     self.core.lock().test_mode = value;
                 }
+                
+                #[wasm_bindgen(js_name = "get_paging_mode",wasm_bindgen = $crate::wasm_bindgen)]
+                pub fn get_paging_mode(&self) -> String {
+                    match self.core.lock().mem.paging_mode {
+                        $crate::vane_jit::PagingMode::Legacy => "legacy".to_string(),
+                        $crate::vane_jit::PagingMode::Shared => "shared".to_string(),
+                        $crate::vane_jit::PagingMode::Both => "both".to_string(),
+                    }
+                }
+                
+                #[wasm_bindgen(js_name = "set_paging_mode",wasm_bindgen = $crate::wasm_bindgen)]
+                pub fn set_paging_mode(&self, mode: &str) {
+                    let paging_mode = match mode {
+                        "legacy" => $crate::vane_jit::PagingMode::Legacy,
+                        "shared" => $crate::vane_jit::PagingMode::Shared,
+                        "both" => $crate::vane_jit::PagingMode::Both,
+                        _ => $crate::vane_jit::PagingMode::Legacy,
+                    };
+                    self.core.lock().mem.paging_mode = paging_mode;
+                }
+                
+                #[wasm_bindgen(js_name = "get_shared_page_table_vaddr",wasm_bindgen = $crate::wasm_bindgen)]
+                pub fn get_shared_page_table_vaddr(&self) -> Option<u64> {
+                    self.core.lock().mem.shared_page_table_vaddr
+                }
+                
+                #[wasm_bindgen(js_name = "set_shared_page_table_vaddr",wasm_bindgen = $crate::wasm_bindgen)]
+                pub fn set_shared_page_table_vaddr(&self, addr: Option<u64>) {
+                    self.core.lock().mem.shared_page_table_vaddr = addr;
+                }
                 #[wasm_bindgen(wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn _sys(&self, a: &str) -> $crate::wasm_bindgen::prelude::JsValue {
                     match a {
@@ -171,7 +201,20 @@ macro_rules! vane_meta {
                 #[wasm_bindgen(js_name = "j",wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn jit_code(&self, a: u64) -> String {
                     let f = $flate;
-                    let test_mode = self.core.lock().test_mode;
+                    let lock = self.core.lock();
+                    let test_mode = lock.test_mode;
+                    let paging_mode = lock.mem.paging_mode;
+                    let shared_page_table_vaddr = lock.mem.shared_page_table_vaddr;
+                    drop(lock);
+                    
+                    let flags = $crate::vane_jit::template::Flags::with_paging(
+                        test_mode,
+                        paging_mode,
+                        shared_page_table_vaddr,
+                        false, // use_32bit_paging
+                        false, // use_multilevel_paging
+                    );
+                    
                     return ($crate::vane_jit::template::CoreJS {
                         content: &$y(&$crate::vane_jit::template::TemplateJit {
                             params: Params {
@@ -184,15 +227,14 @@ macro_rules! vane_meta {
                                 },
                                 root: a,
                                 flate: &f,
-                                flags: $crate::vane_jit::template::Flags::new_with_test_mode(
-                                    test_mode,
-                                ),
+                                flags,
                             },
                             pc: a,
                             labels: &$crate::vane_jit::template::Labels::default(),
                             depth: 0,
                         }),
                         flate: &f,
+                        flags,
                     }
                     .to_string());
                 }
