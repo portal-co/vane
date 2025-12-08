@@ -1,13 +1,13 @@
 #![no_std]
 use alloc::format;
 use alloc::{boxed::Box, collections::btree_map::BTreeMap};
-use core::fmt::Formatter;
-use core::fmt::Display;
-use rv_asm::{Inst, Reg, Xlen};
 #[doc(hidden)]
 pub use core;
+use core::fmt::Display;
+use core::fmt::Formatter;
 #[doc(hidden)]
 pub use paste;
+use rv_asm::{Inst, Reg, Xlen};
 #[doc(hidden)]
 pub extern crate alloc;
 pub mod flate;
@@ -22,14 +22,14 @@ pub enum PagingMode {
     /// - Automatic page allocation on access
     /// - Best for sparse address spaces
     Legacy,
-    
+
     /// Use the shared page table system
     /// - Compatible with rift/r52x/speet paging
     /// - Explicit page table with 64KB pages
     /// - Can be inlined into JavaScript for performance
     /// - Supports multi-level paging
     Shared,
-    
+
     /// Use both systems simultaneously (nested paging)
     /// - Shared page table stored IN legacy system's virtual memory
     /// - Legacy handles page allocation and basic access
@@ -69,10 +69,10 @@ impl Default for PagingMode {
 pub struct Mem {
     /// Legacy paging: on-demand allocated pages
     pub pages: BTreeMap<u64, Box<[u8; 65536]>>,
-    
+
     /// Paging mode selection
     pub paging_mode: PagingMode,
-    
+
     /// Shared paging: virtual address of page table base (in legacy address space)
     /// When using Both mode, this address is translated through legacy system
     pub shared_page_table_vaddr: Option<u64>,
@@ -102,7 +102,7 @@ impl Mem {
             p => &raw mut p[(a & 0xffff) as usize],
         }
     }
-    
+
     /// Translate address through shared page table (nested in legacy memory)
     ///
     /// This performs two-level translation when using PagingMode::Both:
@@ -122,17 +122,18 @@ impl Mem {
     /// # Panics
     /// Panics if paging_mode is not Both or shared_page_table_vaddr is None
     pub fn translate_shared(&mut self, vaddr: u64) -> u64 {
-        let pt_base = self.shared_page_table_vaddr
+        let pt_base = self
+            .shared_page_table_vaddr
             .expect("shared_page_table_vaddr must be set for shared translation");
-        
+
         // Extract page number from virtual address
         let page_num = vaddr >> 16;
         let page_offset = vaddr & 0xFFFF;
-        
+
         // Calculate page table entry address (in legacy virtual space)
         // Each entry is 8 bytes (u64), so: pt_base + (page_num * 8)
         let entry_vaddr = pt_base + (page_num * 8);
-        
+
         // Read physical page base from page table (via legacy system)
         // This will automatically allocate pages as needed via get_page()
         let mut phys_page_bytes = [0u8; 8];
@@ -140,11 +141,11 @@ impl Mem {
             phys_page_bytes[i as usize] = self.read_byte(entry_vaddr + i);
         }
         let phys_page = u64::from_le_bytes(phys_page_bytes);
-        
+
         // Combine physical page base with offset
         phys_page + page_offset
     }
-    
+
     /// Translate address using multi-level page table (nested in legacy memory)
     ///
     /// This performs two-level translation with a 3-level page table structure:
@@ -169,25 +170,25 @@ impl Mem {
             }
             u64::from_le_bytes(bytes)
         };
-        
+
         // Level 3: bits [63:48]
         let l3_idx = (vaddr >> 48) & 0xFFFF;
         let l3_entry_addr = l3_table_vaddr + (l3_idx * 8);
         let l2_table_vaddr = read_u64(self, l3_entry_addr);
-        
+
         // Level 2: bits [47:32]
         let l2_idx = (vaddr >> 32) & 0xFFFF;
         let l2_entry_addr = l2_table_vaddr + (l2_idx * 8);
         let l1_table_vaddr = read_u64(self, l2_entry_addr);
-        
+
         // Level 1: bits [31:16]
         let l1_idx = (vaddr >> 16) & 0xFFFF;
         let l1_entry_addr = l1_table_vaddr + (l1_idx * 8);
         let phys_page = read_u64(self, l1_entry_addr);
-        
+
         // Page offset: bits [15:0]
         let page_offset = vaddr & 0xFFFF;
-        
+
         phys_page + page_offset
     }
 
@@ -217,7 +218,7 @@ impl Mem {
         let page_offset = vaddr & 0xFFFF;
         wasm_memory_base + (page_num * 65536) + page_offset
     }
-    
+
     /// Generate JavaScript code for shared page table lookup (nested in legacy)
     ///
     /// This generates inline JavaScript code that performs page table translation
@@ -236,14 +237,30 @@ impl Mem {
     /// let js = mem.generate_shared_paging_js("vaddr", "pt_base");
     /// // Reads page table entry via $.get_page(), then translates
     /// ```
-    pub fn generate_shared_paging_js(&self, vaddr_var: &str, page_table_vaddr_var: &str) -> alloc::string::String {
-        format!(
-            "((v,pt)=>{{let pn=(v>>16n),po=(v&0xFFFFn),entry_vaddr=pt+(pn<<3n),phys_page=0n;for(let i=0n;i<8n;i++){{phys_page|=(BigInt(new Uint8Array($._sys('memory').buffer,$.get_page(entry_vaddr+i),1)[0])<<(i*8n));}}return phys_page+po;}})({v},{pt})",
-            v = vaddr_var,
-            pt = page_table_vaddr_var
-        )
+    pub fn generate_shared_paging_js<'a>(
+        &'a self,
+        vaddr_var: &'a (dyn Display + 'a),
+        page_table_vaddr_var: &'a (dyn Display + 'a),
+    ) -> impl Display + 'a {
+        struct SharedPaging<'a> {
+            vaddr: &'a (dyn Display + 'a),
+            pt_base: &'a (dyn Display + 'a),
+        }
+        impl<'a> Display for SharedPaging<'a> {
+            fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+                write!(
+                    f,
+                    "((v,pt)=>{{let page_num=v>>16n,page_offset=v&0xFFFFn,entry_addr=pt+(page_num<<3n);let phys_page=0n;for(let i=0n;i<8n;i++){{phys_page|=(BigInt(new Uint8Array($._sys('memory').buffer,$.get_page(entry_addr+i),1)[0])<<(i*8n));}}return phys_page+page_offset;}})({},{})",
+                    self.vaddr, self.pt_base
+                )
+            }
+        }
+        SharedPaging {
+            vaddr: vaddr_var,
+            pt_base: page_table_vaddr_var,
+        }
     }
-    
+
     /// Generate JavaScript code for multi-level page table lookup (nested in legacy)
     ///
     /// This generates inline JavaScript code that performs 3-level page table translation
@@ -256,12 +273,28 @@ impl Mem {
     ///
     /// # Returns
     /// JavaScript expression string that evaluates to the physical address
-    pub fn generate_multilevel_paging_js(&self, vaddr_var: &str, l3_table_vaddr_var: &str) -> alloc::string::String {
-        format!(
-            "((v,l3)=>{{let read_u64=(a)=>{{let val=0n;for(let i=0n;i<8n;i++){{val|=(BigInt(new Uint8Array($._sys('memory').buffer,$.get_page(a+i),1)[0])<<(i*8n));}}return val;}};let l3i=(v>>48n)&0xFFFFn,l2=read_u64(l3+(l3i<<3n)),l2i=(v>>32n)&0xFFFFn,l1=read_u64(l2+(l2i<<3n)),l1i=(v>>16n)&0xFFFFn,pg=read_u64(l1+(l1i<<3n)),po=v&0xFFFFn;return pg+po;}})({v},{l3})",
-            v = vaddr_var,
-            l3 = l3_table_vaddr_var
-        )
+    pub fn generate_multilevel_paging_js<'a>(
+        &'a self,
+        vaddr_var: &'a (dyn Display + 'a),
+        l3_table_vaddr_var: &'a (dyn Display + 'a),
+    ) -> impl Display + 'a {
+        struct MultilevelPaging<'a> {
+            vaddr: &'a (dyn Display + 'a),
+            l3_table_vaddr: &'a (dyn Display + 'a),
+        }
+        impl<'a> Display for MultilevelPaging<'a> {
+            fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+                write!(
+                    f,
+                    "((v,l3)=>{{let read_u64=(addr)=>{{let val=0n;for(let i=0n;i<8n;i++){{val|=(BigInt(new Uint8Array($._sys('memory').buffer,$.get_page(addr+i),1)[0])<<(i*8n));}}return val;}};let l3_idx=(v>>48n)&0xFFFFn,l3_entry_addr=l3+(l3_idx<<3n);let l2_table_vaddr=read_u64(l3_entry_addr);let l2_idx=(v>>32n)&0xFFFFn,l2_entry_addr=l2_table_vaddr+(l2_idx<<3n);let l1_table_vaddr=read_u64(l2_entry_addr);let l1_idx=(v>>16n)&0xFFFFn,l1_entry_addr=l1_table_vaddr+(l1_idx<<3n);let phys_page=read_u64(l1_entry_addr);let page_offset=v&0xFFFFn;return phys_page+page_offset;}})({},{})",
+                    self.vaddr, self.l3_table_vaddr
+                )
+            }
+        }
+        MultilevelPaging {
+            vaddr: vaddr_var,
+            l3_table_vaddr: l3_table_vaddr_var,
+        }
     }
 
     /// Safe interface to write a byte to memory
@@ -297,17 +330,16 @@ impl JitCtx for Mem {
         }))
     }
 }
-pub trait WasmJitCtx{
-
-}
+pub trait WasmJitCtx {}
 #[derive(Clone)]
 pub enum JitOpcode<'a> {
-    Operator{
-        op: wasmparser::Operator<'a>,
-    }
+    Operator { op: wasmparser::Operator<'a> },
 }
 pub trait WasmJit {
-    fn jit<'a>(&'a self, ctx: &'a (dyn WasmJitCtx + 'a)) -> Box<dyn Iterator<Item = JitOpcode<'a>> + 'a>;
+    fn jit<'a>(
+        &'a self,
+        ctx: &'a (dyn WasmJitCtx + 'a),
+    ) -> Box<dyn Iterator<Item = JitOpcode<'a>> + 'a>;
 }
 pub mod arch;
 pub mod template;
