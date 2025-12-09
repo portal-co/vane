@@ -79,6 +79,12 @@ pub struct Mem {
     
     /// Shared paging: virtual address of security directory (in legacy address space)
     pub shared_security_directory_vaddr: Option<u64>,
+    
+    /// Use 32-bit page table entries instead of 64-bit
+    pub use_32bit_paging: bool,
+    
+    /// Use multi-level (3-level) page tables instead of single-level
+    pub use_multilevel_paging: bool,
 }
 impl Mem {
     /// Get a pointer to a specific address in memory (legacy system)

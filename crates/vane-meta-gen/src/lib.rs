@@ -169,6 +169,37 @@ macro_rules! vane_meta {
                 pub fn set_shared_page_table_vaddr(&self, addr: Option<u64>) {
                     self.core.lock().mem.shared_page_table_vaddr = addr;
                 }
+                
+                #[wasm_bindgen(js_name = "get_shared_security_directory_vaddr",wasm_bindgen = $crate::wasm_bindgen)]
+                pub fn get_shared_security_directory_vaddr(&self) -> Option<u64> {
+                    self.core.lock().mem.shared_security_directory_vaddr
+                }
+                
+                #[wasm_bindgen(js_name = "set_shared_security_directory_vaddr",wasm_bindgen = $crate::wasm_bindgen)]
+                pub fn set_shared_security_directory_vaddr(&self, addr: Option<u64>) {
+                    self.core.lock().mem.shared_security_directory_vaddr = addr;
+                }
+                
+                #[wasm_bindgen(js_name = "get_use_32bit_paging",wasm_bindgen = $crate::wasm_bindgen)]
+                pub fn get_use_32bit_paging(&self) -> bool {
+                    self.core.lock().mem.use_32bit_paging
+                }
+                
+                #[wasm_bindgen(js_name = "set_use_32bit_paging",wasm_bindgen = $crate::wasm_bindgen)]
+                pub fn set_use_32bit_paging(&self, value: bool) {
+                    self.core.lock().mem.use_32bit_paging = value;
+                }
+                
+                #[wasm_bindgen(js_name = "get_use_multilevel_paging",wasm_bindgen = $crate::wasm_bindgen)]
+                pub fn get_use_multilevel_paging(&self) -> bool {
+                    self.core.lock().mem.use_multilevel_paging
+                }
+                
+                #[wasm_bindgen(js_name = "set_use_multilevel_paging",wasm_bindgen = $crate::wasm_bindgen)]
+                pub fn set_use_multilevel_paging(&self, value: bool) {
+                    self.core.lock().mem.use_multilevel_paging = value;
+                }
+                
                 #[wasm_bindgen(wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn _sys(&self, a: &str) -> $crate::wasm_bindgen::prelude::JsValue {
                     match a {
@@ -206,6 +237,8 @@ macro_rules! vane_meta {
                     let paging_mode = lock.mem.paging_mode;
                     let shared_page_table_vaddr = lock.mem.shared_page_table_vaddr;
                     let shared_security_directory_vaddr = lock.mem.shared_security_directory_vaddr;
+                    let use_32bit_paging = lock.mem.use_32bit_paging;
+                    let use_multilevel_paging = lock.mem.use_multilevel_paging;
                     drop(lock);
                     
                     let flags = $crate::vane_jit::template::Flags::with_paging(
@@ -213,8 +246,8 @@ macro_rules! vane_meta {
                         paging_mode,
                         shared_page_table_vaddr,
                         shared_security_directory_vaddr,
-                        false, // use_32bit_paging
-                        false, // use_multilevel_paging
+                        use_32bit_paging,
+                        use_multilevel_paging,
                     );
                     
                     return ($crate::vane_jit::template::CoreJS {
