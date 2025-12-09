@@ -222,16 +222,108 @@ impl<'a> CoreJS<'a> {
 
                 if self.flags.use_multilevel_paging {
                     if self.flags.use_32bit_paging {
-                        write!(f, "{data_var}=(v=>{{let read_u32=(addr)=>{{let val=0;for(let i=0;i<4;i++){{val|=(new Uint8Array($._sys('memory').buffer,$.get_page(addr+BigInt(i)),1)[0]<<(i*8));}}return val;}};let read_u64=(addr)=>{{let val=0n;for(let i=0n;i<8n;i++){{val|=(BigInt(new Uint8Array($._sys('memory').buffer,$.get_page(addr+i),1)[0])<<(i*8n));}}return val;}};let l3_idx=(v>>48n)&0xFFFFn;let l2_table_vaddr=BigInt(read_u32({pt_vaddr}n+(l3_idx<<2n)));let l2_idx=(v>>32n)&0xFFFFn;let l1_table_vaddr=BigInt(read_u32(l2_table_vaddr+(l2_idx<<2n)));let l1_idx=(v>>16n)&0xFFFFn;let page_pointer=read_u32(l1_table_vaddr+(l1_idx<<2n));let sec_idx=page_pointer&0xFF;let page_base_low24=page_pointer>>8;let sec_entry_addr={sd_vaddr}n+BigInt(sec_idx<<3);let sec_entry=read_u64(sec_entry_addr);let page_base_top8=sec_entry>>56n;let phys_page_base=BigInt((page_base_top8<<24n)|BigInt(page_base_low24));let p=phys_page_base+(v&0xFFFFn);return new DataView($._sys(`memory`).buffer,$.get_page(p));}})")
+                        writeln!(f, "{data_var}=(v=>{{")?;
+                        writeln!(f, "    let read_u32=(addr)=>{{")?;
+                        writeln!(f, "        let val=0;")?;
+                        writeln!(f, "        for(let i=0;i<4;i++){{")?;
+                        writeln!(f, "            val|=(new Uint8Array($._sys('memory').buffer,$.get_page(addr+BigInt(i)),1)[0]<<(i*8));")?;
+                        writeln!(f, "        }}")?;
+                        writeln!(f, "        return val;")?;
+                        writeln!(f, "    }};")?;
+                        writeln!(f, "    let read_u64=(addr)=>{{")?;
+                        writeln!(f, "        let val=0n;")?;
+                        writeln!(f, "        for(let i=0n;i<8n;i++){{")?;
+                        writeln!(f, "            val|=(BigInt(new Uint8Array($._sys('memory').buffer,$.get_page(addr+i),1)[0])<<(i*8n));")?;
+                        writeln!(f, "        }}")?;
+                        writeln!(f, "        return val;")?;
+                        writeln!(f, "    }};")?;
+                        writeln!(f, "    let l3_idx=(v>>48n)&0xFFFFn;")?;
+                        writeln!(f, "    let l2_table_vaddr=BigInt(read_u32({pt_vaddr}n+(l3_idx<<2n)));")?;
+                        writeln!(f, "    let l2_idx=(v>>32n)&0xFFFFn;")?;
+                        writeln!(f, "    let l1_table_vaddr=BigInt(read_u32(l2_table_vaddr+(l2_idx<<2n)));")?;
+                        writeln!(f, "    let l1_idx=(v>>16n)&0xFFFFn;")?;
+                        writeln!(f, "    let page_pointer=read_u32(l1_table_vaddr+(l1_idx<<2n));")?;
+                        writeln!(f, "    let sec_idx=page_pointer&0xFF;")?;
+                        writeln!(f, "    let page_base_low24=page_pointer>>8;")?;
+                        writeln!(f, "    let sec_entry_addr={sd_vaddr}n+BigInt(sec_idx<<3);")?;
+                        writeln!(f, "    let sec_entry=read_u64(sec_entry_addr);")?;
+                        writeln!(f, "    let page_base_top8=sec_entry>>56n;")?;
+                        writeln!(f, "    let phys_page_base=BigInt((page_base_top8<<24n)|BigInt(page_base_low24));")?;
+                        writeln!(f, "    let p=phys_page_base+(v&0xFFFFn);")?;
+                        writeln!(f, "    return new DataView($._sys(`memory`).buffer,$.get_page(p));")?;
+                        write!(f, "}})")
                     } else {
-                        write!(f, "{data_var}=(v=>{{let read_u64=(addr)=>{{let val=0n;for(let i=0n;i<8n;i++){{val|=(BigInt(new Uint8Array($._sys('memory').buffer,$.get_page(addr+i),1)[0])<<(i*8n));}}return val;}};let l3_idx=(v>>48n)&0xFFFFn;let l2_table_vaddr=read_u64({pt_vaddr}n+(l3_idx<<3n));let l2_idx=(v>>32n)&0xFFFFn;let l1_table_vaddr=read_u64(l2_table_vaddr+(l2_idx<<3n));let l1_idx=(v>>16n)&0xFFFFn;let page_pointer=read_u64(l1_table_vaddr+(l1_idx<<3n));let sec_idx=page_pointer&0xFFFFn;let page_base_low48=page_pointer>>16n;let sec_entry_addr={sd_vaddr}n+(sec_idx<<3n);let sec_entry=read_u64(sec_entry_addr);let page_base_top16=sec_entry>>48n;let phys_page_base=(page_base_top16<<48n)|page_base_low48;let p=phys_page_base+(v&0xFFFFn);return new DataView($._sys(`memory`).buffer,$.get_page(p));}})")
+                        writeln!(f, "{data_var}=(v=>{{")?;
+                        writeln!(f, "    let read_u64=(addr)=>{{")?;
+                        writeln!(f, "        let val=0n;")?;
+                        writeln!(f, "        for(let i=0n;i<8n;i++){{")?;
+                        writeln!(f, "            val|=(BigInt(new Uint8Array($._sys('memory').buffer,$.get_page(addr+i),1)[0])<<(i*8n));")?;
+                        writeln!(f, "        }}")?;
+                        writeln!(f, "        return val;")?;
+                        writeln!(f, "    }};")?;
+                        writeln!(f, "    let l3_idx=(v>>48n)&0xFFFFn;")?;
+                        writeln!(f, "    let l2_table_vaddr=read_u64({pt_vaddr}n+(l3_idx<<3n));")?;
+                        writeln!(f, "    let l2_idx=(v>>32n)&0xFFFFn;")?;
+                        writeln!(f, "    let l1_table_vaddr=read_u64(l2_table_vaddr+(l2_idx<<3n));")?;
+                        writeln!(f, "    let l1_idx=(v>>16n)&0xFFFFn;")?;
+                        writeln!(f, "    let page_pointer=read_u64(l1_table_vaddr+(l1_idx<<3n));")?;
+                        writeln!(f, "    let sec_idx=page_pointer&0xFFFFn;")?;
+                        writeln!(f, "    let page_base_low48=page_pointer>>16n;")?;
+                        writeln!(f, "    let sec_entry_addr={sd_vaddr}n+(sec_idx<<3n);")?;
+                        writeln!(f, "    let sec_entry=read_u64(sec_entry_addr);")?;
+                        writeln!(f, "    let page_base_top16=sec_entry>>48n;")?;
+                        writeln!(f, "    let phys_page_base=(page_base_top16<<48n)|page_base_low48;")?;
+                        writeln!(f, "    let p=phys_page_base+(v&0xFFFFn);")?;
+                        writeln!(f, "    return new DataView($._sys(`memory`).buffer,$.get_page(p));")?;
+                        write!(f, "}})")
                     }
                 } else {
                     // Single-level
                     if self.flags.use_32bit_paging {
-                        write!(f, "{data_var}=(v=>{{let read_u64=(addr)=>{{let val=0n;for(let i=0n;i<8n;i++){{val|=(BigInt(new Uint8Array($._sys('memory').buffer,$.get_page(addr+i),1)[0])<<(i*8n));}}return val;}};let page_num=v>>16n;let entry_addr={pt_vaddr}n+(page_num<<2n);let page_pointer=0;for(let i=0;i<4;i++){{page_pointer|=(new Uint8Array($._sys('memory').buffer,$.get_page(entry_addr+BigInt(i)),1)[0]<<(i*8));}}let sec_idx=page_pointer&0xFF;let page_base_low24=page_pointer>>8;let sec_entry_addr={sd_vaddr}n+BigInt(sec_idx<<3);let sec_entry=read_u64(sec_entry_addr);let page_base_top8=sec_entry>>56n;let phys_page_base=BigInt((page_base_top8<<24n)|BigInt(page_base_low24));let p=phys_page_base+(v&0xFFFFn);return new DataView($._sys(`memory`).buffer,$.get_page(p));}})")
+                        writeln!(f, "{data_var}=(v=>{{")?;
+                        writeln!(f, "    let read_u64=(addr)=>{{")?;
+                        writeln!(f, "        let val=0n;")?;
+                        writeln!(f, "        for(let i=0n;i<8n;i++){{")?;
+                        writeln!(f, "            val|=(BigInt(new Uint8Array($._sys('memory').buffer,$.get_page(addr+i),1)[0])<<(i*8n));")?;
+                        writeln!(f, "        }}")?;
+                        writeln!(f, "        return val;")?;
+                        writeln!(f, "    }};")?;
+                        writeln!(f, "    let page_num=v>>16n;")?;
+                        writeln!(f, "    let entry_addr={pt_vaddr}n+(page_num<<2n);")?;
+                        writeln!(f, "    let page_pointer=0;")?;
+                        writeln!(f, "    for(let i=0;i<4;i++){{")?;
+                        writeln!(f, "        page_pointer|=(new Uint8Array($._sys('memory').buffer,$.get_page(entry_addr+BigInt(i)),1)[0]<<(i*8));")?;
+                        writeln!(f, "    }}")?;
+                        writeln!(f, "    let sec_idx=page_pointer&0xFF;")?;
+                        writeln!(f, "    let page_base_low24=page_pointer>>8;")?;
+                        writeln!(f, "    let sec_entry_addr={sd_vaddr}n+BigInt(sec_idx<<3);")?;
+                        writeln!(f, "    let sec_entry=read_u64(sec_entry_addr);")?;
+                        writeln!(f, "    let page_base_top8=sec_entry>>56n;")?;
+                        writeln!(f, "    let phys_page_base=BigInt((page_base_top8<<24n)|BigInt(page_base_low24));")?;
+                        writeln!(f, "    let p=phys_page_base+(v&0xFFFFn);")?;
+                        writeln!(f, "    return new DataView($._sys(`memory`).buffer,$.get_page(p));")?;
+                        write!(f, "}})")
                     } else {
-                        write!(f, "{data_var}=(v=>{{let read_u64=(addr)=>{{let val=0n;for(let i=0n;i<8n;i++){{val|=(BigInt(new Uint8Array($._sys('memory').buffer,$.get_page(addr+i),1)[0])<<(i*8n));}}return val;}};let page_num=v>>16n;let entry_addr={pt_vaddr}n+(page_num<<3n);let page_pointer=read_u64(entry_addr);let sec_idx=page_pointer&0xFFFFn;let page_base_low48=page_pointer>>16n;let sec_entry_addr={sd_vaddr}n+(sec_idx<<3n);let sec_entry=read_u64(sec_entry_addr);let page_base_top16=sec_entry>>48n;let phys_page_base=(page_base_top16<<48n)|page_base_low48;let p=phys_page_base+(v&0xFFFFn);return new DataView($._sys(`memory`).buffer,$.get_page(p));}})")
+                        writeln!(f, "{data_var}=(v=>{{")?;
+                        writeln!(f, "    let read_u64=(addr)=>{{")?;
+                        writeln!(f, "        let val=0n;")?;
+                        writeln!(f, "        for(let i=0n;i<8n;i++){{")?;
+                        writeln!(f, "            val|=(BigInt(new Uint8Array($._sys('memory').buffer,$.get_page(addr+i),1)[0])<<(i*8n));")?;
+                        writeln!(f, "        }}")?;
+                        writeln!(f, "        return val;")?;
+                        writeln!(f, "    }};")?;
+                        writeln!(f, "    let page_num=v>>16n;")?;
+                        writeln!(f, "    let entry_addr={pt_vaddr}n+(page_num<<3n);")?;
+                        writeln!(f, "    let page_pointer=read_u64(entry_addr);")?;
+                        writeln!(f, "    let sec_idx=page_pointer&0xFFFFn;")?;
+                        writeln!(f, "    let page_base_low48=page_pointer>>16n;")?;
+                        writeln!(f, "    let sec_entry_addr={sd_vaddr}n+(sec_idx<<3n);")?;
+                        writeln!(f, "    let sec_entry=read_u64(sec_entry_addr);")?;
+                        writeln!(f, "    let page_base_top16=sec_entry>>48n;")?;
+                        writeln!(f, "    let phys_page_base=(page_base_top16<<48n)|page_base_low48;")?;
+                        writeln!(f, "    let p=phys_page_base+(v&0xFFFFn);")?;
+                        writeln!(f, "    return new DataView($._sys(`memory`).buffer,$.get_page(p));")?;
+                        write!(f, "}})")
                     }
                 }
             }
