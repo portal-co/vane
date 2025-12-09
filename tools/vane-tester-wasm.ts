@@ -76,10 +76,21 @@ async function loadWasmPkg(pkgPath: string): Promise<any> {
   const jsFile = dirents.find((f) => f.endsWith('.js'));
   if (!jsFile) throw new Error(`No .js wrapper found in ${pkgPath}. Run wasm-pack build --target nodejs`);
   const jsPath = path.join(pkgPath, jsFile);
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const pkg = require(jsPath);
-  if (typeof pkg === 'function') { await pkg(); return require(jsPath); }
-  return pkg;
+  // Use dynamic ESM import for the generated pkg
+  const imported = await import(jsPath);
+  // wasm-pack node target commonly default-exports an init function or namespace; try to handle both
+  if (typeof imported === 'function') {
+    await imported();
+    const reimport = await import(jsPath);
+    return reimport;
+  }
+  // If default export is a function, call it
+  if (imported && typeof (imported as any).default === 'function') {
+    await (imported as any).default();
+    const reimport = await import(jsPath);
+    return reimport;
+  }
+  return imported;
 }
 
 async function exists(p: string) { try { await fs.stat(p); return true; } catch { return false; } }
@@ -100,23 +111,30 @@ async function main() {
   if (!await exists(pkgDir)) { console.error(`Expected wasm pkg at ${pkgDir} - build it first`); process.exit(3); }
   const pkg = await loadWasmPkg(pkgDir);
 
-  const MemCtor = pkg.Mem || pkg.mem || (pkg.default && pkg.default.Mem);
-  const ReactorCtor = pkg.Reactor || pkg.reactor || (pkg.default && pkg.default.Reactor);
-  if (!MemCtor || !ReactorCtor) { console.error('pkg missing Mem/Reactor exports:', Object.keys(pkg)); process.exit(4); }
+  const MemCtor = (pkg as any).Mem || (pkg as any).mem || (pkg as any).default?.Mem;
+  const ReactorCtor = (pkg as any).Reactor || (pkg as any).reactor || (pkg as any).default?.Reactor;
+  if (!MemCtor || !ReactorCtor) { console.error('pkg missing Mem/Reactor exports:', Object.keys(pkg as any)); process.exit(4); }
 
   const bin = await fs.readFile(input);
-  const buf = new Uint8Array(bin);
+  const buf = new Uint8Array(bin as Uint8Array);
   const elf = parseELF(buf);
   console.log(`ELF entry=0x${elf.entry.toString(16)} segments=${elf.segments.length}`);
 
-  const mem = new MemCtor();
+  // Instantiate Mem; wasm-bindgen may export a class or factory
+  let mem: any;
+  try { mem = new (MemCtor as any)(); } catch { mem = (MemCtor as any)(); }
   const writeByteFn = (mem as any).write_byte || (mem as any).writeByte || (mem as any).write;
   const wasmMemory = (pkg as any).memory || (mem as any).memory;
   if (!writeByteFn && !wasmMemory) { console.error('No method to write into Mem instance found'); process.exit(5); }
 
   const writeByte = (addr: number, val: number) => {
     if (writeByteFn) (writeByteFn as Function).call(mem, BigInt(addr), val);
-    else { const U8 = new Uint8Array((wasmMemory as WebAssembly.Memory).buffer); U8[addr] = val; }
+    else {
+      const memBuf = (wasmMemory as WebAssembly.Memory).buffer;
+      if (!memBuf) throw new Error('WASM memory buffer not available');
+      const U8 = new Uint8Array(memBuf);
+      U8[addr] = val;
+    }
   };
 
   for (const seg of elf.segments) {
@@ -131,8 +149,12 @@ async function main() {
   }
 
   let reactor: any;
-  if (ReactorCtor.new_with_mem) reactor = ReactorCtor.new_with_mem(mem);
-  else reactor = new ReactorCtor(mem);
+  try {
+    if (typeof (ReactorCtor as any).new_with_mem === 'function') reactor = (ReactorCtor as any).new_with_mem(mem);
+    else reactor = new (ReactorCtor as any)(mem);
+  } catch (e) {
+    try { reactor = (ReactorCtor as any)(mem); } catch (err) { console.error('Failed to instantiate Reactor:', err); process.exit(6); }
+  }
 
   if (reactor.set_test_mode) try { reactor.set_test_mode(test_mode); } catch {}
   if (reactor.set_paging_mode) try { reactor.set_paging_mode(paging); } catch {}

@@ -152,56 +152,26 @@ async function main() {
   console.log('Loading wasm package from', pkgDir);
   const pkg = await loadWasmPkg(pkgDir);
 
-  // Inspect exports
-  const hasMemClass = !!pkg.Mem || !!pkg.mem || !!pkg.default?.Mem;
-  const hasReactor = !!pkg.Reactor || !!pkg.reactor || !!pkg.default?.Reactor;
-  if (!hasMemClass || !hasReactor) {
-    console.error('The wasm package does not expose expected exports. Expected at least `Mem` and `Reactor` classes on the package exports.');
-    console.error('Exports found:', Object.keys(pkg));
-    process.exit(4);
-  }
-
   const MemCtor = pkg.Mem || pkg.mem || (pkg.default && pkg.default.Mem);
   const ReactorCtor = pkg.Reactor || pkg.reactor || (pkg.default && pkg.default.Reactor);
+  if (!MemCtor || !ReactorCtor) { console.error('pkg missing Mem/Reactor exports:', Object.keys(pkg)); process.exit(4); }
 
   // Create memory (Mem) and load binary
   const bin = await fs.readFile(input);
   const elf = parseELF(bin);
   console.log(`ELF entry=${elf.entry.toString(16)} segments=${elf.segments.length}`);
 
-  // instantiate Mem
+  // Instantiate Mem
   let mem;
-  try {
-    mem = new MemCtor();
-  } catch (e) {
-    // Some wasm-bindgen outputs export factory functions
-    if (typeof MemCtor === 'function') {
-      mem = MemCtor();
-    } else {
-      throw e;
-    }
-  }
+  try { mem = new MemCtor(); } catch { mem = MemCtor(); }
 
-  // Determine how to write into memory. Prefer `write_byte` style method.
   const writeByteFn = mem.write_byte || mem.writeByte || mem.write || mem.write_u8;
-  const memIsBufferBacked = !writeByteFn && (pkg.memory || globalThis.memory || mem.memory || null);
+  const wasmMemory = pkg.memory || mem.memory || (pkg.default && pkg.default.memory);
+  if (!writeByteFn && !wasmMemory) { console.error('No method to write into Mem instance found'); process.exit(5); }
 
-  if (!writeByteFn && !memIsBufferBacked) {
-    console.error('Unable to find a method to write bytes into `Mem` instance. Expected `write_byte` or similar or an exported memory.');
-    process.exit(5);
-  }
-
-  // Helper to write bytes
   const writeByte = (addr, val) => {
-    if (writeByteFn) {
-      writeByteFn.call(mem, BigInt(addr), val);
-    } else {
-      // direct memory access
-      const wasmMemory = pkg.memory || mem.memory || (pkg.default && pkg.default.memory);
-      if (!wasmMemory) throw new Error('No wasm memory found');
-      const U8 = new Uint8Array(wasmMemory.buffer);
-      U8[addr] = val;
-    }
+    if (writeByteFn) writeByteFn.call(mem, BigInt(addr), val);
+    else { const U8 = new Uint8Array(wasmMemory.buffer); U8[addr] = val; }
   };
 
   for (const seg of elf.segments) {
@@ -219,26 +189,13 @@ async function main() {
     }
   }
 
-  // Create Reactor via available constructors
+  // Create Reactor
   let reactor;
   try {
-    // Try new_with_mem mem
-    if (ReactorCtor.new_with_mem) {
-      reactor = ReactorCtor.new_with_mem(mem);
-    } else if (typeof ReactorCtor === 'function') {
-      // Some wasm exports wrap constructors differently
-      reactor = new ReactorCtor(mem);
-    } else if (ReactorCtor.from_mem) {
-      reactor = ReactorCtor.from_mem(mem);
-    } else {
-      // try calling no-arg constructor then set memory (less likely)
-      reactor = new ReactorCtor();
-      if (reactor.set_mem) reactor.set_mem(mem);
-    }
+    if (typeof ReactorCtor.new_with_mem === 'function') reactor = ReactorCtor.new_with_mem(mem);
+    else reactor = new ReactorCtor(mem);
   } catch (e) {
-    console.error('Failed to construct Reactor instance:', e);
-    console.error('Available Reactor props:', Object.keys(ReactorCtor));
-    process.exit(6);
+    try { reactor = ReactorCtor(mem); } catch (err) { console.error('Failed to instantiate Reactor:', err); process.exit(6); }
   }
 
   // Configure reactor flags if methods exist
