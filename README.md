@@ -1,13 +1,14 @@
 # vane
 
 ## Description
-Project vane
+"RISC-V emulator for the Web, WASM, and anything based on them". A JIT/Emulator for RISC-V (`vane`, `vane-jit`).
 
 ## Goals
-- [ ] Add project goals
+- [ ] Emulate RISC-V in WASM/Web
+- [ ] Provide JIT compilation
 
 ## Progress
-- [ ] Initial setup
+- [ ] Workspace setup with CLI and JIT crates
 
 ---
 *AI assisted*
