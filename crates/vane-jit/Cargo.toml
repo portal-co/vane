@@ -10,3 +10,4 @@ description.workspace = true #= "Risc-V emulator for the Web, WASM, and anything
 rv-asm.workspace = true
 paste = "1.0.15"
 wasmparser.workspace = true
+either.workspace = true

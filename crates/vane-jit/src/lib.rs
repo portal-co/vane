@@ -360,7 +360,7 @@ pub trait WasmJit {
     fn jit<'a>(
         &'a self,
         ctx: &'a (dyn WasmJitCtx + 'a),
-    ) -> Box<dyn Iterator<Item = JitOpcode<'a>> + 'a>;
+    ) -> impl Iterator<Item = JitOpcode<'a>> + 'a;
 }
 pub mod arch;
 pub mod template;

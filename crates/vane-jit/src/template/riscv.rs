@@ -9,7 +9,7 @@ impl<'b> RiscvWasmJit for TemplateJit<'b> {
     fn Riscv<'a>(
         &'a self,
         ctx: &'a (dyn WasmJitCtx + 'a),
-    ) -> Box<dyn Iterator<Item = JitOpcode<'a>> + 'a> {
+    ) -> impl Iterator<Item = JitOpcode<'a>> + 'a {
         self.jit_wasm(|labels, nd| {
             let mut i = self.params.react.bytes(self.pc);
             let inst_code = u32::from_le_bytes(array::from_fn(|_| i.next().unwrap()));

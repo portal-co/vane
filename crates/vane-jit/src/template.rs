@@ -1,13 +1,9 @@
 use core::array;
 
+use either::Either;
 use wasmparser::Operator;
 
-use crate::{
-    arch::RiscvDisplay,
-    flate::Flate,
-    PagingMode,
-    *,
-};
+use crate::{PagingMode, arch::RiscvDisplay, flate::Flate, *};
 #[derive(Clone)]
 pub struct Label<'a> {
     ident_name: &'a (dyn Display + 'a),
@@ -41,12 +37,12 @@ impl Flags {
     /// This is the preferred way to create Flags with non-default values
     /// since the struct is non-exhaustive.
     pub fn new_with_test_mode(test_mode: bool) -> Self {
-        Self { 
+        Self {
             test_mode,
             ..Default::default()
         }
     }
-    
+
     /// Create Flags with paging configuration
     pub fn with_paging(
         test_mode: bool,
@@ -104,10 +100,10 @@ impl<'a, const N: usize> Display for TemplateReg<'a, N> {
 }
 pub mod riscv;
 impl<'b> TemplateJit<'b> {
-    pub fn jit_wasm<'a>(
+    pub fn jit_wasm<'a, I: Iterator<Item = JitOpcode<'a>> + 'a>(
         &'a self,
-        go: impl for<'c> FnOnce(Labels<'c>, u32) -> Box<dyn Iterator<Item = JitOpcode<'a>> + 'a>,
-    ) -> Box<dyn Iterator<Item = JitOpcode<'a>> + 'a> {
+        go: impl for<'c> FnOnce(Labels<'c>, u32) -> I,
+    ) -> impl Iterator<Item = JitOpcode<'a>> + 'a {
         let mut labels = self.labels.clone();
         match labels.0.entry(self.pc) {
             alloc::collections::btree_map::Entry::Vacant(vacant_entry) => {
@@ -119,7 +115,7 @@ impl<'b> TemplateJit<'b> {
                 let nd = self.depth + 1;
                 // let mut i: Vec<_> = Default::default();
                 let i = go(labels, nd);
-                Box::new(
+                Either::Left(
                     [JitOpcode::Operator {
                         op: Operator::Loop {
                             blockty: wasmparser::BlockType::Empty,
@@ -132,7 +128,7 @@ impl<'b> TemplateJit<'b> {
             }
             alloc::collections::btree_map::Entry::Occupied(occupied_entry) => {
                 let Label { index, ident_name } = occupied_entry.get();
-                Box::new(
+                Either::Right(
                     [JitOpcode::Operator {
                         op: Operator::Br {
                             relative_depth: self.depth - index,
@@ -199,15 +195,15 @@ impl<'a> Display for CoreJS<'a> {
         let signed = self.flate.flate("signed");
         let unsigned = self.flate.flate("unsigned");
         let data = self.flate.flate("data");
-        
+
         write!(
             fmt,
             "return async function(){{let {max64}=$.f,{max32}=0xffff_ffffn,{signed}=(a=>BigInt.asIntN(64,a)),{unsigned}=(a=>BigInt.asUintN(64,a)),",
         )?;
-        
+
         // Generate the data function based on paging mode
         self.write_data_function(fmt, &data)?;
-        
+
         write!(fmt, ";{}}}", &self.content)
     }
 }
@@ -217,67 +213,113 @@ impl<'a> CoreJS<'a> {
     fn write_read_helpers(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         // Generate read_u64 helper using DataView
         writeln!(f, "    let read_u64=(addr)=>{{")?;
-        writeln!(f, "        let dv=new DataView($._sys('memory').buffer,$.get_page(addr),8);")?;
+        writeln!(
+            f,
+            "        let dv=new DataView($._sys('memory').buffer,$.get_page(addr),8);"
+        )?;
         writeln!(f, "        return dv.getBigUint64(0,true);")?;
         writeln!(f, "    }};")?;
-        
+
         // Generate read_u32 helper if using 32-bit paging
         if self.flags.use_32bit_paging {
             writeln!(f, "    let read_u32=(addr)=>{{")?;
-            writeln!(f, "        let dv=new DataView($._sys('memory').buffer,$.get_page(addr),4);")?;
+            writeln!(
+                f,
+                "        let dv=new DataView($._sys('memory').buffer,$.get_page(addr),4);"
+            )?;
             writeln!(f, "        return dv.getUint32(0,true);")?;
             writeln!(f, "    }};")?;
         }
-        
+
         Ok(())
     }
 
     /// Write multilevel page table traversal code
-    fn write_multilevel_traversal(&self, f: &mut Formatter<'_>, pt_vaddr: u64, sd_vaddr: u64) -> core::fmt::Result {
+    fn write_multilevel_traversal(
+        &self,
+        f: &mut Formatter<'_>,
+        pt_vaddr: u64,
+        sd_vaddr: u64,
+    ) -> core::fmt::Result {
         if self.flags.use_32bit_paging {
             writeln!(f, "    let l3_idx=(v>>48n)&0xFFFFn;")?;
-            writeln!(f, "    let l2_table_vaddr=BigInt(read_u32({pt_vaddr}n+(l3_idx<<2n)));")?;
+            writeln!(
+                f,
+                "    let l2_table_vaddr=BigInt(read_u32({pt_vaddr}n+(l3_idx<<2n)));"
+            )?;
             writeln!(f, "    let l2_idx=(v>>32n)&0xFFFFn;")?;
-            writeln!(f, "    let l1_table_vaddr=BigInt(read_u32(l2_table_vaddr+(l2_idx<<2n)));")?;
+            writeln!(
+                f,
+                "    let l1_table_vaddr=BigInt(read_u32(l2_table_vaddr+(l2_idx<<2n)));"
+            )?;
             writeln!(f, "    let l1_idx=(v>>16n)&0xFFFFn;")?;
-            writeln!(f, "    let page_pointer=read_u32(l1_table_vaddr+(l1_idx<<2n));")?;
+            writeln!(
+                f,
+                "    let page_pointer=read_u32(l1_table_vaddr+(l1_idx<<2n));"
+            )?;
             writeln!(f, "    let sec_idx=page_pointer&0xFF;")?;
             writeln!(f, "    let page_base_low24=page_pointer>>8;")?;
             writeln!(f, "    let sec_entry_addr={sd_vaddr}n+BigInt(sec_idx<<3);")?;
             writeln!(f, "    let sec_entry=read_u64(sec_entry_addr);")?;
             writeln!(f, "    let page_base_top8=sec_entry>>56n;")?;
-            writeln!(f, "    let phys_page_base=BigInt((page_base_top8<<24n)|BigInt(page_base_low24));")?;
+            writeln!(
+                f,
+                "    let phys_page_base=BigInt((page_base_top8<<24n)|BigInt(page_base_low24));"
+            )?;
         } else {
             writeln!(f, "    let l3_idx=(v>>48n)&0xFFFFn;")?;
-            writeln!(f, "    let l2_table_vaddr=read_u64({pt_vaddr}n+(l3_idx<<3n));")?;
+            writeln!(
+                f,
+                "    let l2_table_vaddr=read_u64({pt_vaddr}n+(l3_idx<<3n));"
+            )?;
             writeln!(f, "    let l2_idx=(v>>32n)&0xFFFFn;")?;
-            writeln!(f, "    let l1_table_vaddr=read_u64(l2_table_vaddr+(l2_idx<<3n));")?;
+            writeln!(
+                f,
+                "    let l1_table_vaddr=read_u64(l2_table_vaddr+(l2_idx<<3n));"
+            )?;
             writeln!(f, "    let l1_idx=(v>>16n)&0xFFFFn;")?;
-            writeln!(f, "    let page_pointer=read_u64(l1_table_vaddr+(l1_idx<<3n));")?;
+            writeln!(
+                f,
+                "    let page_pointer=read_u64(l1_table_vaddr+(l1_idx<<3n));"
+            )?;
             writeln!(f, "    let sec_idx=page_pointer&0xFFFFn;")?;
             writeln!(f, "    let page_base_low48=page_pointer>>16n;")?;
             writeln!(f, "    let sec_entry_addr={sd_vaddr}n+(sec_idx<<3n);")?;
             writeln!(f, "    let sec_entry=read_u64(sec_entry_addr);")?;
             writeln!(f, "    let page_base_top16=sec_entry>>48n;")?;
-            writeln!(f, "    let phys_page_base=(page_base_top16<<48n)|page_base_low48;")?;
+            writeln!(
+                f,
+                "    let phys_page_base=(page_base_top16<<48n)|page_base_low48;"
+            )?;
         }
         Ok(())
     }
 
     /// Write single-level page table lookup code
-    fn write_single_level_lookup(&self, f: &mut Formatter<'_>, pt_vaddr: u64, sd_vaddr: u64) -> core::fmt::Result {
+    fn write_single_level_lookup(
+        &self,
+        f: &mut Formatter<'_>,
+        pt_vaddr: u64,
+        sd_vaddr: u64,
+    ) -> core::fmt::Result {
         writeln!(f, "    let page_num=v>>16n;")?;
-        
+
         if self.flags.use_32bit_paging {
             writeln!(f, "    let entry_addr={pt_vaddr}n+(page_num<<2n);")?;
-            writeln!(f, "    let dv=new DataView($._sys('memory').buffer,$.get_page(entry_addr),4);")?;
+            writeln!(
+                f,
+                "    let dv=new DataView($._sys('memory').buffer,$.get_page(entry_addr),4);"
+            )?;
             writeln!(f, "    let page_pointer=dv.getUint32(0,true);")?;
             writeln!(f, "    let sec_idx=page_pointer&0xFF;")?;
             writeln!(f, "    let page_base_low24=page_pointer>>8;")?;
             writeln!(f, "    let sec_entry_addr={sd_vaddr}n+BigInt(sec_idx<<3);")?;
             writeln!(f, "    let sec_entry=read_u64(sec_entry_addr);")?;
             writeln!(f, "    let page_base_top8=sec_entry>>56n;")?;
-            writeln!(f, "    let phys_page_base=BigInt((page_base_top8<<24n)|BigInt(page_base_low24));")?;
+            writeln!(
+                f,
+                "    let phys_page_base=BigInt((page_base_top8<<24n)|BigInt(page_base_low24));"
+            )?;
         } else {
             writeln!(f, "    let entry_addr={pt_vaddr}n+(page_num<<3n);")?;
             writeln!(f, "    let page_pointer=read_u64(entry_addr);")?;
@@ -286,13 +328,20 @@ impl<'a> CoreJS<'a> {
             writeln!(f, "    let sec_entry_addr={sd_vaddr}n+(sec_idx<<3n);")?;
             writeln!(f, "    let sec_entry=read_u64(sec_entry_addr);")?;
             writeln!(f, "    let page_base_top16=sec_entry>>48n;")?;
-            writeln!(f, "    let phys_page_base=(page_base_top16<<48n)|page_base_low48;")?;
+            writeln!(
+                f,
+                "    let phys_page_base=(page_base_top16<<48n)|page_base_low48;"
+            )?;
         }
         Ok(())
     }
 
     /// Write the data function based on paging configuration
-    fn write_data_function(&self, f: &mut Formatter<'_>, data_var: &dyn Display) -> core::fmt::Result {
+    fn write_data_function(
+        &self,
+        f: &mut Formatter<'_>,
+        data_var: &dyn Display,
+    ) -> core::fmt::Result {
         match self.flags.paging_mode {
             Some(PagingMode::Shared) | Some(PagingMode::Both) => {
                 let pt_vaddr = self.flags.shared_page_table_vaddr.unwrap_or(0);
@@ -300,22 +349,27 @@ impl<'a> CoreJS<'a> {
 
                 writeln!(f, "{data_var}=(v=>{{")?;
                 self.write_read_helpers(f)?;
-                
+
                 if self.flags.use_multilevel_paging {
                     self.write_multilevel_traversal(f, pt_vaddr, sd_vaddr)?;
                 } else {
                     self.write_single_level_lookup(f, pt_vaddr, sd_vaddr)?;
                 }
-                
+
                 writeln!(f, "    let p=phys_page_base+(v&0xFFFFn);")?;
-                writeln!(f, "    return new DataView($._sys(`memory`).buffer,$.get_page(p));")?;
+                writeln!(
+                    f,
+                    "    return new DataView($._sys(`memory`).buffer,$.get_page(p));"
+                )?;
                 write!(f, "}})")
             }
             _ => {
                 // Legacy mode (default)
-                write!(f, "{data_var}=(p=>{{p=$.get_page(p);return new DataView($._sys(`memory`).buffer,p);}})")
+                write!(
+                    f,
+                    "{data_var}=(p=>{{p=$.get_page(p);return new DataView($._sys(`memory`).buffer,p);}})"
+                )
             }
         }
     }
 }
-
