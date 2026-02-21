@@ -76,13 +76,13 @@ pub struct Mem {
     /// Shared paging: virtual address of page table base (in legacy address space)
     /// When using Both mode, this address is translated through legacy system
     pub shared_page_table_vaddr: Option<u64>,
-    
+
     /// Shared paging: virtual address of security directory (in legacy address space)
     pub shared_security_directory_vaddr: Option<u64>,
-    
+
     /// Use 32-bit page table entries instead of 64-bit
     pub use_32bit_paging: bool,
-    
+
     /// Use multi-level (3-level) page tables instead of single-level
     pub use_multilevel_paging: bool,
 }
@@ -114,8 +114,12 @@ impl Mem {
 
     /// Translate address through shared page table (nested in legacy memory)
     pub fn translate_shared(&mut self, vaddr: u64) -> u64 {
-        let pt_base = self.shared_page_table_vaddr.expect("shared_page_table_vaddr must be set");
-        let sec_dir_base = self.shared_security_directory_vaddr.expect("shared_security_directory_vaddr must be set");
+        let pt_base = self
+            .shared_page_table_vaddr
+            .expect("shared_page_table_vaddr must be set");
+        let sec_dir_base = self
+            .shared_security_directory_vaddr
+            .expect("shared_security_directory_vaddr must be set");
 
         let page_num = vaddr >> 16;
         let page_offset = vaddr & 0xFFFF;
@@ -144,8 +148,12 @@ impl Mem {
 
     /// Translate address using multi-level page table (nested in legacy memory)
     pub fn translate_shared_multilevel(&mut self, vaddr: u64) -> u64 {
-        let l3_table_vaddr = self.shared_page_table_vaddr.expect("shared_page_table_vaddr must be set");
-        let sec_dir_base = self.shared_security_directory_vaddr.expect("shared_security_directory_vaddr must be set");
+        let l3_table_vaddr = self
+            .shared_page_table_vaddr
+            .expect("shared_page_table_vaddr must be set");
+        let sec_dir_base = self
+            .shared_security_directory_vaddr
+            .expect("shared_security_directory_vaddr must be set");
 
         let read_u64 = |mem: &mut Self, addr: u64| -> u64 {
             let mut bytes = [0u8; 8];
@@ -172,7 +180,7 @@ impl Mem {
 
         let sec_idx = page_pointer & 0xFFFF;
         let page_base_low48 = page_pointer >> 16;
-        
+
         let sec_entry_vaddr = sec_dir_base + (sec_idx * 4);
         let mut sec_entry_bytes = [0u8; 4];
         for i in 0u64..4 {
@@ -250,8 +258,12 @@ impl Mem {
 
     /// Translate address through shared page table with 32-bit physical addresses
     pub fn translate_shared_32(&mut self, vaddr: u64) -> u64 {
-        let pt_base = self.shared_page_table_vaddr.expect("shared_page_table_vaddr must be set");
-        let sec_dir_base = self.shared_security_directory_vaddr.expect("shared_security_directory_vaddr must be set");
+        let pt_base = self
+            .shared_page_table_vaddr
+            .expect("shared_page_table_vaddr must be set");
+        let sec_dir_base = self
+            .shared_security_directory_vaddr
+            .expect("shared_security_directory_vaddr must be set");
 
         let page_num = vaddr >> 16;
         let page_offset = vaddr & 0xFFFF;
@@ -265,7 +277,7 @@ impl Mem {
 
         let sec_idx = (page_pointer & 0xFF) as u64;
         let page_base_low24 = (page_pointer >> 8) as u64;
-        
+
         let sec_entry_vaddr = sec_dir_base + (sec_idx * 4);
         let mut sec_entry_bytes = [0u8; 4];
         for i in 0u64..4 {
@@ -280,9 +292,13 @@ impl Mem {
 
     /// Translate address using multi-level page table with 32-bit physical addresses
     pub fn translate_shared_multilevel_32(&mut self, vaddr: u64) -> u64 {
-        let l3_table_vaddr = self.shared_page_table_vaddr.expect("shared_page_table_vaddr must be set");
-        let sec_dir_base = self.shared_security_directory_vaddr.expect("shared_security_directory_vaddr must be set");
-        
+        let l3_table_vaddr = self
+            .shared_page_table_vaddr
+            .expect("shared_page_table_vaddr must be set");
+        let sec_dir_base = self
+            .shared_security_directory_vaddr
+            .expect("shared_security_directory_vaddr must be set");
+
         let read_u32 = |mem: &mut Self, addr: u64| -> u32 {
             let mut bytes = [0u8; 4];
             for i in 0u64..4 {
@@ -316,7 +332,6 @@ impl Mem {
         let phys_page_base = (page_base_top8 << 24) | page_base_low24;
         phys_page_base + (vaddr & 0xFFFF)
     }
-
 
     /// Safe interface to write a byte to memory
     pub fn write_byte(&mut self, addr: u64, value: u8) {

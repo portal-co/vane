@@ -139,7 +139,7 @@ macro_rules! vane_meta {
                 pub fn set_test_mode(&self, value: bool) {
                     self.core.lock().test_mode = value;
                 }
-                
+
                 #[wasm_bindgen(js_name = "get_paging_mode",wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn get_paging_mode(&self) -> String {
                     match self.core.lock().mem.paging_mode {
@@ -148,7 +148,7 @@ macro_rules! vane_meta {
                         $crate::vane_jit::PagingMode::Both => "both".to_string(),
                     }
                 }
-                
+
                 #[wasm_bindgen(js_name = "set_paging_mode",wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn set_paging_mode(&self, mode: &str) {
                     let paging_mode = match mode {
@@ -159,47 +159,47 @@ macro_rules! vane_meta {
                     };
                     self.core.lock().mem.paging_mode = paging_mode;
                 }
-                
+
                 #[wasm_bindgen(js_name = "get_shared_page_table_vaddr",wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn get_shared_page_table_vaddr(&self) -> Option<u64> {
                     self.core.lock().mem.shared_page_table_vaddr
                 }
-                
+
                 #[wasm_bindgen(js_name = "set_shared_page_table_vaddr",wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn set_shared_page_table_vaddr(&self, addr: Option<u64>) {
                     self.core.lock().mem.shared_page_table_vaddr = addr;
                 }
-                
+
                 #[wasm_bindgen(js_name = "get_shared_security_directory_vaddr",wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn get_shared_security_directory_vaddr(&self) -> Option<u64> {
                     self.core.lock().mem.shared_security_directory_vaddr
                 }
-                
+
                 #[wasm_bindgen(js_name = "set_shared_security_directory_vaddr",wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn set_shared_security_directory_vaddr(&self, addr: Option<u64>) {
                     self.core.lock().mem.shared_security_directory_vaddr = addr;
                 }
-                
+
                 #[wasm_bindgen(js_name = "get_use_32bit_paging",wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn get_use_32bit_paging(&self) -> bool {
                     self.core.lock().mem.use_32bit_paging
                 }
-                
+
                 #[wasm_bindgen(js_name = "set_use_32bit_paging",wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn set_use_32bit_paging(&self, value: bool) {
                     self.core.lock().mem.use_32bit_paging = value;
                 }
-                
+
                 #[wasm_bindgen(js_name = "get_use_multilevel_paging",wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn get_use_multilevel_paging(&self) -> bool {
                     self.core.lock().mem.use_multilevel_paging
                 }
-                
+
                 #[wasm_bindgen(js_name = "set_use_multilevel_paging",wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn set_use_multilevel_paging(&self, value: bool) {
                     self.core.lock().mem.use_multilevel_paging = value;
                 }
-                
+
                 #[wasm_bindgen(wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn _sys(&self, a: &str) -> $crate::wasm_bindgen::prelude::JsValue {
                     match a {
@@ -240,7 +240,7 @@ macro_rules! vane_meta {
                     let use_32bit_paging = lock.mem.use_32bit_paging;
                     let use_multilevel_paging = lock.mem.use_multilevel_paging;
                     drop(lock);
-                    
+
                     let flags = $crate::vane_jit::template::Flags::with_paging(
                         test_mode,
                         paging_mode,
@@ -249,7 +249,7 @@ macro_rules! vane_meta {
                         use_32bit_paging,
                         use_multilevel_paging,
                     );
-                    
+
                     return ($crate::vane_jit::template::CoreJS {
                         content: &$y(&$crate::vane_jit::template::TemplateJit {
                             params: Params {

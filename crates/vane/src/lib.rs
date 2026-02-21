@@ -2,22 +2,18 @@ mod utils;
 
 // Re-export Mem for use in tests
 use rv_asm::{Inst, Reg, Xlen};
-use std::{
-    cell::OnceCell,
-    rc::Rc,
-    u64,
-};
+use std::{cell::OnceCell, rc::Rc, u64};
 use vane_jit::flate::ReleaseFlate;
+pub use vane_jit::hint;
 use vane_jit::template::Params;
 pub use vane_jit::Mem;
 use vane_jit::{arch::Riscv, JitCtx};
-pub use vane_jit::hint;
 use wasm_bindgen::prelude::*;
 
 #[cfg(test)]
 #[path = "../_tests/rv_corpus.rs"]
 mod _tests;
-vane_meta_gen::vane_meta!(Reactor, Core, Riscv, ReleaseFlate{});
+vane_meta_gen::vane_meta!(Reactor, Core, Riscv, ReleaseFlate {});
 
 #[wasm_bindgen(inline_js = r#"
             export function log_success(){
@@ -78,14 +74,14 @@ impl Reactor {
                     return Err(JsValue::from_str(&format!("{e}")));
                 }
             };
-            
+
             // Check for test marker HINTs when test_mode is enabled
             if test_mode {
                 if let Some(hint_value) = hint::detect_test_marker(&i) {
                     log_test_hint(pc, hint_value);
                 }
             }
-            
+
             let next = match b {
                 rv_asm::IsCompressed::Yes => 2,
                 rv_asm::IsCompressed::No => 4,
