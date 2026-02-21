@@ -1,21 +1,14 @@
 mod utils;
-use js_sys::Promise;
 
 // Re-export Mem for use in tests
 use rv_asm::{Inst, Reg, Xlen};
 use std::{
-    cell::{OnceCell, UnsafeCell},
-    collections::BTreeMap,
-    fmt::Display,
-    mem::transmute,
-    ptr::null_mut,
+    cell::OnceCell,
     rc::Rc,
-    sync::Mutex,
     u64,
 };
-use vane_jit::{flate::ReleaseFlate, template::TemplateJit};
-use vane_jit::template::{CoreJS, Params};
-use vane_jit::Heat;
+use vane_jit::flate::ReleaseFlate;
+use vane_jit::template::Params;
 pub use vane_jit::Mem;
 use vane_jit::{arch::Riscv, JitCtx};
 pub use vane_jit::hint;
@@ -142,13 +135,13 @@ impl Reactor {
                     set_reg!(dest => reg!(src1).wrapping_add(imm.as_u64()));
                 }
                 Inst::Slti { imm, dest, src1 } => {
-                    set_reg!(dest => match ((reg!(src1) as i64) < imm.as_i64()){
+                    set_reg!(dest => match (reg!(src1) as i64) < imm.as_i64() {
                         true => 1,
                         false => 0,
                     });
                 }
                 Inst::Sltiu { imm, dest, src1 } => {
-                    set_reg!(dest => match ((reg!(src1)) < imm.as_u64()){
+                    set_reg!(dest => match (reg!(src1)) < imm.as_u64() {
                         true => 1,
                         false => 0,
                     });
@@ -176,13 +169,13 @@ impl Reactor {
                     set_reg!(dest => reg!(src1).wrapping_add(reg!(src2)));
                 }
                 Inst::Slt { src2, dest, src1 } => {
-                    set_reg!(dest => match ((reg!(src1) as i64) < (reg!(src2) as i64)){
+                    set_reg!(dest => match (reg!(src1) as i64) < (reg!(src2) as i64) {
                         true => 1,
                         false => 0,
                     });
                 }
                 Inst::Sltu { src2, dest, src1 } => {
-                    set_reg!(dest => match ((reg!(src1)) < reg!(src2)){
+                    set_reg!(dest => match (reg!(src1)) < reg!(src2) {
                         true => 1,
                         false => 0,
                     });
@@ -359,7 +352,7 @@ impl Reactor {
                     }
                 }
                 //Fence
-                Inst::Fence { fence } => {}
+                Inst::Fence { fence: _ } => {}
                 //Wide
                 //Immediates
                 Inst::AddiW { imm, dest, src1 } => {
