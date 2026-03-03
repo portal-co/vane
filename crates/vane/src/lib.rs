@@ -3,11 +3,11 @@ mod utils;
 // Re-export Mem for use in tests
 use rv_asm::{Inst, Reg, Xlen};
 use std::{cell::OnceCell, rc::Rc, u64};
-use vane_jit::ReleaseFlate;
-pub use vane_jit::hint;
-use vane_jit::template::Params;
-pub use vane_jit::Mem;
-use vane_jit::{Riscv, JitCtx};
+use vane_riscv::ReleaseFlate;
+pub use vane_riscv::hint;
+use vane_riscv::template::Params;
+pub use vane_riscv::Mem;
+use vane_riscv::{Riscv, JitCtx};
 use wasm_bindgen::prelude::*;
 
 #[cfg(test)]
@@ -36,7 +36,7 @@ extern "C" {
 impl Reactor {
     /// Create a new Reactor with custom memory
     /// This is a safe constructor that allows initializing the reactor with pre-loaded memory
-    pub fn new_with_mem(mem: vane_jit::Mem) -> Self {
+    pub fn new_with_mem(mem: vane_riscv::Mem) -> Self {
         Reactor {
             _handle: (),
             core: Rc::new(spin::Mutex::new(Core {

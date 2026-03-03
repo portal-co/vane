@@ -331,8 +331,8 @@ dependencies = [
  "paste",
  "rv-asm",
  "spin",
- "vane-jit",
  "vane-meta-gen",
+ "vane-riscv",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
@@ -361,7 +361,7 @@ name = "vane-meta-gen"
 version = "0.1.0"
 dependencies = [
  "spin",
- "vane-jit",
+ "vane-riscv",
  "wasm-bindgen",
 ]
 

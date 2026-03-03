@@ -4,7 +4,7 @@ pub use core;
 #[doc(hidden)]
 pub extern crate alloc;
 pub use spin;
-pub use vane_jit;
+pub use vane_riscv;
 pub use wasm_bindgen;
 #[macro_export]
 macro_rules! vane_meta {
@@ -15,7 +15,7 @@ macro_rules! vane_meta {
             _handle: (),
             core: $crate::alloc::rc::Rc<$crate::spin::Mutex<$c>>,
         }
-        impl $crate::vane_jit::JitCtx for Reactor {
+        impl $crate::vane_riscv::JitCtx for Reactor {
             fn bytes(&self, a: u64) -> $crate::alloc::boxed::Box<dyn Iterator<Item = u8> + '_> {
                 $crate::alloc::boxed::Box::new((a..).filter_map(move |a| {
                     let mut lock = self.core.lock();
@@ -25,7 +25,7 @@ macro_rules! vane_meta {
             }
         }
         struct $c {
-            mem: $crate::vane_jit::Mem,
+            mem: $crate::vane_riscv::Mem,
             state: $crate::core::cell::OnceCell<$crate::wasm_bindgen::prelude::JsValue>,
             regs: $crate::core::cell::OnceCell<$crate::wasm_bindgen::prelude::JsValue>,
             test_mode: bool,
@@ -143,19 +143,19 @@ macro_rules! vane_meta {
                 #[wasm_bindgen(js_name = "get_paging_mode",wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn get_paging_mode(&self) -> String {
                     match self.core.lock().mem.paging_mode {
-                        $crate::vane_jit::PagingMode::Legacy => "legacy".to_string(),
-                        $crate::vane_jit::PagingMode::Shared => "shared".to_string(),
-                        $crate::vane_jit::PagingMode::Both => "both".to_string(),
+                        $crate::vane_riscv::PagingMode::Legacy => "legacy".to_string(),
+                        $crate::vane_riscv::PagingMode::Shared => "shared".to_string(),
+                        $crate::vane_riscv::PagingMode::Both => "both".to_string(),
                     }
                 }
 
                 #[wasm_bindgen(js_name = "set_paging_mode",wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn set_paging_mode(&self, mode: &str) {
                     let paging_mode = match mode {
-                        "legacy" => $crate::vane_jit::PagingMode::Legacy,
-                        "shared" => $crate::vane_jit::PagingMode::Shared,
-                        "both" => $crate::vane_jit::PagingMode::Both,
-                        _ => $crate::vane_jit::PagingMode::Legacy,
+                        "legacy" => $crate::vane_riscv::PagingMode::Legacy,
+                        "shared" => $crate::vane_riscv::PagingMode::Shared,
+                        "both" => $crate::vane_riscv::PagingMode::Both,
+                        _ => $crate::vane_riscv::PagingMode::Legacy,
                     };
                     self.core.lock().mem.paging_mode = paging_mode;
                 }
@@ -241,7 +241,7 @@ macro_rules! vane_meta {
                     let use_multilevel_paging = lock.mem.use_multilevel_paging;
                     drop(lock);
 
-                    let flags = $crate::vane_jit::template::Flags::with_paging(
+                    let flags = $crate::vane_riscv::template::Flags::with_paging(
                         test_mode,
                         paging_mode,
                         shared_page_table_vaddr,
@@ -250,22 +250,22 @@ macro_rules! vane_meta {
                         use_multilevel_paging,
                     );
 
-                    return ($crate::vane_jit::template::CoreJS {
-                        content: &$y(&$crate::vane_jit::template::TemplateJit {
+                    return ($crate::vane_riscv::template::CoreJS {
+                        content: &$y(&$crate::vane_riscv::template::TemplateJit {
                             params: Params {
                                 react: self,
                                 trial: &|a| match tget(self.clone(), a)
                                     != $crate::wasm_bindgen::prelude::JsValue::UNDEFINED
                                 {
-                                    true => $crate::vane_jit::Heat::Cached,
-                                    false => $crate::vane_jit::Heat::New,
+                                    true => $crate::vane_riscv::Heat::Cached,
+                                    false => $crate::vane_riscv::Heat::New,
                                 },
                                 root: a,
                                 flate: &f,
                                 flags,
                             },
                             pc: a,
-                            labels: &$crate::vane_jit::template::Labels::default(),
+                            labels: &$crate::vane_riscv::template::Labels::default(),
                             depth: 0,
                         }),
                         flate: &f,
