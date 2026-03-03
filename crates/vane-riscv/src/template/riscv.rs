@@ -8,8 +8,7 @@ use rv_asm::{Inst, Reg, Xlen};
 
 use crate::hint;
 use crate::{RiscvDisplay, TemplateRiscv};
-#[cfg(feature = "target-wasm")]
-use crate::RiscvWasmJit;
+vane_arch::cfg_target_wasm! { use crate::RiscvWasmJit; }
 
 use super::*;
 
@@ -36,7 +35,7 @@ impl<'a, const N: usize> Display for TemplateReg<'a, N> {
     }
 }
 
-#[cfg(feature = "target-wasm")]
+vane_arch::cfg_target_wasm! {
 impl<'b> RiscvWasmJit for TemplateJit<'b> {
     fn Riscv<'a>(
         &'a self,
@@ -51,7 +50,8 @@ impl<'b> RiscvWasmJit for TemplateJit<'b> {
         })
     }
 }
-#[cfg(feature = "target-js")]
+} // cfg_target_wasm!
+vane_arch::cfg_target_js! {
 fn rv_core_js<Target: ArchTarget>(
     this: &TemplateJit<'_>,
     a: Inst,
@@ -505,7 +505,6 @@ fn rv_core_js<Target: ArchTarget>(
         })
     )
 }
-#[cfg(feature = "target-js")]
 impl<'a> RiscvDisplay for TemplateJit<'a> {
     fn Riscv(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         // if tget(self.react.clone(), self.pc) != JsValue::UNDEFINED {
@@ -542,3 +541,4 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
         });
     }
 }
+} // cfg_target_js!
