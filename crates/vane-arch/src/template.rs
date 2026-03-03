@@ -3,7 +3,7 @@ use core::array;
 use either::Either;
 use wasmparser::Operator;
 
-use crate::{PagingMode, Flate, *};
+use crate::{Flate, PagingMode, *};
 #[derive(Clone)]
 pub struct Label<'a> {
     ident_name: &'a (dyn Display + 'a),
@@ -75,7 +75,6 @@ pub trait TemplateJS {
     fn template_jit_js<'a>(&self, j: &'a TemplateJit<'_>) -> Self::Ty<'a>;
     fn template_jit_wasm<'a>(&self, j: &'a TemplateJit<'_>) -> Self::Wasm<'a>;
 }
-
 
 impl<'b> TemplateJit<'b> {
     pub fn jit_wasm<'a, I: Iterator<Item = JitOpcode<'a>> + 'a>(

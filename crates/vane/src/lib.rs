@@ -3,11 +3,11 @@ mod utils;
 // Re-export Mem for use in tests
 use rv_asm::{Inst, Reg, Xlen};
 use std::{cell::OnceCell, rc::Rc, u64};
-use vane_riscv::ReleaseFlate;
 pub use vane_riscv::hint;
 use vane_riscv::template::Params;
 pub use vane_riscv::Mem;
-use vane_riscv::{Riscv, JitCtx};
+use vane_riscv::ReleaseFlate;
+use vane_riscv::Riscv;
 use wasm_bindgen::prelude::*;
 
 #[cfg(test)]
