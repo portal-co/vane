@@ -15,13 +15,14 @@ macro_rules! vane_meta {
             _handle: (),
             core: $crate::alloc::rc::Rc<$crate::spin::Mutex<$c>>,
         }
-        impl $crate::vane_arch::JitCtx for Reactor {
+        impl $crate::vane_arch::JitCtx for $t {
             fn bytes(&self, a: u64) -> $crate::alloc::boxed::Box<dyn Iterator<Item = u8> + '_> {
-                $crate::alloc::boxed::Box::new((a..).filter_map(move |a| {
-                    let mut lock = self.core.lock();
-                    let n = lock.mem.bytes(a).next()?;
-                    Some(n)
+                $crate::alloc::boxed::Box::new((a..).map(move |a| {
+                    self.core.lock().mem.read_byte(a)
                 }))
+            }
+            fn byte(&self, a: u64) -> u8 {
+                self.core.lock().mem.read_byte(a)
             }
         }
         struct $c {

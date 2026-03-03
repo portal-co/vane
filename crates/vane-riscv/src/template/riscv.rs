@@ -40,8 +40,7 @@ impl<'b> RiscvWasmJit for TemplateJit<'b> {
         ctx: &'a (dyn WasmJitCtx + 'a),
     ) -> impl Iterator<Item = JitOpcode<'a>> + 'a {
         self.jit_wasm(|labels, nd| {
-            let mut i = self.params.react.bytes(self.pc);
-            let inst_code = u32::from_le_bytes(array::from_fn(|_| i.next().unwrap()));
+            let inst_code = u32::from_le_bytes(core::array::from_fn(|i| self.params.react.byte(self.pc + i as u64)));
             let i = Inst::decode(inst_code, Xlen::Rv64);
             return Box::new(empty());
         })
@@ -505,8 +504,7 @@ impl<'a> RiscvDisplay for TemplateJit<'a> {
         // if tget(self.react.clone(), self.pc) != JsValue::UNDEFINED {
         return self.jit_js(f, |f,_label_name,labels,nd|{
                let d =  self.params.flate.flate("data");
-            let mut i = self.params.react.bytes(self.pc);
-            let inst_code = u32::from_le_bytes(array::from_fn(|_| i.next().unwrap()));
+            let inst_code = u32::from_le_bytes(core::array::from_fn(|i| self.params.react.byte(self.pc + i as u64)));
             let i = Inst::decode(inst_code, Xlen::Rv64);
             write!(
                 f,

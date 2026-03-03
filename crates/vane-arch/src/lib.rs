@@ -354,6 +354,15 @@ pub enum Heat {
 
 pub trait JitCtx {
     fn bytes(&self, a: u64) -> Box<dyn Iterator<Item = u8> + '_>;
+
+    /// Read a single byte at address `a`.
+    ///
+    /// The default implementation advances the `bytes` iterator once, so
+    /// implementors that can read a single byte more cheaply should override
+    /// this method.
+    fn byte(&self, a: u64) -> u8 {
+        self.bytes(a).next().unwrap_or(0)
+    }
 }
 
 impl JitCtx for Mem {
@@ -362,5 +371,9 @@ impl JitCtx for Mem {
             None => 0u8,
             Some(i) => i[(a & 0xffff) as usize],
         }))
+    }
+
+    fn byte(&self, a: u64) -> u8 {
+        self.read_byte(a)
     }
 }
