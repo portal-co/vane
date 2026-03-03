@@ -7,5 +7,5 @@ description.workspace = true
 
 [dependencies]
 wasm-bindgen.workspace = true
-vane-riscv = {path="../vane-riscv",version = "^0.1.0"}
+vane-arch = {path="../vane-arch",version = "^0.1.0"}
 spin.workspace = true

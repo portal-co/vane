@@ -361,7 +361,7 @@ name = "vane-meta-gen"
 version = "0.1.0"
 dependencies = [
  "spin",
- "vane-riscv",
+ "vane-arch",
  "wasm-bindgen",
 ]
 
