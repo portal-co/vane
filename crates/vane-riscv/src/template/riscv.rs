@@ -7,7 +7,9 @@ use paste::paste;
 use rv_asm::{Inst, Reg, Xlen};
 
 use crate::hint;
-use crate::{RiscvDisplay, RiscvWasmJit, TemplateRiscv};
+use crate::{RiscvDisplay, TemplateRiscv};
+#[cfg(feature = "target-wasm")]
+use crate::RiscvWasmJit;
 
 use super::*;
 
@@ -34,6 +36,7 @@ impl<'a, const N: usize> Display for TemplateReg<'a, N> {
     }
 }
 
+#[cfg(feature = "target-wasm")]
 impl<'b> RiscvWasmJit for TemplateJit<'b> {
     fn Riscv<'a>(
         &'a self,
@@ -48,7 +51,8 @@ impl<'b> RiscvWasmJit for TemplateJit<'b> {
         })
     }
 }
-fn rv_core_js<Target: TemplateJS>(
+#[cfg(feature = "target-js")]
+fn rv_core_js<Target: ArchTarget>(
     this: &TemplateJit<'_>,
     a: Inst,
     next: u64,
@@ -82,14 +86,14 @@ fn rv_core_js<Target: TemplateJS>(
                         value: None
                     }
                 ),
-                target.template_jit_js(&TemplateJit {
+                target.target_js(&TemplateJit {
                     params: this.params,
                     labels: &labels,
                     pc: this.pc.wrapping_add_signed(($offset).as_i64() * 2),
                     depth: nd,
                     // root:this.root,
                 }),
-                target.template_jit_js(&TemplateJit {
+                target.target_js(&TemplateJit {
                     params: this.params,
                     labels: &labels,
                     pc: next,
@@ -222,7 +226,7 @@ fn rv_core_js<Target: TemplateJS>(
                                 reg: &dest,
                                 value: Some(&format_args!("{}n", next))
                             },
-                            target.template_jit_js(&TemplateJit {
+                            target.target_js(&TemplateJit {
                                 params: this.params,
                                 labels: &labels,
                                 pc: this.pc.wrapping_add_signed(offset.as_i64() * 2),
@@ -493,7 +497,7 @@ fn rv_core_js<Target: TemplateJS>(
     write!(
         f,
         ";{};",
-        target.template_jit_js(&TemplateJit {
+        target.target_js(&TemplateJit {
             params: this.params,
             pc: next,
             labels: &labels,
@@ -501,6 +505,7 @@ fn rv_core_js<Target: TemplateJS>(
         })
     )
 }
+#[cfg(feature = "target-js")]
 impl<'a> RiscvDisplay for TemplateJit<'a> {
     fn Riscv(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         // if tget(self.react.clone(), self.pc) != JsValue::UNDEFINED {

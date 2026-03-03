@@ -7,5 +7,5 @@ description.workspace = true
 
 [dependencies]
 wasm-bindgen.workspace = true
-vane-arch = {path="../vane-arch",version = "^0.1.0"}
+vane-arch = {path="../vane-arch",version = "^0.1.0", features = ["target-js", "target-wasm"]}
 spin.workspace = true

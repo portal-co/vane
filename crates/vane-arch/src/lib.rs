@@ -1,5 +1,4 @@
 #![no_std]
-use alloc::format;
 use alloc::{boxed::Box, collections::btree_map::BTreeMap};
 #[doc(hidden)]
 pub use core;
@@ -10,12 +9,16 @@ pub use paste;
 #[doc(hidden)]
 pub extern crate alloc;
 
-// Re-export target crates
+// Re-export target crates behind their respective features
+#[cfg(feature = "target-js")]
 pub use vane_target_js as target_js;
+#[cfg(feature = "target-wasm")]
 pub use vane_target_wasm as target_wasm;
 
 // Re-export commonly used items from target crates
+#[cfg(feature = "target-js")]
 pub use vane_target_js::flate::{DebugFlate, Flate, ReleaseFlate};
+#[cfg(feature = "target-wasm")]
 pub use vane_target_wasm::{JitOpcode, WasmJit, WasmJitCtx};
 
 pub mod arch;
@@ -189,6 +192,7 @@ impl Mem {
     }
 
     /// Translate a virtual address to a physical address for WASM memory (legacy mode)
+    #[cfg(feature = "target-js")]
     pub fn translate_to_wasm_legacy(&self, vaddr: u64, wasm_memory_base: u64) -> u64 {
         let page_num = vaddr >> 16;
         let page_offset = vaddr & 0xFFFF;
@@ -196,6 +200,7 @@ impl Mem {
     }
 
     /// Generate JavaScript code for shared page table lookup (nested in legacy)
+    #[cfg(feature = "target-js")]
     pub fn generate_shared_paging_js<'a>(
         &'a self,
         vaddr_var: &'a (dyn Display + 'a),
@@ -224,6 +229,7 @@ impl Mem {
     }
 
     /// Generate JavaScript code for multi-level page table lookup (nested in legacy)
+    #[cfg(feature = "target-js")]
     pub fn generate_multilevel_paging_js<'a>(
         &'a self,
         vaddr_var: &'a (dyn Display + 'a),

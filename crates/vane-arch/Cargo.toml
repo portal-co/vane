@@ -6,9 +6,14 @@ version.workspace = true
 license.workspace = true
 description.workspace = true
 
+[features]
+default = ["target-js", "target-wasm"]
+target-js = ["dep:vane-target-js", "dep:either"]
+target-wasm = ["dep:vane-target-wasm", "dep:either", "dep:wasmparser"]
+
 [dependencies]
-vane-target-js = { path = "../vane-target-js" }
-vane-target-wasm = { path = "../vane-target-wasm" }
+vane-target-js = { path = "../vane-target-js", optional = true }
+vane-target-wasm = { path = "../vane-target-wasm", optional = true }
 paste = "1.0.15"
-either.workspace = true
-wasmparser.workspace = true
+either = { workspace = true, optional = true }
+wasmparser = { workspace = true, optional = true }
