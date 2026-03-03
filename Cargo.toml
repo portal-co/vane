@@ -9,8 +9,6 @@ members = [
     "crates/vane-riscv",
 ]
 
-# "crates/vane-cli"
-
 resolver = "3"
 
 [workspace.package]
