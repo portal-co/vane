@@ -1,0 +1,10 @@
+[package]
+name = "vane-target-wasm"
+
+edition = "2024"
+version.workspace = true
+license.workspace = true
+description.workspace = true
+
+[dependencies]
+wasmparser.workspace = true

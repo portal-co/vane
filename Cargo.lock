@@ -339,13 +339,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "vane-jit"
+name = "vane-arch"
 version = "0.1.0"
 dependencies = [
  "either",
  "paste",
- "rv-asm",
+ "vane-target-js",
+ "vane-target-wasm",
  "wasmparser",
+]
+
+[[package]]
+name = "vane-jit"
+version = "0.1.0"
+dependencies = [
+ "vane-riscv",
 ]
 
 [[package]]
@@ -355,6 +363,30 @@ dependencies = [
  "spin",
  "vane-jit",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "vane-riscv"
+version = "0.1.0"
+dependencies = [
+ "paste",
+ "rv-asm",
+ "vane-arch",
+]
+
+[[package]]
+name = "vane-target-js"
+version = "0.1.0"
+dependencies = [
+ "either",
+ "paste",
+]
+
+[[package]]
+name = "vane-target-wasm"
+version = "0.1.0"
+dependencies = [
+ "wasmparser",
 ]
 
 [[package]]

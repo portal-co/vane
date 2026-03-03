@@ -2,12 +2,9 @@
 name = "vane-jit"
 
 edition = "2024"
-version.workspace = true #= "0.1.0"
-license.workspace = true #= "MPL-2.0"
-description.workspace = true #= "Risc-V emulator for the Web, WASM, and anything based on them"
+version.workspace = true
+license.workspace = true
+description.workspace = true
 
 [dependencies]
-rv-asm.workspace = true
-paste = "1.0.15"
-wasmparser.workspace = true
-either.workspace = true
+vane-riscv = { path = "../vane-riscv" }

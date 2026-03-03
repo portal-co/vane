@@ -1,0 +1,14 @@
+[package]
+name = "vane-arch"
+
+edition = "2024"
+version.workspace = true
+license.workspace = true
+description.workspace = true
+
+[dependencies]
+vane-target-js = { path = "../vane-target-js" }
+vane-target-wasm = { path = "../vane-target-wasm" }
+paste = "1.0.15"
+either.workspace = true
+wasmparser.workspace = true
