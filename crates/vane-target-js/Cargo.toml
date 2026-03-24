@@ -9,3 +9,4 @@ description.workspace = true
 [dependencies]
 paste = "1.0.15"
 either.workspace = true
+vane-target-core = { path = "../vane-target-core" }

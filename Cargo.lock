@@ -344,6 +344,7 @@ version = "0.1.0"
 dependencies = [
  "either",
  "paste",
+ "vane-target-core",
  "vane-target-js",
  "vane-target-wasm",
  "wasmparser",
@@ -375,17 +376,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "vane-target-core"
+version = "0.1.0"
+dependencies = [
+ "wasmparser",
+]
+
+[[package]]
 name = "vane-target-js"
 version = "0.1.0"
 dependencies = [
  "either",
  "paste",
+ "vane-target-core",
 ]
 
 [[package]]
 name = "vane-target-wasm"
 version = "0.1.0"
 dependencies = [
+ "vane-target-core",
  "wasmparser",
 ]
 

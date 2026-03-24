@@ -8,3 +8,4 @@ description.workspace = true
 
 [dependencies]
 wasmparser.workspace = true
+vane-target-core = { path = "../vane-target-core", features = ["wasm"] }

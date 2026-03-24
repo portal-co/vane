@@ -6,7 +6,7 @@ members = [
     "crates/vane-target-js",
     "crates/vane-target-wasm",
     "crates/vane-arch",
-    "crates/vane-riscv",
+    "crates/vane-riscv", "crates/vane-target-core",
 ]
 
 resolver = "3"

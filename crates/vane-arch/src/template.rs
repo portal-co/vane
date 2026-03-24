@@ -1,5 +1,6 @@
 #[cfg(feature = "target-wasm")]
 use either::Either;
+use vane_target_core::CoreOpcode;
 #[cfg(feature = "target-wasm")]
 use wasmparser::Operator;
 
@@ -101,6 +102,37 @@ pub trait ArchTarget {
 }
 
 impl<'b> TemplateJit<'b> {
+    #[cfg(feature = "gen-blocks")]
+    pub fn jit_core<'a, O: CoreOpcode + 'a, I: Iterator<Item = O> + 'a>(
+        &'a self,
+        go: impl 'a + for<'c> FnOnce(Labels<'c>, u32) -> I,
+    ) -> impl Iterator<Item = O> + 'a {
+        crate::gen_block! {
+            let mut labels = self.labels.clone();
+            match labels.0.entry(self.pc) {
+                alloc::collections::btree_map::Entry::Vacant(vacant_entry) => {
+                    let label_name =alloc::format!("x{}", self.pc);
+                    let l = label_name.clone();
+                    vacant_entry.insert(Label {
+                        ident_name: &label_name,
+                        index: self.depth,
+                    });
+                    let nd = self.depth + 1;
+                    let i = go(labels, nd);
+                    for a in O::r#loop(i,l){
+                        yield a
+                    }
+                }
+                alloc::collections::btree_map::Entry::Occupied(occupied_entry) => {
+                    let Label { index, ident_name } = occupied_entry.get();
+                    for a in O::br(*index,&**ident_name){
+                        yield a
+                    }
+                }
+            }
+        }
+    }
+
     #[cfg(feature = "target-wasm")]
     pub fn jit_wasm<'a, I: Iterator<Item = JitOpcode<'a>> + 'a>(
         &'a self,
@@ -128,7 +160,10 @@ impl<'b> TemplateJit<'b> {
                 )
             }
             alloc::collections::btree_map::Entry::Occupied(occupied_entry) => {
-                let Label { index, ident_name: _ } = occupied_entry.get();
+                let Label {
+                    index,
+                    ident_name: _,
+                } = occupied_entry.get();
                 Either::Right(
                     [JitOpcode::Operator {
                         op: Operator::Br {
@@ -168,7 +203,10 @@ impl<'b> TemplateJit<'b> {
                 write!(f, "break {label_name};}}",)
             }
             alloc::collections::btree_map::Entry::Occupied(occupied_entry) => {
-                let Label { index: _, ident_name } = occupied_entry.get();
+                let Label {
+                    index: _,
+                    ident_name,
+                } = occupied_entry.get();
                 write!(f, "continue {};", &**ident_name)
             }
         }
@@ -245,30 +283,54 @@ impl<'a> CoreJS<'a> {
     ) -> core::fmt::Result {
         if self.flags.use_32bit_paging {
             writeln!(f, "    let l3_idx=(v>>48n)&0xFFFFn;")?;
-            writeln!(f, "    let l2_table_vaddr=BigInt(read_u32({pt_vaddr}n+(l3_idx<<2n)));")?;
+            writeln!(
+                f,
+                "    let l2_table_vaddr=BigInt(read_u32({pt_vaddr}n+(l3_idx<<2n)));"
+            )?;
             writeln!(f, "    let l2_idx=(v>>32n)&0xFFFFn;")?;
-            writeln!(f, "    let l1_table_vaddr=BigInt(read_u32(l2_table_vaddr+(l2_idx<<2n)));")?;
+            writeln!(
+                f,
+                "    let l1_table_vaddr=BigInt(read_u32(l2_table_vaddr+(l2_idx<<2n)));"
+            )?;
             writeln!(f, "    let l1_idx=(v>>16n)&0xFFFFn;")?;
-            writeln!(f, "    let page_pointer=read_u32(l1_table_vaddr+(l1_idx<<2n));")?;
+            writeln!(
+                f,
+                "    let page_pointer=read_u32(l1_table_vaddr+(l1_idx<<2n));"
+            )?;
             writeln!(f, "    let sec_idx=page_pointer&0xFF;")?;
             writeln!(f, "    let page_base_low24=page_pointer>>8;")?;
             writeln!(f, "    let sec_entry_addr={sd_vaddr}n+BigInt(sec_idx<<3);")?;
             writeln!(f, "    let sec_entry=read_u64(sec_entry_addr);")?;
             writeln!(f, "    let page_base_top8=sec_entry>>56n;")?;
-            writeln!(f, "    let phys_page_base=BigInt((page_base_top8<<24n)|BigInt(page_base_low24));")?;
+            writeln!(
+                f,
+                "    let phys_page_base=BigInt((page_base_top8<<24n)|BigInt(page_base_low24));"
+            )?;
         } else {
             writeln!(f, "    let l3_idx=(v>>48n)&0xFFFFn;")?;
-            writeln!(f, "    let l2_table_vaddr=read_u64({pt_vaddr}n+(l3_idx<<3n));")?;
+            writeln!(
+                f,
+                "    let l2_table_vaddr=read_u64({pt_vaddr}n+(l3_idx<<3n));"
+            )?;
             writeln!(f, "    let l2_idx=(v>>32n)&0xFFFFn;")?;
-            writeln!(f, "    let l1_table_vaddr=read_u64(l2_table_vaddr+(l2_idx<<3n));")?;
+            writeln!(
+                f,
+                "    let l1_table_vaddr=read_u64(l2_table_vaddr+(l2_idx<<3n));"
+            )?;
             writeln!(f, "    let l1_idx=(v>>16n)&0xFFFFn;")?;
-            writeln!(f, "    let page_pointer=read_u64(l1_table_vaddr+(l1_idx<<3n));")?;
+            writeln!(
+                f,
+                "    let page_pointer=read_u64(l1_table_vaddr+(l1_idx<<3n));"
+            )?;
             writeln!(f, "    let sec_idx=page_pointer&0xFFFFn;")?;
             writeln!(f, "    let page_base_low48=page_pointer>>16n;")?;
             writeln!(f, "    let sec_entry_addr={sd_vaddr}n+(sec_idx<<3n);")?;
             writeln!(f, "    let sec_entry=read_u64(sec_entry_addr);")?;
             writeln!(f, "    let page_base_top16=sec_entry>>48n;")?;
-            writeln!(f, "    let phys_page_base=(page_base_top16<<48n)|page_base_low48;")?;
+            writeln!(
+                f,
+                "    let phys_page_base=(page_base_top16<<48n)|page_base_low48;"
+            )?;
         }
         Ok(())
     }
@@ -283,14 +345,20 @@ impl<'a> CoreJS<'a> {
 
         if self.flags.use_32bit_paging {
             writeln!(f, "    let entry_addr={pt_vaddr}n+(page_num<<2n);")?;
-            writeln!(f, "    let dv=new DataView($._sys('memory').buffer,$.get_page(entry_addr),4);")?;
+            writeln!(
+                f,
+                "    let dv=new DataView($._sys('memory').buffer,$.get_page(entry_addr),4);"
+            )?;
             writeln!(f, "    let page_pointer=dv.getUint32(0,true);")?;
             writeln!(f, "    let sec_idx=page_pointer&0xFF;")?;
             writeln!(f, "    let page_base_low24=page_pointer>>8;")?;
             writeln!(f, "    let sec_entry_addr={sd_vaddr}n+BigInt(sec_idx<<3);")?;
             writeln!(f, "    let sec_entry=read_u64(sec_entry_addr);")?;
             writeln!(f, "    let page_base_top8=sec_entry>>56n;")?;
-            writeln!(f, "    let phys_page_base=BigInt((page_base_top8<<24n)|BigInt(page_base_low24));")?;
+            writeln!(
+                f,
+                "    let phys_page_base=BigInt((page_base_top8<<24n)|BigInt(page_base_low24));"
+            )?;
         } else {
             writeln!(f, "    let entry_addr={pt_vaddr}n+(page_num<<3n);")?;
             writeln!(f, "    let page_pointer=read_u64(entry_addr);")?;
@@ -299,7 +367,10 @@ impl<'a> CoreJS<'a> {
             writeln!(f, "    let sec_entry_addr={sd_vaddr}n+(sec_idx<<3n);")?;
             writeln!(f, "    let sec_entry=read_u64(sec_entry_addr);")?;
             writeln!(f, "    let page_base_top16=sec_entry>>48n;")?;
-            writeln!(f, "    let phys_page_base=(page_base_top16<<48n)|page_base_low48;")?;
+            writeln!(
+                f,
+                "    let phys_page_base=(page_base_top16<<48n)|page_base_low48;"
+            )?;
         }
         Ok(())
     }
@@ -324,7 +395,10 @@ impl<'a> CoreJS<'a> {
                 }
 
                 writeln!(f, "    let p=phys_page_base+(v&0xFFFFn);")?;
-                writeln!(f, "    return new DataView($._sys(`memory`).buffer,$.get_page(p));")?;
+                writeln!(
+                    f,
+                    "    return new DataView($._sys(`memory`).buffer,$.get_page(p));"
+                )?;
                 write!(f, "}})")
             }
             _ => {

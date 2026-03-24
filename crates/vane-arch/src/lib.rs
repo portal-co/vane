@@ -1,4 +1,18 @@
 #![no_std]
+#![cfg_attr(feature = "gen-blocks", feature(gen_blocks))]
+
+#[cfg(feature = "gen-blocks")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! gen_block {
+    ($($a:tt)*) => {
+        gen move{
+            $($a)*
+        }
+    };
+}
+
+
 use alloc::{boxed::Box, collections::btree_map::BTreeMap};
 #[doc(hidden)]
 pub use core;

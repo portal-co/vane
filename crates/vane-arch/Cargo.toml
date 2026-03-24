@@ -10,10 +10,12 @@ description.workspace = true
 default = ["target-js", "target-wasm"]
 target-js = ["dep:vane-target-js", "dep:either"]
 target-wasm = ["dep:vane-target-wasm", "dep:either", "dep:wasmparser"]
+gen-blocks=[]
 
 [dependencies]
 vane-target-js = { path = "../vane-target-js", optional = true }
 vane-target-wasm = { path = "../vane-target-wasm", optional = true }
+vane-target-core = { path = "../vane-target-core" }
 paste = "1.0.15"
 either = { workspace = true, optional = true }
 wasmparser = { workspace = true, optional = true }
