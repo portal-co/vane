@@ -1,6 +1,6 @@
 #[cfg(feature = "target-wasm")]
 use either::Either;
-use vane_target_core::CoreOpcode;
+use vane_target_core::{CoreOpcode, StackOp};
 #[cfg(feature = "target-wasm")]
 use wasmparser::Operator;
 
@@ -9,13 +9,17 @@ use crate::*;
 #[cfg(feature = "target-js")]
 use crate::{Flate, PagingMode};
 
+/// A single named loop label.  Owned strings so the label map can be cloned
+/// cheaply without lifetime constraints on the containing types.
 #[derive(Clone)]
-pub struct Label<'a> {
-    ident_name: &'a (dyn Display + 'a),
-    index: u32,
+pub struct Label {
+    pub ident_name: alloc::string::String,
+    pub index: u32,
 }
+
+/// Map from guest PC to the loop label opened at that PC.
 #[derive(Clone, Default)]
-pub struct Labels<'a>(BTreeMap<u64, Label<'a>>);
+pub struct Labels(BTreeMap<u64, Label>);
 
 #[derive(Clone, Copy)]
 pub struct Params<'a> {
@@ -78,16 +82,17 @@ impl Flags {
 pub struct TemplateJit<'a> {
     pub params: Params<'a>,
     pub pc: u64,
-    pub labels: &'a Labels<'a>,
+    /// Label map accumulated so far.  Owned so sub-JIT calls can clone and
+    /// extend it without borrowing the parent.
+    pub labels: Labels,
     pub depth: u32,
 }
 
 /// Arch-target dispatch trait.
 ///
-/// This is an implementation detail used by the [`renders!`] macro to wire a
-/// concrete architecture renderer (e.g. `TemplateRiscv`) to the active set of
-/// codegen backends.  It is not part of the public API and its shape changes
-/// with the enabled feature set.
+/// Implementation detail used by the [`renders!`] macro to wire a concrete
+/// architecture renderer to the active set of codegen backends.  Its shape
+/// will change as backends are migrated to the `StackOp` pipeline.
 #[doc(hidden)]
 pub trait ArchTarget {
     #[cfg(feature = "target-js")]
@@ -102,31 +107,40 @@ pub trait ArchTarget {
 }
 
 impl<'b> TemplateJit<'b> {
-    #[cfg(feature = "gen-blocks")]
-    pub fn jit_core<'a, O: CoreOpcode + 'a, I: Iterator<Item = O> + 'a>(
+    /// Unified JIT dispatch used by all targets.
+    ///
+    /// On first visit to `self.pc` a named loop is opened and the body is
+    /// produced by calling `go`.  On repeat visit a backward branch is emitted
+    /// instead.  Both are expressed purely in terms of `CoreOpcode`, so any
+    /// target whose opcode type implements that trait can use this method.
+    pub fn jit_core<'a, O, I>(
         &'a self,
-        go: impl 'a + for<'c> FnOnce(Labels<'c>, u32) -> I,
-    ) -> impl Iterator<Item = O> + 'a {
+        go: impl 'a + FnOnce(Labels, u32) -> I,
+    ) -> impl Iterator<Item = O> + 'a
+    where
+        O: CoreOpcode<'a>,
+        I: Iterator<Item = O> + 'a,
+    {
         crate::gen_block! {
             let mut labels = self.labels.clone();
             match labels.0.entry(self.pc) {
                 alloc::collections::btree_map::Entry::Vacant(vacant_entry) => {
-                    let label_name =alloc::format!("x{}", self.pc);
-                    let l = label_name.clone();
+                    let label_name = alloc::format!("x{}", self.pc);
                     vacant_entry.insert(Label {
-                        ident_name: &label_name,
+                        ident_name: label_name.clone(),
                         index: self.depth,
                     });
                     let nd = self.depth + 1;
                     let i = go(labels, nd);
-                    for a in O::r#loop(i,l){
-                        yield a
+                    for a in O::r#loop(i, label_name) {
+                        yield a;
                     }
                 }
                 alloc::collections::btree_map::Entry::Occupied(occupied_entry) => {
-                    let Label { index, ident_name } = occupied_entry.get();
-                    for a in O::br(*index,&**ident_name){
-                        yield a
+                    let Label { index, ident_name } = occupied_entry.get().clone();
+                    let relative_depth = self.depth - index;
+                    for a in O::br(relative_depth, ident_name) {
+                        yield a;
                     }
                 }
             }
@@ -136,14 +150,14 @@ impl<'b> TemplateJit<'b> {
     #[cfg(feature = "target-wasm")]
     pub fn jit_wasm<'a, I: Iterator<Item = JitOpcode<'a>> + 'a>(
         &'a self,
-        go: impl for<'c> FnOnce(Labels<'c>, u32) -> I,
+        go: impl FnOnce(Labels, u32) -> I,
     ) -> impl Iterator<Item = JitOpcode<'a>> + 'a {
         let mut labels = self.labels.clone();
         match labels.0.entry(self.pc) {
             alloc::collections::btree_map::Entry::Vacant(vacant_entry) => {
                 let label_name = alloc::format!("x{}", self.pc);
                 vacant_entry.insert(Label {
-                    ident_name: &label_name,
+                    ident_name: label_name,
                     index: self.depth,
                 });
                 let nd = self.depth + 1;
@@ -160,15 +174,11 @@ impl<'b> TemplateJit<'b> {
                 )
             }
             alloc::collections::btree_map::Entry::Occupied(occupied_entry) => {
-                let Label {
-                    index,
-                    ident_name: _,
-                } = occupied_entry.get();
+                let Label { index, .. } = occupied_entry.get();
+                let relative_depth = self.depth - index;
                 Either::Right(
                     [JitOpcode::Operator {
-                        op: Operator::Br {
-                            relative_depth: self.depth - index,
-                        },
+                        op: Operator::Br { relative_depth },
                     }]
                     .into_iter(),
                 )
@@ -180,7 +190,7 @@ impl<'b> TemplateJit<'b> {
     pub fn jit_js(
         &self,
         f: &mut Formatter,
-        render: impl FnOnce(&mut Formatter, &str, Labels<'_>, u32) -> core::fmt::Result,
+        render: impl FnOnce(&mut Formatter, &str, Labels, u32) -> core::fmt::Result,
     ) -> core::fmt::Result {
         match (self.params.trial)(self.pc) {
             Heat::New => {}
@@ -194,20 +204,17 @@ impl<'b> TemplateJit<'b> {
             alloc::collections::btree_map::Entry::Vacant(vacant_entry) => {
                 let label_name = alloc::format!("x{}", self.pc);
                 vacant_entry.insert(Label {
-                    ident_name: &label_name,
+                    ident_name: label_name.clone(),
                     index: self.depth,
                 });
                 let nd = self.depth + 1;
                 write!(f, "{label_name}: for(;;){{")?;
                 render(f, &label_name, labels, nd)?;
-                write!(f, "break {label_name};}}",)
+                write!(f, "break {label_name};}}")
             }
             alloc::collections::btree_map::Entry::Occupied(occupied_entry) => {
-                let Label {
-                    index: _,
-                    ident_name,
-                } = occupied_entry.get();
-                write!(f, "continue {};", &**ident_name)
+                let Label { ident_name, .. } = occupied_entry.get();
+                write!(f, "continue {};", ident_name)
             }
         }
     }

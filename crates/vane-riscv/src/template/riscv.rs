@@ -56,7 +56,7 @@ fn rv_core_js<Target: ArchTarget>(
     this: &TemplateJit<'_>,
     a: Inst,
     next: u64,
-    labels: Labels<'_>,
+    labels: Labels,
     nd: u32,
     f: &mut Formatter,
     target: Target,
@@ -88,14 +88,14 @@ fn rv_core_js<Target: ArchTarget>(
                 ),
                 target.target_js(&TemplateJit {
                     params: this.params,
-                    labels: &labels,
+                    labels: labels.clone(),
                     pc: this.pc.wrapping_add_signed(($offset).as_i64() * 2),
                     depth: nd,
                     // root:this.root,
                 }),
                 target.target_js(&TemplateJit {
                     params: this.params,
-                    labels: &labels,
+                    labels: labels.clone(),
                     pc: next,
                     depth: nd,
                     //   root:this.root,
@@ -228,7 +228,7 @@ fn rv_core_js<Target: ArchTarget>(
                             },
                             target.target_js(&TemplateJit {
                                 params: this.params,
-                                labels: &labels,
+                                labels: labels.clone(),
                                 pc: this.pc.wrapping_add_signed(offset.as_i64() * 2),
                                 depth: nd,
                             })
@@ -500,7 +500,7 @@ fn rv_core_js<Target: ArchTarget>(
         target.target_js(&TemplateJit {
             params: this.params,
             pc: next,
-            labels: &labels,
+            labels,
             depth: nd,
         })
     )
@@ -508,7 +508,7 @@ fn rv_core_js<Target: ArchTarget>(
 impl<'a> RiscvDisplay for TemplateJit<'a> {
     fn Riscv(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         // if tget(self.react.clone(), self.pc) != JsValue::UNDEFINED {
-        return self.jit_js(f, |f,_label_name,labels,nd|{
+        return self.jit_js(f, |f, _label_name, labels, nd| {
                let d =  self.params.flate.flate("data");
             let inst_code = u32::from_le_bytes(core::array::from_fn(|i| self.params.react.byte(self.pc + i as u64)));
             let i = Inst::decode(inst_code, Xlen::Rv64);

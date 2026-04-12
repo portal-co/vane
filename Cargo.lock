@@ -378,9 +378,6 @@ dependencies = [
 [[package]]
 name = "vane-target-core"
 version = "0.1.0"
-dependencies = [
- "wasmparser",
-]
 
 [[package]]
 name = "vane-target-js"

@@ -7,10 +7,10 @@ license.workspace = true
 description.workspace = true
 
 [features]
-default = ["target-js", "target-wasm"]
+default = ["target-js", "target-wasm", "gen-blocks"]
 target-js = ["dep:vane-target-js", "dep:either"]
 target-wasm = ["dep:vane-target-wasm", "dep:either", "dep:wasmparser"]
-gen-blocks=[]
+gen-blocks = []
 
 [dependencies]
 vane-target-js = { path = "../vane-target-js", optional = true }

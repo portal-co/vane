@@ -6,8 +6,6 @@ license.workspace = true
 description.workspace = true
 
 [dependencies]
-wasmparser = {workspace = true, optional = true}
 
 [features]
 default = []
-wasm = ["wasmparser"]

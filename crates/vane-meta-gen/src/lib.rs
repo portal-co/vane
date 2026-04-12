@@ -266,7 +266,7 @@ macro_rules! vane_meta {
                                 flags,
                             },
                             pc: a,
-                            labels: &$crate::vane_arch::template::Labels::default(),
+                            labels: $crate::vane_arch::template::Labels::default(),
                             depth: 0,
                         }),
                         flate: &f,
