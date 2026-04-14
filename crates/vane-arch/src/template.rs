@@ -1,6 +1,4 @@
-#[cfg(feature = "target-wasm")]
-use either::Either;
-use vane_target_core::{CoreOpcode, StackOp};
+use vane_target_core::{CoreOpcode, MemWidth, StackOp};
 #[cfg(feature = "target-wasm")]
 use wasmparser::Operator;
 
@@ -19,7 +17,7 @@ pub struct Label {
 
 /// Map from guest PC to the loop label opened at that PC.
 #[derive(Clone, Default)]
-pub struct Labels(BTreeMap<u64, Label>);
+pub struct Labels(pub BTreeMap<u64, Label>);
 
 #[derive(Clone, Copy)]
 pub struct Params<'a> {
@@ -146,75 +144,340 @@ impl<'b> TemplateJit<'b> {
             }
         }
     }
+}
 
-    #[cfg(feature = "target-wasm")]
-    pub fn jit_wasm<'a, I: Iterator<Item = JitOpcode<'a>> + 'a>(
-        &'a self,
-        go: impl FnOnce(Labels, u32) -> I,
-    ) -> impl Iterator<Item = JitOpcode<'a>> + 'a {
-        let mut labels = self.labels.clone();
-        match labels.0.entry(self.pc) {
-            alloc::collections::btree_map::Entry::Vacant(vacant_entry) => {
-                let label_name = alloc::format!("x{}", self.pc);
-                vacant_entry.insert(Label {
-                    ident_name: label_name,
-                    index: self.depth,
-                });
-                let nd = self.depth + 1;
-                let i = go(labels, nd);
-                Either::Left(
-                    [JitOpcode::Operator {
-                        op: Operator::Loop {
-                            blockty: wasmparser::BlockType::Empty,
-                        },
-                    }]
-                    .into_iter()
-                    .chain(i)
-                    .chain([JitOpcode::Operator { op: Operator::End }]),
-                )
+// ── Stack IR renderers ───────────────────────────────────────────────────────
+
+/// Render a `StackOp` stream to JavaScript.
+///
+/// Maintains a temporary-variable stack (names `_t0`, `_t1`, …) and a label
+/// stack for `LoopBegin`/`LoopEnd` matching.  Every op either writes a JS
+/// statement to `f` directly or pushes an expression name for a later op to
+/// consume.
+#[cfg(feature = "target-js")]
+pub fn render_stack_to_js(
+    ops: impl Iterator<Item = StackOp>,
+    f: &mut Formatter<'_>,
+    flate: &(dyn crate::Flate + '_),
+) -> core::fmt::Result {
+    let max64 = alloc::format!("{}", flate.flate("max64"));
+    let max32 = alloc::format!("{}", flate.flate("max32"));
+    let signed = alloc::format!("{}", flate.flate("signed"));
+    let unsigned = alloc::format!("{}", flate.flate("unsigned"));
+    let data = alloc::format!("{}", flate.flate("data"));
+
+    let mut val:  alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+    let mut lbls: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+    let mut tmp = 0usize;
+
+    macro_rules! push {
+        ($expr:expr) => {{
+            let name = alloc::format!("_t{tmp}");
+            tmp += 1;
+            write!(f, "let {name}={};", $expr)?;
+            val.push(name);
+        }};
+    }
+    macro_rules! pop  { () => { val.pop().unwrap_or_default() }; }
+    macro_rules! pop2 {
+        () => {{
+            let b = val.pop().unwrap_or_default();
+            let a = val.pop().unwrap_or_default();
+            (a, b)
+        }};
+    }
+
+    for op in ops {
+        match op {
+            // ── Control flow ─────────────────────────────────────────────
+            StackOp::LoopBegin { label } => {
+                write!(f, "{label}: for(;;){{")?;
+                lbls.push(label);
             }
-            alloc::collections::btree_map::Entry::Occupied(occupied_entry) => {
-                let Label { index, .. } = occupied_entry.get();
-                let relative_depth = self.depth - index;
-                Either::Right(
-                    [JitOpcode::Operator {
-                        op: Operator::Br { relative_depth },
-                    }]
-                    .into_iter(),
-                )
+            StackOp::LoopEnd => {
+                let label = lbls.pop().unwrap_or_default();
+                write!(f, "break {label};}}")?;
+            }
+            StackOp::Br { label, .. } => { write!(f, "continue {label};")?; }
+            StackOp::IfBegin => {
+                let cond = pop!();
+                write!(f, "if({cond}!==0n){{")?;
+            }
+            StackOp::IfElse => { write!(f, "}}else{{")?; }
+            StackOp::IfEnd  => { write!(f, "}}")?; }
+
+            // ── Literals / registers ──────────────────────────────────────
+            StackOp::PushImm(v) => { push!(alloc::format!("{v}n")); }
+            StackOp::LoadReg(r) => {
+                if r == 0 { push!("0n"); }
+                else       { push!(alloc::format!("(($._r??=$.r)[`x{r}`]??=0n)")); }
+            }
+            StackOp::StoreReg(r) => {
+                let v = pop!();
+                if r != 0 { write!(f, "(($._r??=$.r)[`x{r}`]={v});")?; }
+                // x0 is hardwired zero — discard silently.
+            }
+
+            // ── 64-bit arithmetic ─────────────────────────────────────────
+            StackOp::Add64 => { let (a,b)=pop2!(); push!(alloc::format!("({a}+{b})&{max64}")); }
+            StackOp::Sub64 => { let (a,b)=pop2!(); push!(alloc::format!("({a}-{b})&{max64}")); }
+            StackOp::Mul64 => { let (a,b)=pop2!(); push!(alloc::format!("({a}*{b})&{max64}")); }
+            StackOp::DivU64 => {
+                let (a,b)=pop2!();
+                push!(alloc::format!("{b}===0n?{unsigned}(-1n):({a}/{b})&{max64}"));
+            }
+            StackOp::DivS64 => {
+                let (a,b)=pop2!();
+                push!(alloc::format!("{b}===0n?{unsigned}(-1n):{unsigned}({signed}({a})/{signed}({b}))&{max64}"));
+            }
+            StackOp::RemU64 => {
+                let (a,b)=pop2!();
+                push!(alloc::format!("{b}===0n?{unsigned}(-1n):({a}%{b})&{max64}"));
+            }
+            StackOp::RemS64 => {
+                let (a,b)=pop2!();
+                push!(alloc::format!("{b}===0n?{unsigned}(-1n):{unsigned}({signed}({a})%{signed}({b}))&{max64}"));
+            }
+            StackOp::And64  => { let (a,b)=pop2!(); push!(alloc::format!("({a}&{b})&{max64}")); }
+            StackOp::Or64   => { let (a,b)=pop2!(); push!(alloc::format!("({a}|{b})&{max64}")); }
+            StackOp::Xor64  => { let (a,b)=pop2!(); push!(alloc::format!("({a}^{b})&{max64}")); }
+            StackOp::Shl64  => { let (a,b)=pop2!(); push!(alloc::format!("({a}<<{b})&{max64}")); }
+            StackOp::ShrU64 => { let (a,b)=pop2!(); push!(alloc::format!("({a}>>{b})&{max64}")); }
+            StackOp::ShrS64 => {
+                let (a,b)=pop2!();
+                push!(alloc::format!("{unsigned}({signed}({a})>>{signed}({b}))&{max64}"));
+            }
+            StackOp::MulHU64 => {
+                let (a,b)=pop2!();
+                push!(alloc::format!("(({a}*{b})>>64n)&{max64}"));
+            }
+            StackOp::MulHSU64 => {
+                let (a,b)=pop2!();
+                push!(alloc::format!("{unsigned}(({signed}({a})*{b})>>64n)&{max64}"));
+            }
+            StackOp::MulHS64 => {
+                let (a,b)=pop2!();
+                push!(alloc::format!("{unsigned}(({signed}({a})*{signed}({b}))>>64n)&{max64}"));
+            }
+
+            // ── 32-bit arithmetic (result sign-extended to i64) ───────────
+            StackOp::Add32 => {
+                let (a,b)=pop2!();
+                push!(alloc::format!("{unsigned}(BigInt.asIntN(32,{a}+{b}))"));
+            }
+            StackOp::Sub32 => {
+                let (a,b)=pop2!();
+                push!(alloc::format!("{unsigned}(BigInt.asIntN(32,{a}-{b}))"));
+            }
+            StackOp::Mul32 => {
+                let (a,b)=pop2!();
+                push!(alloc::format!("{unsigned}(BigInt.asIntN(32,({a}&{max32})*({b}&{max32})))"));
+            }
+            StackOp::DivU32 => {
+                let (a,b)=pop2!();
+                push!(alloc::format!("{b}===0n?{unsigned}(-1n):{unsigned}(BigInt.asIntN(32,({a}&{max32})/({b}&{max32})))"));
+            }
+            StackOp::DivS32 => {
+                let (a,b)=pop2!();
+                push!(alloc::format!("{b}===0n?{unsigned}(-1n):{unsigned}(BigInt.asIntN(32,{signed}({a}&{max32})/{signed}({b}&{max32})))"));
+            }
+            StackOp::RemU32 => {
+                let (a,b)=pop2!();
+                push!(alloc::format!("{b}===0n?{unsigned}(-1n):{unsigned}(BigInt.asIntN(32,({a}&{max32})%({b}&{max32})))"));
+            }
+            StackOp::RemS32 => {
+                let (a,b)=pop2!();
+                push!(alloc::format!("{b}===0n?{unsigned}(-1n):{unsigned}(BigInt.asIntN(32,{signed}({a}&{max32})%{signed}({b}&{max32})))"));
+            }
+            StackOp::Shl32 => {
+                let (a,b)=pop2!();
+                push!(alloc::format!("{unsigned}(BigInt.asIntN(32,({a}&{max32})<<({b}&{max32})))"));
+            }
+            StackOp::ShrU32 => {
+                let (a,b)=pop2!();
+                push!(alloc::format!("{unsigned}(BigInt.asIntN(32,({a}&{max32})>>({b}&{max32})))"));
+            }
+            StackOp::ShrS32 => {
+                let (a,b)=pop2!();
+                push!(alloc::format!("{unsigned}(BigInt.asIntN(32,{signed}({a}&{max32})>>{signed}({b}&{max32})))"));
+            }
+
+            // ── Conversions ───────────────────────────────────────────────
+            StackOp::Trunc32   => { let a=pop!(); push!(alloc::format!("({a}&{max32})")); }
+            StackOp::SignExt32 => { let a=pop!(); push!(alloc::format!("{unsigned}(BigInt.asIntN(32,{a}))")); }
+            StackOp::AsSigned64   => { let a=pop!(); push!(alloc::format!("{signed}({a})")); }
+            StackOp::AsUnsigned64 => { let a=pop!(); push!(alloc::format!("{unsigned}({a})")); }
+
+            // ── Comparisons (push 1n or 0n) ───────────────────────────────
+            StackOp::Eq64  => { let (a,b)=pop2!(); push!(alloc::format!("({a}==={b}?1n:0n)")); }
+            StackOp::Ne64  => { let (a,b)=pop2!(); push!(alloc::format!("({a}!=={b}?1n:0n)")); }
+            StackOp::LtU64 => { let (a,b)=pop2!(); push!(alloc::format!("({a}<{b}?1n:0n)")); }
+            StackOp::LtS64 => { let (a,b)=pop2!(); push!(alloc::format!("({signed}({a})<{signed}({b})?1n:0n)")); }
+            StackOp::GeU64 => { let (a,b)=pop2!(); push!(alloc::format!("({a}>={b}?1n:0n)")); }
+            StackOp::GeS64 => { let (a,b)=pop2!(); push!(alloc::format!("({signed}({a})>={signed}({b})?1n:0n)")); }
+
+            // ── Memory ────────────────────────────────────────────────────
+            StackOp::LoadMem { width, signed: is_signed } => {
+                let addr = pop!();
+                let expr = match (width, is_signed) {
+                    (MemWidth::B1, true)  => alloc::format!("{unsigned}(BigInt({data}(({addr})&{max64}).getInt8(0,true)))"),
+                    (MemWidth::B1, false) => alloc::format!("BigInt({data}(({addr})&{max64}).getUint8(0,true))"),
+                    (MemWidth::B2, true)  => alloc::format!("{unsigned}(BigInt({data}(({addr})&{max64}).getInt16(0,true)))"),
+                    (MemWidth::B2, false) => alloc::format!("BigInt({data}(({addr})&{max64}).getUint16(0,true))"),
+                    (MemWidth::B4, true)  => alloc::format!("{unsigned}(BigInt({data}(({addr})&{max64}).getInt32(0,true)))"),
+                    (MemWidth::B4, false) => alloc::format!("BigInt({data}(({addr})&{max64}).getUint32(0,true))"),
+                    (MemWidth::B8, _)     => alloc::format!("{data}(({addr})&{max64}).getBigUint64(0,true)"),
+                };
+                push!(expr);
+            }
+            StackOp::StoreMem { width } => {
+                let v    = pop!();
+                let addr = pop!();
+                match width {
+                    MemWidth::B1 => write!(f, "{data}(({addr})&{max64}).setUint8(0,Number({v}&{max32}),true);")?,
+                    MemWidth::B2 => write!(f, "{data}(({addr})&{max64}).setUint16(0,Number({v}&{max32}),true);")?,
+                    MemWidth::B4 => write!(f, "{data}(({addr})&{max64}).setUint32(0,Number({v}&{max32}),true);")?,
+                    MemWidth::B8 => write!(f, "{data}(({addr})&{max64}).setBigUint64(0,{v},true);")?,
+                }
+            }
+
+            // ── Side effects ──────────────────────────────────────────────
+            StackOp::Ecall     => { write!(f, "await $.ecall();")?; }
+            StackOp::Trap(msg) => { write!(f, "throw new TypeError(`{msg}`);")?; }
+            StackOp::TailCall  => {
+                let addr = pop!();
+                write!(f, "return ()=>J({addr});")?;
+            }
+            StackOp::Log(msg)  => { write!(f, "console.log(`{msg}`);")?; }
+
+            // ── Integrity check ───────────────────────────────────────────
+            StackOp::CheckCode { addr, expected, miss_label } => {
+                match expected.len() {
+                    4 => {
+                        let v = u32::from_le_bytes([expected[0],expected[1],expected[2],expected[3]]);
+                        write!(f, "if({data}({addr}n).getUint32(0,true)!=={v}){{delete $.p[`{miss_label}`];return J({addr}n);}};")? }
+                    2 => {
+                        let v = u16::from_le_bytes([expected[0],expected[1]]);
+                        write!(f, "if({data}({addr}n).getUint16(0,true)!=={v}){{delete $.p[`{miss_label}`];return J({addr}n);}};")? }
+                    _ => {} // unknown width — skip check
+                }
             }
         }
     }
+    Ok(())
+}
 
-    #[cfg(feature = "target-js")]
-    pub fn jit_js(
-        &self,
-        f: &mut Formatter,
-        render: impl FnOnce(&mut Formatter, &str, Labels, u32) -> core::fmt::Result,
-    ) -> core::fmt::Result {
-        match (self.params.trial)(self.pc) {
-            Heat::New => {}
-            Heat::Cached => {
-                return write!(f, "return J({}n);", self.pc);
-            }
-        }
+/// Render a `StackOp` stream to a sequence of WASM opcodes.
+///
+/// Registers map to WASM globals (`global_index = register_number`).
+/// `Br` depths are adjusted for WASM: StackOp `relative_depth` counts *loop*
+/// boundaries, while WASM `br` counts all open blocks (loops + if-blocks).
+/// The renderer tracks open if-blocks and adjusts accordingly.
+#[cfg(feature = "target-wasm")]
+pub fn render_stack_to_wasm<'a>(
+    ops: impl Iterator<Item = StackOp> + 'a,
+) -> impl Iterator<Item = JitOpcode<'a>> + 'a {
+    gen move {
+        let mut if_depth = 0u32;
+        for op in ops {
+            match op {
+                // ── Control flow ──────────────────────────────────────────
+                StackOp::LoopBegin { .. } => {
+                    yield JitOpcode::Operator {
+                        op: Operator::Loop { blockty: wasmparser::BlockType::Empty },
+                    };
+                }
+                StackOp::LoopEnd => { yield JitOpcode::Operator { op: Operator::End }; }
+                StackOp::Br { relative_depth, .. } => {
+                    // StackOp rel_depth counts loop boundaries only; WASM br
+                    // counts all open blocks.  Subtract 1 (br 0 = current loop
+                    // in StackOp means rel_depth 1), then add if_depth.
+                    let wasm_depth = (relative_depth - 1) + if_depth;
+                    yield JitOpcode::Operator { op: Operator::Br { relative_depth: wasm_depth } };
+                }
+                StackOp::IfBegin => {
+                    // Convert i64 condition (0=false) to i32 for WASM if.
+                    yield JitOpcode::Operator { op: Operator::I64Const { value: 0 } };
+                    yield JitOpcode::Operator { op: Operator::I64Ne };
+                    yield JitOpcode::Operator {
+                        op: Operator::If { blockty: wasmparser::BlockType::Empty },
+                    };
+                    if_depth += 1;
+                }
+                StackOp::IfElse => { yield JitOpcode::Operator { op: Operator::Else }; }
+                StackOp::IfEnd  => {
+                    if_depth -= 1;
+                    yield JitOpcode::Operator { op: Operator::End };
+                }
 
-        let mut labels = self.labels.clone();
-        match labels.0.entry(self.pc) {
-            alloc::collections::btree_map::Entry::Vacant(vacant_entry) => {
-                let label_name = alloc::format!("x{}", self.pc);
-                vacant_entry.insert(Label {
-                    ident_name: label_name.clone(),
-                    index: self.depth,
-                });
-                let nd = self.depth + 1;
-                write!(f, "{label_name}: for(;;){{")?;
-                render(f, &label_name, labels, nd)?;
-                write!(f, "break {label_name};}}")
-            }
-            alloc::collections::btree_map::Entry::Occupied(occupied_entry) => {
-                let Label { ident_name, .. } = occupied_entry.get();
-                write!(f, "continue {};", ident_name)
+                // ── Literals / registers ──────────────────────────────────
+                StackOp::PushImm(v) => {
+                    yield JitOpcode::Operator { op: Operator::I64Const { value: v as i64 } };
+                }
+                StackOp::LoadReg(r) => {
+                    yield JitOpcode::Operator { op: Operator::GlobalGet { global_index: r as u32 } };
+                }
+                StackOp::StoreReg(r) => {
+                    if r == 0 {
+                        yield JitOpcode::Operator { op: Operator::Drop };
+                    } else {
+                        yield JitOpcode::Operator { op: Operator::GlobalSet { global_index: r as u32 } };
+                    }
+                }
+
+                // ── 64-bit arithmetic ─────────────────────────────────────
+                StackOp::Add64  => { yield JitOpcode::Operator { op: Operator::I64Add }; }
+                StackOp::Sub64  => { yield JitOpcode::Operator { op: Operator::I64Sub }; }
+                StackOp::Mul64  => { yield JitOpcode::Operator { op: Operator::I64Mul }; }
+                StackOp::DivU64 => { yield JitOpcode::Operator { op: Operator::I64DivU }; }
+                StackOp::DivS64 => { yield JitOpcode::Operator { op: Operator::I64DivS }; }
+                StackOp::RemU64 => { yield JitOpcode::Operator { op: Operator::I64RemU }; }
+                StackOp::RemS64 => { yield JitOpcode::Operator { op: Operator::I64RemS }; }
+                StackOp::And64  => { yield JitOpcode::Operator { op: Operator::I64And }; }
+                StackOp::Or64   => { yield JitOpcode::Operator { op: Operator::I64Or }; }
+                StackOp::Xor64  => { yield JitOpcode::Operator { op: Operator::I64Xor }; }
+                StackOp::Shl64  => { yield JitOpcode::Operator { op: Operator::I64Shl }; }
+                StackOp::ShrU64 => { yield JitOpcode::Operator { op: Operator::I64ShrU }; }
+                StackOp::ShrS64 => { yield JitOpcode::Operator { op: Operator::I64ShrS }; }
+
+                // ── Comparisons (i32 result extended to i64) ──────────────
+                StackOp::Eq64  => { yield JitOpcode::Operator{op:Operator::I64Eq};  yield JitOpcode::Operator{op:Operator::I64ExtendI32U}; }
+                StackOp::Ne64  => { yield JitOpcode::Operator{op:Operator::I64Ne};  yield JitOpcode::Operator{op:Operator::I64ExtendI32U}; }
+                StackOp::LtU64 => { yield JitOpcode::Operator{op:Operator::I64LtU}; yield JitOpcode::Operator{op:Operator::I64ExtendI32U}; }
+                StackOp::LtS64 => { yield JitOpcode::Operator{op:Operator::I64LtS}; yield JitOpcode::Operator{op:Operator::I64ExtendI32U}; }
+                StackOp::GeU64 => { yield JitOpcode::Operator{op:Operator::I64GeU}; yield JitOpcode::Operator{op:Operator::I64ExtendI32U}; }
+                StackOp::GeS64 => { yield JitOpcode::Operator{op:Operator::I64GeS}; yield JitOpcode::Operator{op:Operator::I64ExtendI32U}; }
+
+                // ── Conversions ───────────────────────────────────────────
+                StackOp::Trunc32 => {
+                    yield JitOpcode::Operator { op: Operator::I32WrapI64 };
+                    yield JitOpcode::Operator { op: Operator::I64ExtendI32U };
+                }
+                StackOp::SignExt32 => {
+                    yield JitOpcode::Operator { op: Operator::I32WrapI64 };
+                    yield JitOpcode::Operator { op: Operator::I64ExtendI32S };
+                }
+                // No-ops in WASM (i64 is two's-complement throughout).
+                StackOp::AsSigned64 | StackOp::AsUnsigned64 => {}
+
+                // ── High-word multiplies / 32-bit arithmetic (stubs) ──────
+                // These require local-variable management not yet implemented.
+                StackOp::MulHU64 | StackOp::MulHSU64 | StackOp::MulHS64
+                | StackOp::Add32 | StackOp::Sub32 | StackOp::Mul32
+                | StackOp::DivU32 | StackOp::DivS32
+                | StackOp::RemU32 | StackOp::RemS32
+                | StackOp::Shl32  | StackOp::ShrU32 | StackOp::ShrS32 => {
+                    yield JitOpcode::Operator { op: Operator::Unreachable };
+                }
+
+                // ── Memory / side-effects (stubs) ─────────────────────────
+                StackOp::LoadMem { .. } | StackOp::StoreMem { .. }
+                | StackOp::Ecall | StackOp::TailCall
+                | StackOp::Trap(_) | StackOp::CheckCode { .. } => {
+                    yield JitOpcode::Operator { op: Operator::Unreachable };
+                }
+                // Log is a diagnostic hint — no WASM equivalent.
+                StackOp::Log(_) => {}
             }
         }
     }

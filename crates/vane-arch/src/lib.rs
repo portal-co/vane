@@ -19,6 +19,7 @@ use core::fmt::Display;
 use core::fmt::Formatter;
 #[doc(hidden)]
 pub use paste;
+pub use vane_target_core::{MemWidth, StackOp};
 #[doc(hidden)]
 pub extern crate alloc;
 

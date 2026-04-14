@@ -1,544 +1,367 @@
 use core::array;
-use core::fmt::{Display, Formatter};
-use core::iter::empty;
+use core::fmt::Formatter;
 
 use alloc::boxed::Box;
-use paste::paste;
-use rv_asm::{Inst, Reg, Xlen};
+use rv_asm::{Inst, IsCompressed, Xlen};
+use vane_arch::{Heat, MemWidth, StackOp};
 
 use crate::hint;
-use crate::{RiscvDisplay, TemplateRiscv};
+use crate::RiscvDisplay;
 vane_arch::cfg_target_wasm! { use crate::RiscvWasmJit; }
+vane_arch::cfg_target_js! { use vane_arch::template::render_stack_to_js; }
+vane_arch::cfg_target_wasm! { use vane_arch::template::render_stack_to_wasm; }
 
 use super::*;
 
-struct TemplateReg<'a, const N: usize = 32> {
-    reg: &'a Reg,
-    value: Option<&'a (dyn Display + 'a)>,
-    n: [(); N],
-    flate: &'a (dyn crate::Flate + 'a),
+// ── StackOp producer ─────────────────────────────────────────────────────────
+//
+// `rv_emit` is the single entry point.  It checks the JIT cache first (emitting
+// a `TailCall` for already-compiled blocks), then delegates to `jit_core` for
+// the loop/label bookkeeping and calls `rv_body` to generate the per-instruction
+// StackOps plus the recursive fallthrough / branch targets.
+
+fn rv_emit(this: &TemplateJit<'_>) -> alloc::vec::Vec<StackOp> {
+    // If this PC is already compiled, jump straight to the cached block.
+    if (this.params.trial)(this.pc) == Heat::Cached {
+        return alloc::vec![StackOp::PushImm(this.pc), StackOp::TailCall];
+    }
+
+    // Open (or back-branch to) the loop for this PC via the label map.
+    let mut labels = this.labels.clone();
+    let mut ops = alloc::vec::Vec::new();
+
+    match labels.0.entry(this.pc) {
+        alloc::collections::btree_map::Entry::Vacant(e) => {
+            let label = alloc::format!("x{}", this.pc);
+            e.insert(Label { ident_name: label.clone(), index: this.depth });
+            let nd = this.depth + 1;
+            ops.push(StackOp::LoopBegin { label });
+            ops.extend(rv_body(this, labels, nd));
+            ops.push(StackOp::LoopEnd);
+        }
+        alloc::collections::btree_map::Entry::Occupied(e) => {
+            let lbl: Label = e.get().clone();
+            let relative_depth = this.depth - lbl.index;
+            ops.push(StackOp::Br { relative_depth, label: lbl.ident_name });
+        }
+    }
+    ops
 }
-impl<'a, const N: usize> Display for TemplateReg<'a, N> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let r = self.reg.0 & ((N - 1) & 0xff) as u8;
-        if r != 0 {
-            match self.value.as_deref() {
-                None => write!(f, "(($._r??=$.r)[`x{r}`]??=0n)"),
-                Some(a) => write!(f, "(($._r??=$.r)[`x{r}`]={a})"),
-            }
-        } else {
-            match self.value.as_deref() {
-                None => write!(f, "0n"),
-                Some(a) => write!(f, "{a}"),
-            }
+
+/// Emit a helper to jump to `pc` using the current labels/depth.
+#[inline]
+fn emit_to(
+    ops: &mut alloc::vec::Vec<StackOp>,
+    params: Params<'_>,
+    pc: u64,
+    labels: Labels,
+    depth: u32,
+) {
+    let jit = TemplateJit { pc, labels, depth, params };
+    ops.extend(rv_emit(&jit));
+}
+
+fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<StackOp> {
+    let mut ops: alloc::vec::Vec<StackOp> = alloc::vec::Vec::new();
+
+    // ── Instruction fetch & integrity check ──────────────────────────────────
+    let inst_bytes: [u8; 4] = array::from_fn(|i| this.params.react.byte(this.pc + i as u64));
+    ops.push(StackOp::CheckCode {
+        addr: this.pc,
+        expected: Box::from(inst_bytes),
+        miss_label: alloc::format!("{}", this.params.root),
+    });
+
+    let inst_code = u32::from_le_bytes(inst_bytes);
+    let (inst, compressed) = match Inst::decode(inst_code, Xlen::Rv64) {
+        Err(e) => {
+            ops.push(StackOp::Trap(alloc::format!("decoding: {e}")));
+            return ops;
+        }
+        Ok(v) => v,
+    };
+
+    let next_pc = this.pc
+        + match compressed {
+            IsCompressed::Yes => 2,
+            IsCompressed::No => 4,
+        };
+
+    // ── Hint / test-mode logging ──────────────────────────────────────────────
+    if this.params.flags.test_mode {
+        if let Some(hint_value) = hint::detect_test_marker(&inst) {
+            ops.push(StackOp::Log(alloc::format!(
+                "[HINT] PC=0x{:x}: Test case {}",
+                this.pc, hint_value
+            )));
+        }
+    }
+
+    // ── Instruction → StackOp mapping ────────────────────────────────────────
+
+    // Shorthand: emit fallthrough to next sequential PC.
+    let ft = |ops: &mut alloc::vec::Vec<StackOp>, labels: Labels| {
+        emit_to(ops, this.params, next_pc, labels, nd);
+    };
+
+    // Shorthand: emit a conditional branch (taken = branch_target, not-taken = next_pc).
+    let branch = |ops: &mut alloc::vec::Vec<StackOp>,
+                  cmp: StackOp,
+                  branch_target: u64,
+                  labels: Labels| {
+        ops.push(cmp);
+        ops.push(StackOp::IfBegin);
+        emit_to(ops, this.params, branch_target, labels.clone(), nd);
+        ops.push(StackOp::IfElse);
+        emit_to(ops, this.params, next_pc, labels, nd);
+        ops.push(StackOp::IfEnd);
+    };
+
+    match inst {
+        // ── Branches ─────────────────────────────────────────────────────────
+        Inst::Beq { src1, src2, offset } => {
+            let target = this.pc.wrapping_add_signed(offset.as_i64() * 2);
+            ops.push(StackOp::LoadReg(src1.0));
+            ops.push(StackOp::LoadReg(src2.0));
+            branch(&mut ops, StackOp::Eq64, target, labels);
+        }
+        Inst::Bne { src1, src2, offset } => {
+            let target = this.pc.wrapping_add_signed(offset.as_i64() * 2);
+            ops.push(StackOp::LoadReg(src1.0));
+            ops.push(StackOp::LoadReg(src2.0));
+            branch(&mut ops, StackOp::Ne64, target, labels);
+        }
+        Inst::Blt { src1, src2, offset } => {
+            let target = this.pc.wrapping_add_signed(offset.as_i64() * 2);
+            ops.push(StackOp::LoadReg(src1.0));
+            ops.push(StackOp::LoadReg(src2.0));
+            branch(&mut ops, StackOp::LtS64, target, labels);
+        }
+        Inst::Bge { src1, src2, offset } => {
+            let target = this.pc.wrapping_add_signed(offset.as_i64() * 2);
+            ops.push(StackOp::LoadReg(src1.0));
+            ops.push(StackOp::LoadReg(src2.0));
+            branch(&mut ops, StackOp::GeS64, target, labels);
+        }
+        Inst::Bltu { src1, src2, offset } => {
+            let target = this.pc.wrapping_add_signed(offset.as_i64() * 2);
+            ops.push(StackOp::LoadReg(src1.0));
+            ops.push(StackOp::LoadReg(src2.0));
+            branch(&mut ops, StackOp::LtU64, target, labels);
+        }
+        Inst::Bgeu { src1, src2, offset } => {
+            let target = this.pc.wrapping_add_signed(offset.as_i64() * 2);
+            ops.push(StackOp::LoadReg(src1.0));
+            ops.push(StackOp::LoadReg(src2.0));
+            branch(&mut ops, StackOp::GeU64, target, labels);
+        }
+
+        // ── Jumps ─────────────────────────────────────────────────────────────
+        Inst::Jal { offset, dest } => {
+            let target = this.pc.wrapping_add_signed(offset.as_i64() * 2);
+            ops.push(StackOp::PushImm(next_pc));
+            ops.push(StackOp::StoreReg(dest.0));
+            emit_to(&mut ops, this.params, target, labels, nd);
+        }
+        Inst::Jalr { offset, base, dest } => {
+            // Save return address, compute target, exit block.
+            ops.push(StackOp::PushImm(next_pc));
+            ops.push(StackOp::StoreReg(dest.0));
+            ops.push(StackOp::PushImm((offset.as_i64() * 2) as u64));
+            ops.push(StackOp::LoadReg(base.0));
+            ops.push(StackOp::Add64);
+            ops.push(StackOp::TailCall);
+        }
+
+        // ── Upper-immediate ───────────────────────────────────────────────────
+        Inst::Lui { uimm, dest } => {
+            ops.push(StackOp::PushImm(uimm.as_u64()));
+            ops.push(StackOp::StoreReg(dest.0));
+            ft(&mut ops, labels);
+        }
+        Inst::Auipc { uimm, dest } => {
+            ops.push(StackOp::PushImm(uimm.as_u64().wrapping_add(this.pc)));
+            ops.push(StackOp::StoreReg(dest.0));
+            ft(&mut ops, labels);
+        }
+
+        // ── Loads ─────────────────────────────────────────────────────────────
+        Inst::Lb  { offset, dest, base } => {
+            ops.push(StackOp::LoadReg(base.0));
+            ops.push(StackOp::PushImm(offset.as_i64() as u64));
+            ops.push(StackOp::Add64);
+            ops.push(StackOp::LoadMem { width: MemWidth::B1, signed: true });
+            ops.push(StackOp::StoreReg(dest.0));
+            ft(&mut ops, labels);
+        }
+        Inst::Lbu { offset, dest, base } => {
+            ops.push(StackOp::LoadReg(base.0));
+            ops.push(StackOp::PushImm(offset.as_i64() as u64));
+            ops.push(StackOp::Add64);
+            ops.push(StackOp::LoadMem { width: MemWidth::B1, signed: false });
+            ops.push(StackOp::StoreReg(dest.0));
+            ft(&mut ops, labels);
+        }
+        Inst::Lh  { offset, dest, base } => {
+            ops.push(StackOp::LoadReg(base.0));
+            ops.push(StackOp::PushImm(offset.as_i64() as u64));
+            ops.push(StackOp::Add64);
+            ops.push(StackOp::LoadMem { width: MemWidth::B2, signed: true });
+            ops.push(StackOp::StoreReg(dest.0));
+            ft(&mut ops, labels);
+        }
+        Inst::Lhu { offset, dest, base } => {
+            ops.push(StackOp::LoadReg(base.0));
+            ops.push(StackOp::PushImm(offset.as_i64() as u64));
+            ops.push(StackOp::Add64);
+            ops.push(StackOp::LoadMem { width: MemWidth::B2, signed: false });
+            ops.push(StackOp::StoreReg(dest.0));
+            ft(&mut ops, labels);
+        }
+        Inst::Lw  { offset, dest, base } => {
+            ops.push(StackOp::LoadReg(base.0));
+            ops.push(StackOp::PushImm(offset.as_i64() as u64));
+            ops.push(StackOp::Add64);
+            ops.push(StackOp::LoadMem { width: MemWidth::B4, signed: true });
+            ops.push(StackOp::StoreReg(dest.0));
+            ft(&mut ops, labels);
+        }
+        Inst::Lwu { offset, dest, base } => {
+            ops.push(StackOp::LoadReg(base.0));
+            ops.push(StackOp::PushImm(offset.as_i64() as u64));
+            ops.push(StackOp::Add64);
+            ops.push(StackOp::LoadMem { width: MemWidth::B4, signed: false });
+            ops.push(StackOp::StoreReg(dest.0));
+            ft(&mut ops, labels);
+        }
+        Inst::Ld  { offset, dest, base } => {
+            ops.push(StackOp::LoadReg(base.0));
+            ops.push(StackOp::PushImm(offset.as_i64() as u64));
+            ops.push(StackOp::Add64);
+            ops.push(StackOp::LoadMem { width: MemWidth::B8, signed: false });
+            ops.push(StackOp::StoreReg(dest.0));
+            ft(&mut ops, labels);
+        }
+
+        // ── Stores ────────────────────────────────────────────────────────────
+        // StoreMem pops: value (top), then addr.
+        Inst::Sb { offset, src, base } => {
+            ops.push(StackOp::LoadReg(base.0));
+            ops.push(StackOp::PushImm(offset.as_i64() as u64));
+            ops.push(StackOp::Add64);
+            ops.push(StackOp::LoadReg(src.0));
+            ops.push(StackOp::StoreMem { width: MemWidth::B1 });
+            ft(&mut ops, labels);
+        }
+        Inst::Sh { offset, src, base } => {
+            ops.push(StackOp::LoadReg(base.0));
+            ops.push(StackOp::PushImm(offset.as_i64() as u64));
+            ops.push(StackOp::Add64);
+            ops.push(StackOp::LoadReg(src.0));
+            ops.push(StackOp::StoreMem { width: MemWidth::B2 });
+            ft(&mut ops, labels);
+        }
+        Inst::Sw { offset, src, base } => {
+            ops.push(StackOp::LoadReg(base.0));
+            ops.push(StackOp::PushImm(offset.as_i64() as u64));
+            ops.push(StackOp::Add64);
+            ops.push(StackOp::LoadReg(src.0));
+            ops.push(StackOp::StoreMem { width: MemWidth::B4 });
+            ft(&mut ops, labels);
+        }
+        Inst::Sd { offset, src, base } => {
+            ops.push(StackOp::LoadReg(base.0));
+            ops.push(StackOp::PushImm(offset.as_i64() as u64));
+            ops.push(StackOp::Add64);
+            ops.push(StackOp::LoadReg(src.0));
+            ops.push(StackOp::StoreMem { width: MemWidth::B8 });
+            ft(&mut ops, labels);
+        }
+
+        // ── Register-register 64-bit arithmetic ───────────────────────────────
+        Inst::Add  { dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::Add64);  ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::Sub  { dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::Sub64);  ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::Mul  { dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::Mul64);  ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::Mulh { dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::MulHS64); ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::Mulhu{ dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::MulHU64); ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::Mulhsu{dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::MulHSU64);ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::Div  { dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::DivS64); ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::Divu { dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::DivU64); ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::Rem  { dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::RemS64); ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::Remu { dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::RemU64); ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::And  { dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::And64);  ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::Or   { dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::Or64);   ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::Xor  { dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::Xor64);  ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::Sll  { dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::Shl64);  ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::Srl  { dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::ShrU64); ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::Sra  { dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::ShrS64); ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::Slt  { dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::LtS64);  ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::Sltu { dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::LtU64);  ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+
+        // ── Register-register 32-bit arithmetic (sign-extend result) ──────────
+        Inst::AddW { dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::Add32);  ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::SubW { dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::Sub32);  ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::MulW { dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::Mul32);  ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::DivW { dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::DivS32); ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::DivuW{ dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::DivU32); ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::RemW { dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::RemS32); ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::RemuW{ dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::RemU32); ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::SllW { dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::Shl32);  ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::SrlW { dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::ShrU32); ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::SraW { dest, src1, src2 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::LoadReg(src2.0)); ops.push(StackOp::ShrS32); ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+
+        // ── Immediate arithmetic ───────────────────────────────────────────────
+        Inst::Addi  { imm, dest, src1 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::PushImm(imm.as_i64() as u64)); ops.push(StackOp::Add64);  ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::AddiW { imm, dest, src1 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::PushImm(imm.as_i64() as u64)); ops.push(StackOp::Add32);  ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::Slti  { imm, dest, src1 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::PushImm(imm.as_i64() as u64)); ops.push(StackOp::LtS64);  ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::Sltiu { imm, dest, src1 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::PushImm(imm.as_i64() as u64)); ops.push(StackOp::LtU64);  ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::Andi  { imm, dest, src1 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::PushImm(imm.as_i64() as u64)); ops.push(StackOp::And64);  ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::Ori   { imm, dest, src1 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::PushImm(imm.as_i64() as u64)); ops.push(StackOp::Or64);   ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::Xori  { imm, dest, src1 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::PushImm(imm.as_i64() as u64)); ops.push(StackOp::Xor64);  ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::Slli  { imm, dest, src1 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::PushImm(imm.as_i64() as u64)); ops.push(StackOp::Shl64);  ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::Srli  { imm, dest, src1 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::PushImm(imm.as_i64() as u64)); ops.push(StackOp::ShrU64); ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::Srai  { imm, dest, src1 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::PushImm(imm.as_i64() as u64)); ops.push(StackOp::ShrS64); ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::SlliW { imm, dest, src1 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::PushImm(imm.as_i64() as u64)); ops.push(StackOp::Shl32);  ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::SrliW { imm, dest, src1 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::PushImm(imm.as_i64() as u64)); ops.push(StackOp::ShrU32); ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+        Inst::SraiW { imm, dest, src1 } => { ops.push(StackOp::LoadReg(src1.0)); ops.push(StackOp::PushImm(imm.as_i64() as u64)); ops.push(StackOp::ShrS32); ops.push(StackOp::StoreReg(dest.0)); ft(&mut ops, labels); }
+
+        // ── Misc ──────────────────────────────────────────────────────────────
+        Inst::Fence { .. } => {
+            // Fence is a no-op in this JIT; fall through.
+            ft(&mut ops, labels);
+        }
+        Inst::Ecall => {
+            ops.push(StackOp::Ecall);
+            ft(&mut ops, labels);
+        }
+        // Ebreak and anything unrecognised → trap.
+        inst => {
+            ops.push(StackOp::Trap(alloc::format!("op:{inst}")));
+        }
+    }
+
+    ops
+}
+
+// ── Target impls ─────────────────────────────────────────────────────────────
+
+vane_arch::cfg_target_wasm! {
+    impl<'b> RiscvWasmJit for TemplateJit<'b> {
+        fn Riscv<'a>(
+            &'a self,
+            _ctx: &'a (dyn WasmJitCtx + 'a),
+        ) -> impl Iterator<Item = JitOpcode<'a>> + 'a {
+            let ops = rv_emit(self);
+            render_stack_to_wasm(ops.into_iter())
         }
     }
 }
 
-vane_arch::cfg_target_wasm! {
-impl<'b> RiscvWasmJit for TemplateJit<'b> {
-    fn Riscv<'a>(
-        &'a self,
-        ctx: &'a (dyn WasmJitCtx + 'a),
-    ) -> impl Iterator<Item = JitOpcode<'a>> + 'a {
-        self.jit_wasm(|labels, nd| {
-            let inst_code = u32::from_le_bytes(core::array::from_fn(|i| {
-                self.params.react.byte(self.pc + i as u64)
-            }));
-            let i = Inst::decode(inst_code, Xlen::Rv64);
-            return Box::new(empty());
-        })
-    }
-}
-} // cfg_target_wasm!
 vane_arch::cfg_target_js! {
-fn rv_core_js<Target: ArchTarget>(
-    this: &TemplateJit<'_>,
-    a: Inst,
-    next: u64,
-    labels: Labels,
-    nd: u32,
-    f: &mut Formatter,
-    target: Target,
-) -> core::fmt::Result {
-    let max64 = this.params.flate.flate("max64");
-    let max32 = this.params.flate.flate("max32");
-    let signed = this.params.flate.flate("signed");
-    let unsigned = this.params.flate.flate("unsigned");
-    let data = this.params.flate.flate("data");
-    macro_rules! j {
-        ($jp:literal, $src1:ident, $src2:ident, $offset:ident) => {{
-            write!(
-                f,
-                "if({}){{{}}}else{{{}}};",
-                &format_args!(
-                    $jp,
-                    TemplateReg {
-                        flate: this.params.flate,
-                        n: [(); 32],
-                        reg: &$src1,
-                        value: None
-                    },
-                    TemplateReg {
-                        flate: this.params.flate,
-                        n: [(); 32],
-                        reg: &$src2,
-                        value: None
-                    }
-                ),
-                target.target_js(&TemplateJit {
-                    params: this.params,
-                    labels: labels.clone(),
-                    pc: this.pc.wrapping_add_signed(($offset).as_i64() * 2),
-                    depth: nd,
-                    // root:this.root,
-                }),
-                target.target_js(&TemplateJit {
-                    params: this.params,
-                    labels: labels.clone(),
-                    pc: next,
-                    depth: nd,
-                    //   root:this.root,
-                })
-            )?;
-            return Ok(());
-        }};
-    }
-    macro_rules! ops {
-            ($a:expr => [$($arith:ident => $ap:literal $(i $ip:literal)? $(w $bp:literal)? $(iw $iwp:literal)?),*] [$($j:ident => $jp:literal),*] |$x:pat_param|$e:expr) => {
-                'a: {match paste::paste!{
-                    match $a{
-                        $(
-                            Inst::$arith { dest, src1, src2 } => break 'a write!(
-                                f,
-                                "{}",
-                                TemplateReg{flate: this.params.flate, n: [(); 32],
-                                    reg: &dest,
-                                    value: Some(&format_args!(
-                                        $ap,
-                                        TemplateReg{flate: this.params.flate, n: [(); 32],
-                                            reg: &src1,
-                                            value: None
-                                        },
-                                        TemplateReg{flate: this.params.flate, n: [(); 32],
-                                            reg: &src2,
-                                            value: None
-                                        }
-                                    ))
-                                }
-                            ),
-                            $(Inst::[<$arith i>] { imm, dest, src1 } => break 'a match $ip{_=>write!(
-                                f,
-                                "{}",
-                                TemplateReg{flate: this.params.flate, n: [(); 32],
-                                    reg: &dest,
-                                    value: Some(&format_args!(
-                                        $ap,
-                                        TemplateReg{flate: this.params.flate, n: [(); 32],
-                                            reg: &src1,
-                                            value: None
-                                        },
-                                        &format_args!("{}n",imm.as_i64() as u64)
-                                    ))
-                                }
-                            )},)?
-                            $(Inst::[<$arith W>] { dest, src1, src2 } => break 'a write!(
-                                f,
-                                "{}",
-                                TemplateReg{flate: this.params.flate, n: [(); 32],
-                                    reg: &dest,
-                                    value: Some(&format_args!(
-                                        $bp,
-                                        TemplateReg{flate: this.params.flate, n: [(); 32],
-                                            reg: &src1,
-                                            value: None
-                                        },
-                                        TemplateReg{flate: this.params.flate, n: [(); 32],
-                                            reg: &src2,
-                                            value: None
-                                        }
-                                    ))
-                                }
-                            ),
-                            )?
-                            $(Inst::[<$arith iW>] { imm, dest, src1 } => break 'a write!(
-                                f,
-                                "{}",
-                                TemplateReg{flate: this.params.flate, n: [(); 32],
-                                    reg: &dest,
-                                    value: Some(&format_args!(
-                                        $iwp,
-                                        TemplateReg{flate: this.params.flate, n: [(); 32],
-                                            reg: &src1,
-                                            value: None
-                                        },
-                                        &format_args!("{}n",imm.as_i64() as u64)
-                                    ))
-                                }
-                            ),)?
-                        )*
-                        $(Inst::$j {src1,src2,offset} => j!($jp,src1,src2,offset),)*
-                        a => a
-                    }
-                }{
-                    $x => $e
-                }}
-            };
+    impl<'a> RiscvDisplay for TemplateJit<'a> {
+        fn Riscv(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+            let ops = rv_emit(self);
+            render_stack_to_js(ops.into_iter(), f, self.params.flate)
         }
-    macro_rules! miscop {
-        ($a:expr) => {
-            match $a {
-                a => match a {
-                    Inst::Lui { uimm, dest } => {
-                        write!(
-                            f,
-                            "{}",
-                            TemplateReg {
-                                flate: this.params.flate,
-                                n: [(); 32],
-                                reg: &dest,
-                                value: Some(&format_args!("{}n", uimm.as_u64()))
-                            }
-                        )
-                    }
-                    Inst::Auipc { uimm, dest } => {
-                        write!(
-                            f,
-                            "{}",
-                            TemplateReg {
-                                flate: this.params.flate,
-                                n: [(); 32],
-                                reg: &dest,
-                                value: Some(&format_args!(
-                                    "{}n",
-                                    uimm.as_u64().wrapping_add(this.pc)
-                                ))
-                            }
-                        )
-                    }
-                    Inst::Jal { offset, dest } => {
-                        write!(
-                            f,
-                            "{};{};break;}}",
-                            TemplateReg {
-                                flate: this.params.flate,
-                                n: [(); 32],
-                                reg: &dest,
-                                value: Some(&format_args!("{}n", next))
-                            },
-                            target.target_js(&TemplateJit {
-                                params: this.params,
-                                labels: labels.clone(),
-                                pc: this.pc.wrapping_add_signed(offset.as_i64() * 2),
-                                depth: nd,
-                            })
-                        )?;
-                        return Ok(());
-                    }
-                    Inst::Jalr { offset, base, dest } => {
-                        write!(
-                            f,
-                            "{};return ()=>J({});}}",
-                            TemplateReg {
-                                flate: this.params.flate,
-                                n: [(); 32],
-                                reg: &dest,
-                                value: Some(&format_args!("{}n", next))
-                            },
-                            &format_args!(
-                                "({}+{})&{max64}",
-                                (offset.as_i64() * 2) as u64,
-                                TemplateReg {
-                                    flate: this.params.flate,
-                                    n: [(); 32],
-                                    reg: &base,
-                                    value: None
-                                }
-                            )
-                        )?;
-                        return Ok(());
-                    }
-                    Inst::Lb { offset, dest, base } => write!(
-                        f,
-                        "{}",
-                        TemplateReg {
-                            flate: this.params.flate,
-                            n: [(); 32],
-                            reg: &dest,
-                            value: Some(&format_args!(
-                                "{unsigned}(BigInt({data}(({}n+{})&f).getInt8(0,true)))",
-                                offset.as_i64() as u64,
-                                TemplateReg {
-                                    flate: this.params.flate,
-                                    n: [(); 32],
-                                    reg: &base,
-                                    value: None
-                                }
-                            ))
-                        }
-                    ),
-                    Inst::Lbu { offset, dest, base } => write!(
-                        f,
-                        "{}",
-                        TemplateReg {
-                            flate: this.params.flate,
-                            n: [(); 32],
-                            reg: &dest,
-                            value: Some(&format_args!(
-                                "BigInt({data}(({}n+{})&f).getUint8(0,true))",
-                                offset.as_i64() as u64,
-                                TemplateReg {
-                                    flate: this.params.flate,
-                                    n: [(); 32],
-                                    reg: &base,
-                                    value: None
-                                }
-                            ))
-                        }
-                    ),
-                    Inst::Lh { offset, dest, base } => write!(
-                        f,
-                        "{}",
-                        TemplateReg {
-                            flate: this.params.flate,
-                            n: [(); 32],
-                            reg: &dest,
-                            value: Some(&format_args!(
-                                "{unsigned}(BigInt({data}(({}n+{})&f).getInt16(0,true)))",
-                                offset.as_i64() as u64,
-                                TemplateReg {
-                                    flate: this.params.flate,
-                                    n: [(); 32],
-                                    reg: &base,
-                                    value: None
-                                }
-                            ))
-                        }
-                    ),
-                    Inst::Lhu { offset, dest, base } => write!(
-                        f,
-                        "{}",
-                        TemplateReg {
-                            flate: this.params.flate,
-                            n: [(); 32],
-                            reg: &dest,
-                            value: Some(&format_args!(
-                                "BigInt({data}(({}n+{})&f).getUint16(0,true))",
-                                offset.as_i64() as u64,
-                                TemplateReg {
-                                    flate: this.params.flate,
-                                    n: [(); 32],
-                                    reg: &base,
-                                    value: None
-                                }
-                            ))
-                        }
-                    ),
-                    Inst::Lw { offset, dest, base } => write!(
-                        f,
-                        "{}",
-                        TemplateReg {
-                            flate: this.params.flate,
-                            n: [(); 32],
-                            reg: &dest,
-                            value: Some(&format_args!(
-                                "{unsigned}(BigInt({data}(({}n+{})&f).getInt32(0,true)))",
-                                offset.as_i64() as u64,
-                                TemplateReg {
-                                    flate: this.params.flate,
-                                    n: [(); 32],
-                                    reg: &base,
-                                    value: None
-                                }
-                            ))
-                        }
-                    ),
-                    Inst::Lwu { offset, dest, base } => write!(
-                        f,
-                        "{}",
-                        TemplateReg {
-                            flate: this.params.flate,
-                            n: [(); 32],
-                            reg: &dest,
-                            value: Some(&format_args!(
-                                "BigInt({data}(({}n+{})&f).getUint32(0,true))",
-                                offset.as_i64() as u64,
-                                TemplateReg {
-                                    flate: this.params.flate,
-                                    n: [(); 32],
-                                    reg: &base,
-                                    value: None
-                                }
-                            ))
-                        }
-                    ),
-                    Inst::Ld { offset, dest, base } => write!(
-                        f,
-                        "{}",
-                        TemplateReg {
-                            flate: this.params.flate,
-                            n: [(); 32],
-                            reg: &dest,
-                            value: Some(&format_args!(
-                                "{data}(({}n+{})&f).getBigUint64(0,true)",
-                                offset.as_i64() as u64,
-                                TemplateReg {
-                                    flate: this.params.flate,
-                                    n: [(); 32],
-                                    reg: &base,
-                                    value: None
-                                }
-                            ))
-                        }
-                    ),
-                    Inst::Sb { offset, src, base } => write!(
-                        f,
-                        "{data}({}n+{}).setUint8(0,Number({}&{max32}),true)",
-                        offset.as_i64() as u64,
-                        TemplateReg {
-                            flate: this.params.flate,
-                            n: [(); 32],
-                            reg: &base,
-                            value: None
-                        },
-                        TemplateReg {
-                            flate: this.params.flate,
-                            n: [(); 32],
-                            reg: &src,
-                            value: None
-                        }
-                    ),
-                    Inst::Sh { offset, src, base } => write!(
-                        f,
-                        "{data}({}n+{}).setUint16(0,Number({}&{max32}),true)",
-                        offset.as_i64() as u64,
-                        TemplateReg {
-                            flate: this.params.flate,
-                            n: [(); 32],
-                            reg: &base,
-                            value: None
-                        },
-                        TemplateReg {
-                            flate: this.params.flate,
-                            n: [(); 32],
-                            reg: &src,
-                            value: None
-                        }
-                    ),
-                    Inst::Sw { offset, src, base } => write!(
-                        f,
-                        "{data}({}n+{}).setUint32(0,Number({}&{max32}),true)",
-                        offset.as_i64() as u64,
-                        TemplateReg {
-                            flate: this.params.flate,
-                            n: [(); 32],
-                            reg: &base,
-                            value: None
-                        },
-                        TemplateReg {
-                            flate: this.params.flate,
-                            n: [(); 32],
-                            reg: &src,
-                            value: None
-                        }
-                    ),
-                    Inst::Sd { offset, src, base } => write!(
-                        f,
-                        "{data}({}n+{}).setBigUint64(0,{},true)",
-                        offset.as_i64() as u64,
-                        TemplateReg {
-                            flate: this.params.flate,
-                            n: [(); 32],
-                            reg: &base,
-                            value: None
-                        },
-                        TemplateReg {
-                            flate: this.params.flate,
-                            n: [(); 32],
-                            reg: &src,
-                            value: None
-                        }
-                    ),
-                    Inst::Fence { .. } => Ok(()),
-                    Inst::Ecall => write!(f, "await $.ecall();"),
-                    op => write!(f, "throw new TypeError(`op:{op}`)"),
-                },
-            }
-        };
-    }
-    ops!(a => [
-            Add => "({}+{})&{max64}" i "" w "(({}&{max32})+({}&{max32}))&{max32}" iw  "(({}&{max32})+({}&{max32}))&{max32}",
-            Mul => "({}*{})&{max64}" w "(({}&{max32})*({}&{max32}))&{max32}",
-            Mulhu => "(({}*{})>>64n)&{max64}",
-            Mulhsu => "{unsigned}(({signed}({})*{})>>64n)&{max64}",
-            Mulh => "{unsigned}(({signed}({})*{signed}({}))>>64n)&{max64}",
-            Sub => "({}-{})&{max64}" w "(({}&{max32})-({}&{max32}))&{max32}",
-            Divu => "{1}==0?{unsigned}(-1n):({}/{})&{max64}" w "{1}==0?{unsigned}(-1n):(({}&{max32})/({}&{max32}))&{max32}",
-            Remu => "{1}==0?{unsigned}(-1n):({}%{})&{max64}" w "{1}==0?{unsigned}(-1n):(({}&{max32})%({}&{max32}))&{max32}",
-            Div => "{1}==0?{unsigned}(-1n):{unsigned}({signed}({})/{signed}({}))&{max64}" w "{1}==0?{unsigned}(-1n):{unsigned}({signed}({}&{max32})/{signed}({}&{max32}))&{max32}",
-            Rem => "{1}==0?{unsigned}(-1n):{unsigned}({signed}({})%{signed}({}))&{max64}" w "{1}==0?{unsigned}(-1n):{unsigned}({signed}({}&{max32})%{signed}({}&{max32}))&{max32}",
-            And => "({}&{})&{max64}" i "",
-            Or => "({}|{})&{max64}" i "",
-            Xor => "({}^{})&{max64}" i "",
-            Sll => "({}<<{})&{max64}" i "" w "(({}&{max32})<<({}&{max32}))&{max32}" iw  "(({}&{max32})<<({}&{max32}))&{max32}",
-            Srl => "({}>>{})&{max64}" i "" w "(({}&{max32})>>({}&{max32}))&{max32}" iw  "(({}&{max32})>>({}&{max32}))&{max32}",
-            Sra => "{unsigned}({signed}({})>>{signed}({}))&{max64}" i "" w "{unsigned}({signed}({}&{max32})>>{signed}({}&{max32}))&{max32}" iw  "{unsigned}({signed}({}&{max32})>>{signed}({}&{max32}))&{max32}",
-            Sltu => "(({})<({}))?1n:0n",
-            Slt => "({signed}({})<{signed}({}))?1n:0n" i ""
-            ]
-            [
-                Beq => "{}==={}",
-                Bne => "{}!=={}",
-                Bltu => "{}<{}",
-                Bgeu => "{}>={}",
-                Blt => "{signed}({})<{signed}({})",
-                Bge => "{signed}({})>={signed}({})"
-            ] |a|miscop!(a))?;
-    write!(
-        f,
-        ";{};",
-        target.target_js(&TemplateJit {
-            params: this.params,
-            pc: next,
-            labels,
-            depth: nd,
-        })
-    )
-}
-impl<'a> RiscvDisplay for TemplateJit<'a> {
-    fn Riscv(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // if tget(self.react.clone(), self.pc) != JsValue::UNDEFINED {
-        return self.jit_js(f, |f, _label_name, labels, nd| {
-               let d =  self.params.flate.flate("data");
-            let inst_code = u32::from_le_bytes(core::array::from_fn(|i| self.params.react.byte(self.pc + i as u64)));
-            let i = Inst::decode(inst_code, Xlen::Rv64);
-            write!(
-                f,
-                "const p={}n;if({d}(p).getUint32(0,true)!={inst_code}){{delete $.p[`{}`];return J(p);}};",
-                self.pc, self.params.root
-            )?;
-            match i {
-                Err(e) => write!(f, "throw new TypeError(`decoding: {e}`);"),
-                Ok((a, b)) => {
-                    // Emit HINT logging if test_mode is enabled
-                    if self.params.flags.test_mode {
-                        if let Some(hint_value) = hint::detect_test_marker(&a) {
-                            write!(
-                                f,
-                                "console.log(`[HINT] PC=0x{:x}: Test case {}`);",
-                                self.pc, hint_value
-                            )?;
-                        }
-                    }
-                    let next = match b {
-                        rv_asm::IsCompressed::Yes => 2,
-                        rv_asm::IsCompressed::No => 4,
-                    } + self.pc;
-                    rv_core_js(self, a, next, labels, nd, f,TemplateRiscv)?;
-                    Ok(())
-                }
-            }
-        });
     }
 }
-} // cfg_target_js!

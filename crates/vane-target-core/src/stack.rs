@@ -120,6 +120,15 @@ pub enum StackOp {
     Ecall,
     /// Unrecoverable error.  JS: `throw new TypeError(msg)`.  WASM: `unreachable`.
     Trap(alloc::string::String),
+    /// Pop a 64-bit address from the stack; exit the current JIT block and
+    /// tail-call the JIT dispatcher for that address.
+    ///
+    /// JS: `return ()=>J(addr);`  WASM: `unreachable` (not yet implemented)
+    TailCall,
+    /// Emit a diagnostic log message.  No effect on machine state.
+    ///
+    /// JS: `console.log(msg)`  WASM: no-op
+    Log(alloc::string::String),
 
     // ── Instruction integrity check ───────────────────────────────────────
     /// Verify that the bytes at `addr` in guest memory match `expected`.

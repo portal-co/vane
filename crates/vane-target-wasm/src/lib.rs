@@ -1,8 +1,6 @@
 #![no_std]
 extern crate alloc;
 
-use alloc::boxed::Box;
-
 pub trait WasmJitCtx {}
 
 #[derive(Clone)]

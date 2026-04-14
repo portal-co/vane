@@ -1,6 +1,6 @@
 use core::fmt::Display;
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 
 pub trait Flate {
     fn flate<'a>(&'a self, a: &'a str) -> Arc<dyn Display + 'a>;
