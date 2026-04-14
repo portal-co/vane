@@ -13,19 +13,20 @@ pub enum MemWidth {
 
 /// A single operation in the shared stack-based IR.
 ///
-/// `'op` is the lifetime of data captured inside the lazy structural variants
-/// (`Loop::body`, `If::then_ops`, `If::else_ops`).  All other variants are
-/// effectively `'static` — they hold no borrowed data — but the enum carries
-/// `'op` so that arch renderers can store lazy gen-block iterators inside
-/// `Loop` and `If` without forcing eager collection.
-pub enum StackOp<'op> {
+/// All variants hold only owned data, so `StackOp` is `'static`.  Structural
+/// control-flow constructs (`Loop`/`If`) are expressed as matched begin/end
+/// pairs in the flat opcode stream rather than as nested iterators, so
+/// consumers maintain a depth counter or an explicit stack instead of
+/// recursing into sub-iterators.
+pub enum StackOp {
     // ── Control flow ──────────────────────────────────────────────────────
-    /// Named infinite loop.  The body iterator is consumed exactly once by the
-    /// shim.  Created by `CoreOpcode::loop`.
-    Loop {
+    /// Open a named infinite loop.  All opcodes up to the matching `LoopEnd`
+    /// form the loop body.  Created by `CoreOpcode::loop`.
+    LoopBegin {
         label: alloc::string::String,
-        body: alloc::boxed::Box<dyn Iterator<Item = StackOp<'op>> + 'op>,
     },
+    /// Close the most recently opened `LoopBegin`.
+    LoopEnd,
 
     /// Unconditional backward branch.
     /// `relative_depth` counts open loops outward from the branch site
@@ -35,12 +36,17 @@ pub enum StackOp<'op> {
         label: alloc::string::String,
     },
 
-    /// Conditional split: pop top-of-stack (u64; 0 = false), take one arm.
-    /// Both arms are lazy and consumed exactly once by the shim.
-    If {
-        then_ops: alloc::boxed::Box<dyn Iterator<Item = StackOp<'op>> + 'op>,
-        else_ops: alloc::boxed::Box<dyn Iterator<Item = StackOp<'op>> + 'op>,
-    },
+    /// Conditional split: pop top-of-stack (u64; 0 = false), enter the
+    /// then-branch; otherwise enter the else-branch.
+    ///
+    /// Stream layout: `IfBegin … IfElse … IfEnd` where the first `…` is the
+    /// then-body and the second `…` is the else-body.  Both spans may be
+    /// empty.  `IfElse` is always emitted even when the else-body is empty.
+    IfBegin,
+    /// Separates the then-body from the else-body inside an `IfBegin…IfEnd`.
+    IfElse,
+    /// Closes the most recently opened `IfBegin`.
+    IfEnd,
 
     // ── Stack literals ────────────────────────────────────────────────────
     /// Push a 64-bit unsigned constant.
@@ -129,15 +135,15 @@ pub enum StackOp<'op> {
     },
 }
 
-impl<'op> CoreOpcode<'op> for StackOp<'op> {
+impl<'op> CoreOpcode<'op> for StackOp {
     fn r#loop(
         body: impl Iterator<Item = Self> + 'op,
         name: impl Display,
     ) -> impl Iterator<Item = Self> + 'op {
-        core::iter::once(StackOp::Loop {
-            label: alloc::format!("{name}"),
-            body: alloc::boxed::Box::new(body),
-        })
+        let label = alloc::format!("{name}");
+        core::iter::once(StackOp::LoopBegin { label })
+            .chain(body)
+            .chain(core::iter::once(StackOp::LoopEnd))
     }
 
     fn br(relative_depth: u32, name: impl Display) -> impl Iterator<Item = Self> {

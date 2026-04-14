@@ -8,10 +8,11 @@ pub use stack::{MemWidth, StackOp};
 
 /// Control-flow abstraction shared by all codegen targets.
 ///
-/// The lifetime `'op` is the lifetime of opaque data captured inside the lazy
-/// structural variants (`StackOp::Loop::body`, `StackOp::If::{then,else}_ops`).
-/// For a given arch renderer with context lifetime `'a`, instantiate as
-/// `O = StackOp<'a>` and `O: CoreOpcode<'a>`.
+/// The lifetime `'op` bounds the iterator arguments and return types of
+/// [`CoreOpcode::r#loop`], ensuring that body iterators captured from an arch
+/// renderer's context do not outlive that context.  `StackOp` itself is
+/// `'static` (it holds no borrowed data), so `impl<'op> CoreOpcode<'op> for
+/// StackOp` is valid for any `'op`.
 pub trait CoreOpcode<'op>: Sized + 'op {
     /// Wrap `body` in a named loop construct.
     ///
