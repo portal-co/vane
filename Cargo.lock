@@ -506,9 +506,9 @@ checksum = "0000397743a3b549ddba01befd1a26020eff98a028429630281c4203b4cc538d"
 
 [[package]]
 name = "wasmparser"
-version = "0.239.0"
+version = "0.245.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c9d90bb93e764f6beabf1d02028c70a2156a6583e63ac4218dd07ef733368b0"
+checksum = "4f08c9adee0428b7bddf3890fc27e015ac4b761cc608c822667102b8bfd6995e"
 dependencies = [
  "bitflags",
 ]
