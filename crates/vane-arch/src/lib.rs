@@ -36,6 +36,7 @@ pub use vane_target_js::flate::{DebugFlate, Flate, ReleaseFlate};
 pub use vane_target_wasm::{JitOpcode, WasmJit, WasmJitCtx};
 
 pub mod arch;
+pub mod interp;
 pub mod template;
 
 /// Paging mode selector

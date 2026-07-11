@@ -361,7 +361,7 @@ vane_arch::cfg_target_js! {
     impl<'a> RiscvDisplay for TemplateJit<'a> {
         fn Riscv(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
             let ops = rv_emit(self);
-            render_stack_to_js(ops.into_iter(), f, self.params.flate)
+            render_stack_to_js(ops.into_iter(), f, self.params.flate, self.params.flags)
         }
     }
 }

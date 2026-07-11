@@ -43,6 +43,22 @@ pub struct Flags {
     pub use_32bit_paging: bool,
     #[cfg(feature = "target-js")]
     pub use_multilevel_paging: bool,
+    /// Lower `StackOp::LoadReg`/`StoreReg`/`LoadMem`/`StoreMem` to `await
+    /// $.reg_read(..)`/`$.reg_write(..)`/`$.mem_read(..)`/`$.mem_write(..)`
+    /// calls instead of the default inline `DataView`/`$.r` expressions.
+    ///
+    /// Defaults to `false`, which reproduces today's codegen byte-for-byte —
+    /// this only matters for hosts (e.g. `vane-wsdom`) whose register/memory
+    /// state may not be locally resident and need a chance to `await` a
+    /// round-trip. `render_stack_to_js` never decides *when* such a
+    /// round-trip is actually needed — it just emits the `await` call
+    /// unconditionally when this flag is set; the `$.reg_read`/`$.mem_read`
+    /// host implementation is what resolves immediately if its local shadow
+    /// is already fresh, or performs a real fetch if not (wsdom's own
+    /// roundtrip-free-unless-needed philosophy, applied to register/memory
+    /// access).
+    #[cfg(feature = "target-js")]
+    pub async_mem: bool,
 }
 
 impl Flags {
@@ -73,6 +89,7 @@ impl Flags {
             shared_security_directory_vaddr,
             use_32bit_paging,
             use_multilevel_paging,
+            async_mem: false,
         }
     }
 }
@@ -154,12 +171,19 @@ impl<'b> TemplateJit<'b> {
 /// stack for `LoopBegin`/`LoopEnd` matching.  Every op either writes a JS
 /// statement to `f` directly or pushes an expression name for a later op to
 /// consume.
+///
+/// `flags.async_mem` (see [`Flags`]) switches `LoadReg`/`StoreReg`/
+/// `LoadMem`/`StoreMem` from the default inline `DataView`/`$.r` expressions
+/// to `await $.reg_read`/`$.reg_write`/`$.mem_read`/`$.mem_write` calls. It
+/// defaults to `false`, so existing callers see byte-identical output.
 #[cfg(feature = "target-js")]
 pub fn render_stack_to_js(
     ops: impl Iterator<Item = StackOp>,
     f: &mut Formatter<'_>,
     flate: &(dyn crate::Flate + '_),
+    flags: Flags,
 ) -> core::fmt::Result {
+    let async_mem = flags.async_mem;
     let max64 = alloc::format!("{}", flate.flate("max64"));
     let max32 = alloc::format!("{}", flate.flate("max32"));
     let signed = alloc::format!("{}", flate.flate("signed"));
@@ -210,11 +234,13 @@ pub fn render_stack_to_js(
             StackOp::PushImm(v) => { push!(alloc::format!("{v}n")); }
             StackOp::LoadReg(r) => {
                 if r == 0 { push!("0n"); }
+                else if async_mem { push!(alloc::format!("(await $.reg_read({r}))")); }
                 else       { push!(alloc::format!("(($._r??=$.r)[`x{r}`]??=0n)")); }
             }
             StackOp::StoreReg(r) => {
                 let v = pop!();
-                if r != 0 { write!(f, "(($._r??=$.r)[`x{r}`]={v});")?; }
+                if r != 0 && async_mem { write!(f, "await $.reg_write({r},{v});")?; }
+                else if r != 0         { write!(f, "(($._r??=$.r)[`x{r}`]={v});")?; }
                 // x0 is hardwired zero — discard silently.
             }
 
@@ -319,25 +345,36 @@ pub fn render_stack_to_js(
             // ── Memory ────────────────────────────────────────────────────
             StackOp::LoadMem { width, signed: is_signed } => {
                 let addr = pop!();
-                let expr = match (width, is_signed) {
-                    (MemWidth::B1, true)  => alloc::format!("{unsigned}(BigInt({data}(({addr})&{max64}).getInt8(0,true)))"),
-                    (MemWidth::B1, false) => alloc::format!("BigInt({data}(({addr})&{max64}).getUint8(0,true))"),
-                    (MemWidth::B2, true)  => alloc::format!("{unsigned}(BigInt({data}(({addr})&{max64}).getInt16(0,true)))"),
-                    (MemWidth::B2, false) => alloc::format!("BigInt({data}(({addr})&{max64}).getUint16(0,true))"),
-                    (MemWidth::B4, true)  => alloc::format!("{unsigned}(BigInt({data}(({addr})&{max64}).getInt32(0,true)))"),
-                    (MemWidth::B4, false) => alloc::format!("BigInt({data}(({addr})&{max64}).getUint32(0,true))"),
-                    (MemWidth::B8, _)     => alloc::format!("{data}(({addr})&{max64}).getBigUint64(0,true)"),
-                };
-                push!(expr);
+                if async_mem {
+                    let width_bytes = match width { MemWidth::B1=>1, MemWidth::B2=>2, MemWidth::B4=>4, MemWidth::B8=>8 };
+                    let is_signed = if is_signed { "true" } else { "false" };
+                    push!(alloc::format!("(await $.mem_read(({addr})&{max64},{width_bytes},{is_signed}))"));
+                } else {
+                    let expr = match (width, is_signed) {
+                        (MemWidth::B1, true)  => alloc::format!("{unsigned}(BigInt({data}(({addr})&{max64}).getInt8(0,true)))"),
+                        (MemWidth::B1, false) => alloc::format!("BigInt({data}(({addr})&{max64}).getUint8(0,true))"),
+                        (MemWidth::B2, true)  => alloc::format!("{unsigned}(BigInt({data}(({addr})&{max64}).getInt16(0,true)))"),
+                        (MemWidth::B2, false) => alloc::format!("BigInt({data}(({addr})&{max64}).getUint16(0,true))"),
+                        (MemWidth::B4, true)  => alloc::format!("{unsigned}(BigInt({data}(({addr})&{max64}).getInt32(0,true)))"),
+                        (MemWidth::B4, false) => alloc::format!("BigInt({data}(({addr})&{max64}).getUint32(0,true))"),
+                        (MemWidth::B8, _)     => alloc::format!("{data}(({addr})&{max64}).getBigUint64(0,true)"),
+                    };
+                    push!(expr);
+                }
             }
             StackOp::StoreMem { width } => {
                 let v    = pop!();
                 let addr = pop!();
-                match width {
-                    MemWidth::B1 => write!(f, "{data}(({addr})&{max64}).setUint8(0,Number({v}&{max32}),true);")?,
-                    MemWidth::B2 => write!(f, "{data}(({addr})&{max64}).setUint16(0,Number({v}&{max32}),true);")?,
-                    MemWidth::B4 => write!(f, "{data}(({addr})&{max64}).setUint32(0,Number({v}&{max32}),true);")?,
-                    MemWidth::B8 => write!(f, "{data}(({addr})&{max64}).setBigUint64(0,{v},true);")?,
+                if async_mem {
+                    let width_bytes = match width { MemWidth::B1=>1, MemWidth::B2=>2, MemWidth::B4=>4, MemWidth::B8=>8 };
+                    write!(f, "await $.mem_write(({addr})&{max64},{width_bytes},{v});")?;
+                } else {
+                    match width {
+                        MemWidth::B1 => write!(f, "{data}(({addr})&{max64}).setUint8(0,Number({v}&{max32}),true);")?,
+                        MemWidth::B2 => write!(f, "{data}(({addr})&{max64}).setUint16(0,Number({v}&{max32}),true);")?,
+                        MemWidth::B4 => write!(f, "{data}(({addr})&{max64}).setUint32(0,Number({v}&{max32}),true);")?,
+                        MemWidth::B8 => write!(f, "{data}(({addr})&{max64}).setBigUint64(0,{v},true);")?,
+                    }
                 }
             }
 
@@ -678,5 +715,79 @@ impl<'a> CoreJS<'a> {
                 )
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "target-js"))]
+mod async_mem_tests {
+    use super::*;
+    use core::cell::RefCell;
+    use vane_target_core::MemWidth;
+
+    /// Renders `ops` via `render_stack_to_js` and returns the resulting JS
+    /// text. `Formatter` has no public constructor, so this goes through a
+    /// small `Display` wrapper — the standard way to reach one in a test.
+    fn render(ops: alloc::vec::Vec<StackOp>, flags: Flags) -> alloc::string::String {
+        struct W(RefCell<alloc::vec::Vec<StackOp>>, Flags);
+        impl Display for W {
+            fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+                let flate = crate::DebugFlate::default();
+                render_stack_to_js(self.0.borrow_mut().drain(..), f, &flate, self.1)
+            }
+        }
+        alloc::format!("{}", W(RefCell::new(ops), flags))
+    }
+
+    /// A representative mix: a couple of register loads/stores, one memory
+    /// load and store, and a plain arithmetic op that never touches
+    /// `async_mem`.
+    fn sample_ops() -> alloc::vec::Vec<StackOp> {
+        alloc::vec![
+            StackOp::LoadReg(1),
+            StackOp::LoadReg(2),
+            StackOp::Add64,
+            StackOp::StoreReg(3),
+            StackOp::LoadReg(4),
+            StackOp::LoadMem { width: MemWidth::B8, signed: false },
+            StackOp::LoadReg(5),
+            StackOp::StoreMem { width: MemWidth::B4 },
+            StackOp::LoadReg(0),
+            StackOp::StoreReg(0),
+        ]
+    }
+
+    #[test]
+    fn async_mem_off_matches_existing_sync_codegen() {
+        let out = render(sample_ops(), Flags::default());
+        assert!(out.contains("$._r??=$.r"), "sync register access should be untouched: {out}");
+        assert!(out.contains(".getBigUint64(0,true)"), "sync mem load should be untouched: {out}");
+        assert!(out.contains(".setUint32(0,"), "sync mem store should be untouched: {out}");
+        assert!(!out.contains("await $.reg_read"));
+        assert!(!out.contains("await $.mem_read"));
+    }
+
+    #[test]
+    fn async_mem_on_awaits_reg_and_mem_ops_only() {
+        let flags = Flags { async_mem: true, ..Default::default() };
+        let out = render(sample_ops(), flags);
+        assert!(out.contains("await $.reg_read(1)"));
+        assert!(out.contains("await $.reg_read(2)"));
+        assert!(out.contains("await $.reg_write(3,"));
+        assert!(out.contains("await $.mem_read("));
+        assert!(out.contains("await $.mem_write("));
+        // x0 loads/stores are compile-time constants — never worth awaiting.
+        assert!(!out.contains("$.reg_read(0)"));
+        assert!(!out.contains("$.reg_write(0,"));
+    }
+
+    #[test]
+    fn async_mem_flag_leaves_non_mem_ops_byte_identical() {
+        // Ops that never touch registers/memory should render identically
+        // regardless of async_mem — only LoadReg/StoreReg/LoadMem/StoreMem
+        // sites are allowed to change shape.
+        let arith = || alloc::vec![StackOp::PushImm(1), StackOp::PushImm(2), StackOp::Add64, StackOp::Trunc32];
+        let off = render(arith(), Flags::default());
+        let on = render(arith(), Flags { async_mem: true, ..Default::default() });
+        assert_eq!(off, on);
     }
 }

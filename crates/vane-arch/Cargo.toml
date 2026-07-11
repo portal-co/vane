@@ -11,6 +11,10 @@ default = ["target-js", "target-wasm", "gen-blocks"]
 target-js = ["dep:vane-target-js", "dep:either"]
 target-wasm = ["dep:vane-target-wasm", "dep:either", "dep:wasmparser"]
 gen-blocks = []
+# Adds `interp::AsyncStackHost`/`interp::interpret_async` for hosts whose
+# register/memory state may need to `.await` (e.g. a remote wsdom-backed
+# host). No extra dependencies -- uses async-fn-in-traits directly.
+async-host = []
 
 [dependencies]
 vane-target-js = { path = "../vane-target-js", optional = true }
