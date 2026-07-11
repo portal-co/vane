@@ -1,4 +1,6 @@
 pub use vane_arch::template::*;
-pub use vane_arch::{JitOpcode, WasmJitCtx};
+vane_arch::cfg_target_wasm! {
+    pub use vane_arch::{JitOpcode, WasmJitCtx};
+}
 
 pub mod riscv;

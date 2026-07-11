@@ -1,0 +1,18 @@
+[package]
+name = "vane-wsdom"
+
+edition = "2024"
+version.workspace = true
+license.workspace = true
+description = "Server-side execution of vane's JIT-compiled RISC-V blocks in a real, wsdom-connected browser"
+
+[dependencies]
+vane-riscv = { path = "../vane-riscv", default-features = false, features = ["target-js"] }
+wsdom = { workspace = true }
+wsdom-core = { workspace = true }
+wsdom-axum = { workspace = true }
+axum = { workspace = true, features = ["ws", "tokio", "http1"] }
+tokio = { workspace = true, features = ["rt", "net"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

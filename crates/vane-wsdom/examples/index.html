@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="UTF-8">
+	<title>vane-wsdom demo</title>
+	<!--
+	Minimal WSDOM client bootstrap, copied verbatim from wsdom's own
+	examples/hello/index.html. Open your browser's network devtools before
+	loading this page to watch the WebSocket frames: bootstrap() sends the
+	`$`/`J` runtime setup once, then each block dispatch appears as a handful
+	of small text frames (compile -> invoke -> await exit).
+	-->
+	<script>
+		function WSDOMConnectWebSocket(wsUrl, wsProtocols) {
+			const ws = new WebSocket(wsUrl, wsProtocols);
+			const wsdom = new WSDOM((msg) => {
+				ws.send(msg);
+			});
+			ws.onopen = () => console.debug("WSDOM WebSocket connection open!");
+			ws.onmessage = (msg) => wsdom.handleIncomingMessage(msg.data);
+			ws.onclose = (ev) => console.debug("WSDOM WebSocket closed", ev);
+			ws.onerror = (ev) => console.warn("WSDOM WebSocket errored", ev);
+		}
+		class WSDOM {
+			constructor(sendMessage) {
+				this.internal = new WSDOMInternal(sendMessage);
+			}
+			handleIncomingMessage(msg) {
+				const fn = new Function('_w', msg);
+				fn(this.internal);
+			}
+		}
+		class WSDOMInternal {
+			constructor(sender) {
+				this.g = (id) => this.values.get(id);
+				this.s = (id, value) => this.values.set(id, value);
+				this.d = (id) => this.values.delete(id);
+				this.r = (id, val) => sender(`${id}:${JSON.stringify(val)}`);
+				this.sender = sender;
+				this.values = new Map();
+			}
+		}
+		WSDOMConnectWebSocket("ws://localhost:4000/ws");
+	</script>
+</head>
+
+<body>
+	<p>Open devtools (Network / Console) to watch <code>vane-wsdom</code> drive the demo RISC-V loop.</p>
+</body>
+
+</html>
