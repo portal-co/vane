@@ -66,12 +66,17 @@ impl fmt::Display for Error {
 impl core::error::Error for Error {}
 
 /// Send the browser-side `$` runtime object and `J` helper. Must be called
-/// once per connection before [`run_block`]/[`run`].
+/// once per connection before [`run_block`]/[`run`], followed by
+/// [`seed_memory`] to actually populate `$.mem` with the guest program —
+/// `bootstrap` only allocates the (zeroed) buffer.
 ///
 /// `$` here is a minimal, self-contained stand-in for the object the
 /// wasm-bindgen build's inline JS glue provides
 /// (`crates/vane-meta-gen/src/lib.rs`): a flat register file (`$.r`), a flat
-/// guest-memory buffer reachable via `$._sys('memory')`/`$.get_page`, and
+/// guest-memory buffer reachable via `$._sys('memory')`/`$.get_page`, a
+/// JIT-cache map (`$.p`, only ever *deleted* from by `StackOp::CheckCode` on
+/// an integrity-check miss — this crate never populates it, since it never
+/// caches compiled blocks browser-side; see the module docs), and
 /// `$.ecall` handling the `exit` syscall (`a7==93`) locally — matching
 /// `Reactor::_ecall` (`crates/vane/src/lib.rs`). Unlike the wasm-bindgen
 /// build, register/memory state is *not* mirrored back to the server between
@@ -80,15 +85,33 @@ impl core::error::Error for Error {}
 pub async fn bootstrap(browser: &Browser, mem_size: u64) {
     let code = format!(
         "globalThis.$={{\
+            f:{max_u64}n,\
             mem:new ArrayBuffer({mem_size}),\
             r:{{}},\
+            p:{{}},\
             get_page(a){{return Number(a%{mem_size}n);}},\
             _sys(name){{return name==='memory'?{{buffer:this.mem}}:undefined;}},\
             async ecall(){{if((this.r['x17']??0n)===93n){{throw new Error('vane:exit');}}}}\
         }};\
-        globalThis.J=function(addr){{return String(addr);}};"
+        globalThis.J=function(addr){{return String(addr);}};",
+        max_u64 = u64::MAX,
     );
     browser.run_raw_code(format_args!("{code}"));
+}
+
+/// Copy every populated 64KB page of `mem` into the browser's `$.mem`
+/// buffer (allocated by [`bootstrap`]), at the same `addr % mem_size`
+/// offset [`bootstrap`]'s `get_page` uses. Must be called (after
+/// `bootstrap`) before dispatching any block that reads guest memory —
+/// including `StackOp::CheckCode`'s own integrity check, which every block
+/// starts with, so skipping this makes the *first* block fail.
+pub async fn seed_memory(browser: &Browser, mem: &Mem, mem_size: u64) {
+    for (&page_no, page) in mem.pages.iter() {
+        let page_base = page_no << 16;
+        let offset = page_base % mem_size;
+        let bytes = page.iter().map(u8::to_string).collect::<Vec<_>>().join(",");
+        browser.run_raw_code(format_args!("(new Uint8Array($.mem)).set([{bytes}],{offset});"));
+    }
 }
 
 /// One JIT-compiled trace's outcome: the PC execution should resume at.
@@ -180,6 +203,11 @@ pub async fn run(
 /// Drive a single WebSocket connection end to end: bootstrap the browser-side
 /// `$` runtime, then run blocks starting at `entry_pc` until `should_stop`
 /// returns `true`.
+///
+/// Returns the outcome of the whole connection: [`wsdom_axum::Output::Done`]
+/// wraps `run`'s own `Result` (the final PC reached, or the [`Error`] that
+/// stopped it); the other variants report a WebSocket/wsdom-level failure
+/// (connection dropped, transport error) instead.
 pub async fn serve_connection(
     socket: axum::extract::ws::WebSocket,
     mem: Mem,
@@ -187,10 +215,11 @@ pub async fn serve_connection(
     flags: Flags,
     mem_size: u64,
     mut should_stop: impl FnMut(u64) -> bool + Send + 'static,
-) {
+) -> wsdom_axum::Output<Result<u64, Error>> {
     wsdom_axum::socket_to_browser(socket, move |browser| async move {
         bootstrap(&browser, mem_size).await;
-        let _ = run(&browser, &mem, entry_pc, flags, &mut should_stop).await;
+        seed_memory(&browser, &mem, mem_size).await;
+        run(&browser, &mem, entry_pc, flags, &mut should_stop).await
     })
-    .await;
+    .await
 }

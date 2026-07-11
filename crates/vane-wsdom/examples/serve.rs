@@ -9,6 +9,9 @@
 //! `crates/vane-wsdom/examples/index.html` in a browser (or serve it) and
 //! watch the WebSocket frames in devtools.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use axum::{Router, extract::ws::WebSocketUpgrade, response::Response, routing::get};
 use vane_riscv::{Mem, template::Flags};
 
@@ -29,20 +32,33 @@ async fn main() {
 
 async fn handler(ws: WebSocketUpgrade) -> Response {
     ws.on_upgrade(move |socket| async move {
+        println!("connection opened");
         let mem = demo_mem();
-        let mut blocks = 0u32;
-        vane_wsdom::serve_connection(
+        let blocks = Arc::new(AtomicU32::new(0));
+        let counter = blocks.clone();
+        let outcome = vane_wsdom::serve_connection(
             socket,
             mem,
             ENTRY_PC,
             Flags::default(),
             vane_wsdom::DEFAULT_MEM_SIZE,
-            move |_next_pc| {
-                blocks += 1;
-                blocks > MAX_BLOCKS
-            },
+            move |_next_pc| counter.fetch_add(1, Ordering::Relaxed) >= MAX_BLOCKS,
         )
         .await;
+        match outcome {
+            wsdom_axum::Output::Done(Ok(final_pc)) => {
+                println!(
+                    "connection finished after {} block(s), final pc=0x{final_pc:x}",
+                    blocks.load(Ordering::Relaxed)
+                );
+            }
+            wsdom_axum::Output::Done(Err(e)) => {
+                println!("connection finished with error after {} block(s): {e}", blocks.load(Ordering::Relaxed));
+            }
+            wsdom_axum::Output::ConnectionClosed => println!("connection closed by peer"),
+            wsdom_axum::Output::AxumError(e) => println!("axum error: {e}"),
+            wsdom_axum::Output::WsdomError(e) => println!("wsdom error: {e:?}"),
+        }
     })
 }
 

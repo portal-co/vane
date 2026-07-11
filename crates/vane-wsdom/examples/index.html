@@ -5,11 +5,16 @@
 	<meta charset="UTF-8">
 	<title>vane-wsdom demo</title>
 	<!--
-	Minimal WSDOM client bootstrap, copied verbatim from wsdom's own
-	examples/hello/index.html. Open your browser's network devtools before
-	loading this page to watch the WebSocket frames: bootstrap() sends the
-	`$`/`J` runtime setup once, then each block dispatch appears as a handful
-	of small text frames (compile -> invoke -> await exit).
+	WSDOM client bootstrap, transpiled from wsdom's own reference client
+	(../wsdom/js/servant.ts) rather than the abbreviated version in
+	wsdom's examples/hello/index.html -- that abbreviated version omits
+	`c`/`e`/`rp`/`x` and (critically) the `p` prefix on `r()`'s reply
+	message, which `Browser`'s retrieve/await machinery on the Rust side
+	requires to recognize a reply at all. Open your browser's network
+	devtools before loading this page to watch the WebSocket frames:
+	bootstrap() sends the `$`/`J` runtime setup once, then each block
+	dispatch appears as a handful of small text frames (compile -> invoke
+	-> await exit).
 	-->
 	<script>
 		function WSDOMConnectWebSocket(wsUrl, wsProtocols) {
@@ -21,25 +26,54 @@
 			ws.onmessage = (msg) => wsdom.handleIncomingMessage(msg.data);
 			ws.onclose = (ev) => console.debug("WSDOM WebSocket closed", ev);
 			ws.onerror = (ev) => console.warn("WSDOM WebSocket errored", ev);
+			return wsdom;
 		}
 		class WSDOM {
 			constructor(sendMessage) {
-				this.internal = new WSDOMInternal(sendMessage);
+				this.internal = new WSDOMCore(sendMessage);
 			}
 			handleIncomingMessage(msg) {
-				const fn = new Function('_w', msg);
-				fn(this.internal);
+				try {
+					const fn = new Function('_w', msg);
+					fn(this.internal);
+				} catch (e) {
+					console.error("DIAG failed to run message:", JSON.stringify(msg));
+					console.error("DIAG error:", e.message);
+					throw e;
+				}
 			}
 		}
-		class WSDOMInternal {
+		class WSDOMCore {
 			constructor(sender) {
-				this.g = (id) => this.values.get(id);
-				this.s = (id, value) => this.values.set(id, value);
-				this.d = (id) => this.values.delete(id);
-				this.r = (id, val) => sender(`${id}:${JSON.stringify(val)}`);
 				this.sender = sender;
 				this.values = new Map();
+				this.callbacks = new Map();
+				this.next_value = Number.MAX_SAFE_INTEGER;
+				this.x = {};
 			}
+			allocate = (v) => {
+				const i = this.next_value--;
+				this.values.set(i, { value: v, error: false });
+				return i;
+			};
+			g = (id) => {
+				const w = this.values.get(id);
+				if (w?.error) { throw w.value; }
+				return w?.value;
+			};
+			s = (id, value) => { this.values.set(id, { value, error: false }); };
+			d = (id) => { this.values.delete(id); };
+			r = (id, val) => { this.sender(`p${id}:${JSON.stringify(val)}`); };
+			rp = (id, val) => { this.callbacks.get(id)?.(val); };
+			c = (id, slot) => {
+				const w = this.values.get(id);
+				if (w?.error) {
+					this.values.set(slot, { value: w.value, error: false });
+					return { slot };
+				}
+				return { value: w?.value };
+			};
+			e = (id, value) => { this.values.set(id, { value, error: true }); };
 		}
 		WSDOMConnectWebSocket("ws://localhost:4000/ws");
 	</script>
