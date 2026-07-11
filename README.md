@@ -24,7 +24,6 @@ The WASM JIT target (`vane-target-wasm`) exists as a stub with only a trait defi
 | `vane-target-js` | JS codegen helpers. Defines the `Flate` trait used to optionally minify identifier names in generated JS (`ReleaseFlate` substitutes short names like `f`, `g`, `s`, `u`, `d`; `DebugFlate` is a passthrough). |
 | `vane-target-wasm` | Stub crate. Declares `WasmJit`, `WasmJitCtx`, and `JitOpcode` traits/types. The actual WASM JIT implementation is not yet written. |
 | `vane-meta-gen` | Procedural-macro-like glue. Exports the `vane_meta!` declarative macro that generates the `Reactor` and `Core` structs along with all `wasm-bindgen` method impls (register access, page table control, `jit_code`, `jit_run`, paging mode setters, etc.). |
-| `vane-jit` | Thin re-export shim. All previous functionality moved to the other crates; this crate now just re-exports `vane-riscv`. |
 
 ## Memory system
 

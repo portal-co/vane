@@ -72,4 +72,4 @@ Legacy Page Allocation
 Physical Memory
 ```
 
-See `crates/vane-jit/src/lib.rs` for implementation details.
+See `crates/vane-arch/src/lib.rs` for implementation details.

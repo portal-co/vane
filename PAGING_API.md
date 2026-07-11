@@ -10,7 +10,7 @@ The paging system can now be configured at runtime through the generated `Reacto
 
 ### 1. Enhanced `Flags` Structure
 
-The `Flags` struct in `vane-jit/src/template.rs` now includes paging configuration:
+The `Flags` struct in `vane-arch/src/template.rs` now includes paging configuration:
 
 ```rust
 pub struct Flags {
@@ -134,6 +134,6 @@ Or add additional setter methods to the Reactor type for these options.
 ## See Also
 
 - `PAGING.md` - Complete paging system specification
-- `crates/vane-jit/src/lib.rs` - Paging implementation with translation functions
-- `crates/vane-jit/src/template.rs` - CoreJS and Flags structures
+- `crates/vane-arch/src/lib.rs` - Paging implementation with translation functions
+- `crates/vane-arch/src/template.rs` - CoreJS and Flags structures
 - `crates/vane-meta-gen/src/lib.rs` - Reactor type generation macro

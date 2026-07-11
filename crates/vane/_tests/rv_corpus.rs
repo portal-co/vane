@@ -7,7 +7,7 @@
 //! The implementation:
 //! - Uses the `elf` crate for safe ELF parsing (no unsafe code)
 //! - Uses the safe `write_byte` interface from `Mem` for memory initialization
-//! - Leverages existing emulation code from vane/vane-jit (no reimplementation)
+//! - Leverages existing emulation code from vane/vane-riscv (no reimplementation)
 //! - Tests are generated using the `rv_test!` macro for easy addition
 //!
 //! ## Adding New Tests
@@ -29,7 +29,7 @@ extern crate wasm_bindgen_test;
 use wasm_bindgen_test::*;
 
 use crate::*;
-use vane_jit::Mem;
+use vane_riscv::Mem;
 
 wasm_bindgen_test_configure!(run_in_browser);
 

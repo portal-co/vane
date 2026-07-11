@@ -1,6 +1,22 @@
 # Code Printing Refactor: `CoreOpcode`-Unified Codegen
 
-## Status: Plan (pending review)
+## Status: Superseded — implemented (with deviations noted below)
+
+This plan has been carried out (`3e24a3d`, `42d6a04`, `11ac5ac`, `bbe07e2`). Production codegen
+(`vane-riscv/src/template/riscv.rs`'s `rv_emit`/`rv_body`, feeding `vane-arch/src/template.rs`'s
+`render_stack_to_js`/`render_stack_to_wasm`, wired into `vane-meta-gen`'s `jit_code`) already
+runs entirely through `StackOp`. The `vane-jit` crate (§11) has been deleted. Two things below
+differ from what shipped:
+
+- **`StackOp::Loop`/`If`` are not boxed nested iterators.** The shipped IR (§4 in the original
+  text below) instead uses a **flat stream** of `LoopBegin`/`LoopEnd`/`IfBegin`/`IfElse`/`IfEnd`
+  markers (see `vane-target-core/src/stack.rs`), avoiding `Box<dyn Iterator>` allocation while
+  still letting consumers track structure with a depth counter/stack.
+- **The `CoreOpcode::br` relative-depth bug (§3) is already fixed** — `br` takes
+  `relative_depth: u32` and `TemplateJit::jit_core` computes `self.depth - label.index` before
+  calling it.
+
+The rest of this document is kept as historical record of the design rationale.
 
 ---
 
