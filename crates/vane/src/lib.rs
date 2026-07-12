@@ -15,6 +15,15 @@ use wasm_bindgen::prelude::*;
 mod _tests;
 vane_meta_gen::vane_meta!(Reactor, Core, Riscv, ReleaseFlate {});
 
+/// wasm-bindgen calls this once when the module is instantiated.
+/// Installs `console_error_panic_hook` so Rust panics surface as readable
+/// `console.error` messages (with the panic location/message) instead of an
+/// opaque WASM trap.
+#[wasm_bindgen(start)]
+fn start() {
+    utils::set_panic_hook();
+}
+
 #[wasm_bindgen(inline_js = r#"
             export function log_success(){
         console.log('success: exit');
@@ -201,17 +210,30 @@ impl Reactor {
                 Inst::Mul { src2, dest, src1 } => {
                     set_reg!(dest => reg!(src1).wrapping_mul(reg!(src2)));
                 }
+                Inst::Mulh { src2, dest, src1 } => {
+                    set_reg!(dest => (((reg!(src1) as i64 as i128) * (reg!(src2) as i64 as i128)) >> 64) as u64);
+                }
+                Inst::Mulhu { src2, dest, src1 } => {
+                    set_reg!(dest => ((reg!(src1) as u128 * reg!(src2) as u128) >> 64) as u64);
+                }
+                Inst::Mulhsu { src2, dest, src1 } => {
+                    set_reg!(dest => (((reg!(src1) as i64 as i128) * (reg!(src2) as u128 as i128)) >> 64) as u64);
+                }
                 Inst::Div { src2, dest, src1 } => {
-                    set_reg!(dest => ((reg!(src1) as i64) / (reg!(src2) as i64)) as u64);
+                    let (a, b) = (reg!(src1) as i64, reg!(src2) as i64);
+                    set_reg!(dest => if b == 0 { u64::MAX } else { a.wrapping_div(b) as u64 });
                 }
                 Inst::Divu { src2, dest, src1 } => {
-                    set_reg!(dest => reg!(src1) / reg!(src2));
+                    let (a, b) = (reg!(src1), reg!(src2));
+                    set_reg!(dest => if b == 0 { u64::MAX } else { a / b });
                 }
                 Inst::Rem { src2, dest, src1 } => {
-                    set_reg!(dest => ((reg!(src1) as i64) % (reg!(src2) as i64)) as u64);
+                    let (a, b) = (reg!(src1) as i64, reg!(src2) as i64);
+                    set_reg!(dest => if b == 0 { a as u64 } else { a.wrapping_rem(b) as u64 });
                 }
                 Inst::Remu { src2, dest, src1 } => {
-                    set_reg!(dest => reg!(src1) % reg!(src2));
+                    let (a, b) = (reg!(src1), reg!(src2));
+                    set_reg!(dest => if b == 0 { a } else { a % b });
                 }
                 //Jumps
                 Inst::Jal { offset, dest } => {
@@ -384,16 +406,20 @@ impl Reactor {
                     set_reg32!(dest => reg32!(src1).wrapping_mul(reg32!(src2)));
                 }
                 Inst::DivW { src2, dest, src1 } => {
-                    set_reg32!(dest => ((reg32!(src1) as i32) / (reg32!(src2) as i32)) as u32);
+                    let (a, b) = (reg32!(src1) as i32, reg32!(src2) as i32);
+                    set_reg32!(dest => if b == 0 { u32::MAX } else { a.wrapping_div(b) as u32 });
                 }
                 Inst::DivuW { src2, dest, src1 } => {
-                    set_reg32!(dest => reg32!(src1) / reg32!(src2));
+                    let (a, b) = (reg32!(src1), reg32!(src2));
+                    set_reg32!(dest => if b == 0 { u32::MAX } else { a / b });
                 }
                 Inst::RemW { src2, dest, src1 } => {
-                    set_reg32!(dest => ((reg32!(src1) as i32) % (reg32!(src2) as i32)) as u32);
+                    let (a, b) = (reg32!(src1) as i32, reg32!(src2) as i32);
+                    set_reg32!(dest => if b == 0 { a as u32 } else { a.wrapping_rem(b) as u32 });
                 }
                 Inst::RemuW { src2, dest, src1 } => {
-                    set_reg32!(dest => reg32!(src1) % reg32!(src2));
+                    let (a, b) = (reg32!(src1), reg32!(src2));
+                    set_reg32!(dest => if b == 0 { a } else { a % b });
                 }
                 //Ecall
                 Inst::Ecall => {

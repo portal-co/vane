@@ -1,2 +1,13 @@
 [target.wasm32-unknown-unknown]
 runner = 'wasm-bindgen-test-runner'
+# The tracing JIT (rv_emit/rv_body in vane-riscv) compiles a basic-block
+# trace by recursing through fallthrough/branch targets, keeping the whole
+# chain on the Rust call stack until it hits a TailCall/Trap. For programs
+# with many sequential branches (e.g. rv-corpus's multiply/divide test),
+# that recursion is deep enough to overflow wasm32's default (much smaller,
+# uninlined) debug-build stack -- surfacing as an opaque "memory access out
+# of bounds" trap, not a Rust panic. Release builds have enough stack
+# headroom from inlining/frame elision to not hit this for the current test
+# corpus, but bumping the linker's reserved stack removes the debug-build
+# cliff edge rather than relying on that.
+rustflags = ["-C", "link-arg=-zstack-size=4194304"]
