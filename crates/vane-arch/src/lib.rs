@@ -398,3 +398,38 @@ impl JitCtx for Mem {
         self.read_byte(a)
     }
 }
+
+impl os_page::GuestMemory for Mem {
+    fn read(&self, addr: u64, width: os_page::AccessWidth) -> Result<u64, os_page::GuestFault> {
+        let n = match width {
+            os_page::AccessWidth::W8 => 1,
+            os_page::AccessWidth::W16 => 2,
+            os_page::AccessWidth::W32 => 4,
+            os_page::AccessWidth::W64 => 8,
+            os_page::AccessWidth::W128 => {
+                return Err(os_page::GuestFault::OutOfBounds);
+            }
+        };
+        let mut value: u64 = 0;
+        for i in 0..n {
+            value |= (self.read_byte(addr.wrapping_add(i)) as u64) << (8 * i);
+        }
+        Ok(value)
+    }
+
+    fn write(&mut self, addr: u64, width: os_page::AccessWidth, value: u64) -> Result<(), os_page::GuestFault> {
+        let n = match width {
+            os_page::AccessWidth::W8 => 1,
+            os_page::AccessWidth::W16 => 2,
+            os_page::AccessWidth::W32 => 4,
+            os_page::AccessWidth::W64 => 8,
+            os_page::AccessWidth::W128 => {
+                return Err(os_page::GuestFault::OutOfBounds);
+            }
+        };
+        for i in 0..n {
+            self.write_byte(addr.wrapping_add(i), ((value >> (8 * i)) & 0xff) as u8);
+        }
+        Ok(())
+    }
+}
