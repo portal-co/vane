@@ -6,6 +6,7 @@ license.workspace = true
 description.workspace = true
 
 [dependencies]
+os-target-core = { git = "https://github.com/portal-co/os-emulation.git" }
 
 [features]
 default = []

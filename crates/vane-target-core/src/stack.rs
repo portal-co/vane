@@ -1,6 +1,7 @@
 use core::fmt::Display;
 
 use crate::CoreOpcode;
+use os_target_core::{Backend as OsBackend, MemWidth as OsMemWidth, OsOp};
 
 /// Width of a memory access.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -160,5 +161,132 @@ impl<'op> CoreOpcode<'op> for StackOp {
             relative_depth,
             label: alloc::format!("{name}"),
         })
+    }
+}
+
+fn os_mem_width_to_stack(width: OsMemWidth) -> Option<MemWidth> {
+    match width {
+        OsMemWidth::W8 => Some(MemWidth::B1),
+        OsMemWidth::W16 => Some(MemWidth::B2),
+        OsMemWidth::W32 => Some(MemWidth::B4),
+        OsMemWidth::W64 => Some(MemWidth::B8),
+        OsMemWidth::W128 => None,
+    }
+}
+
+/// A [`Backend`] for `os-target-core` that lowers [`OsOp`] into vane's
+/// [`StackOp`] IR.
+///
+/// This is intentionally one-way: shared OS glue emits `OsOp`, and vane's
+/// existing interpreter / JS renderer consume the resulting `StackOp`s.
+pub struct StackOpBackend {
+    ops: alloc::vec::Vec<StackOp>,
+}
+
+impl StackOpBackend {
+    pub fn new() -> Self {
+        Self { ops: alloc::vec::Vec::new() }
+    }
+
+    pub fn into_ops(self) -> alloc::vec::Vec<StackOp> {
+        self.ops
+    }
+
+    fn push(&mut self, op: StackOp) {
+        self.ops.push(op);
+    }
+}
+
+impl Default for StackOpBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OsBackend for StackOpBackend {
+    fn op(&mut self, op: OsOp) {
+        match op {
+            OsOp::PushU64(v) => self.push(StackOp::PushImm(v)),
+            OsOp::PushU32(v) => self.push(StackOp::PushImm(v as u64)),
+            OsOp::Pop => self.push(StackOp::StoreReg(0)), // register 0 discards
+            OsOp::Load { width, signed } => {
+                if let Some(w) = os_mem_width_to_stack(width) {
+                    self.push(StackOp::LoadMem { width: w, signed });
+                } else {
+                    self.push(StackOp::Trap(alloc::string::String::from("unsupported load width")));
+                }
+            }
+            OsOp::Store { width } => {
+                if let Some(w) = os_mem_width_to_stack(width) {
+                    self.push(StackOp::StoreMem { width: w });
+                } else {
+                    self.push(StackOp::Trap(alloc::string::String::from("unsupported store width")));
+                }
+            }
+            OsOp::Ecall { .. } => self.push(StackOp::Ecall),
+            OsOp::Jump { target } => {
+                self.push(StackOp::PushImm(target));
+                self.push(StackOp::TailCall);
+            }
+            OsOp::Trap => self.push(StackOp::Trap(alloc::string::String::from("os emulation trap"))),
+            OsOp::TailCall { helper } => {
+                // Static helper tail-calls do not exist in `StackOp`; record
+                // the symbol and then perform a dynamic tail-call dispatch.
+                self.push(StackOp::Log(alloc::format!("tailcall: {helper}")));
+                self.push(StackOp::TailCall);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn push_then_pop_becomes_store_discard() {
+        let mut b = StackOpBackend::new();
+        b.op(OsOp::PushU64(42));
+        b.op(OsOp::Pop);
+        let ops = b.into_ops();
+        assert_eq!(ops.len(), 2);
+        assert!(matches!(ops[0], StackOp::PushImm(42)));
+        assert!(matches!(ops[1], StackOp::StoreReg(0)));
+    }
+
+    #[test]
+    fn load_maps_to_load_mem() {
+        let mut b = StackOpBackend::new();
+        b.op(OsOp::PushU64(0x100));
+        b.op(OsOp::Load { width: OsMemWidth::W32, signed: true });
+        let ops = b.into_ops();
+        assert!(matches!(ops[1], StackOp::LoadMem { width: MemWidth::B4, signed: true }));
+    }
+
+    #[test]
+    fn store_swaps_naively() {
+        let mut b = StackOpBackend::new();
+        b.op(OsOp::PushU64(0x200)); // value
+        b.op(OsOp::PushU64(0x100)); // addr
+        b.op(OsOp::Store { width: OsMemWidth::W16 });
+        let ops = b.into_ops();
+        assert!(matches!(ops[2], StackOp::StoreMem { width: MemWidth::B2 }));
+    }
+
+    #[test]
+    fn jump_pushes_target_then_tailcalls() {
+        let mut b = StackOpBackend::new();
+        b.op(OsOp::Jump { target: 0x4000 });
+        let ops = b.into_ops();
+        assert!(matches!(ops[0], StackOp::PushImm(0x4000)));
+        assert!(matches!(ops[1], StackOp::TailCall));
+    }
+
+    #[test]
+    fn w128_load_traps() {
+        let mut b = StackOpBackend::new();
+        b.op(OsOp::PushU64(0));
+        b.op(OsOp::Load { width: OsMemWidth::W128, signed: false });
+        assert!(matches!(b.into_ops().last(), Some(StackOp::Trap(_))));
     }
 }
