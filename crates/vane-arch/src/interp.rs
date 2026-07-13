@@ -349,6 +349,90 @@ pub trait AsyncStackHost {
     async fn log(&mut self, _msg: &str) {}
 }
 
+#[cfg(feature = "async-host")]
+/// Adapter from the generic `os-async` surfaces to vane's [`AsyncStackHost`].
+///
+/// This lets an interpreter back its register/memory state and ecall handling
+/// onto the speet-neutral OS emulation surface instead of a custom host trait.
+pub struct AsyncOsHost<'a, C: os_async::AsyncCtx + ?Sized, O: os_async::AsyncOS<C> + ?Sized> {
+    pub ctx: &'a mut C,
+    pub os: &'a mut O,
+}
+
+#[cfg(feature = "async-host")]
+impl<'a, C: os_async::AsyncCtx + ?Sized, O: os_async::AsyncOS<C> + ?Sized> AsyncStackHost
+    for AsyncOsHost<'a, C, O>
+{
+    async fn load_reg(&mut self, r: u8) -> u64 {
+        let mut v = 0u64;
+        self.ctx.reg(r, &mut v).await;
+        v
+    }
+
+    async fn store_reg(&mut self, r: u8, v: u64) {
+        let mut slot = v;
+        self.ctx.set_reg(r, &mut slot).await;
+    }
+
+    async fn load_mem(&mut self, addr: u64, width: MemWidth, signed: bool) -> u64 {
+        match width {
+            MemWidth::B1 => {
+                let mut v = 0u8;
+                self.ctx.read(addr, &mut v).await;
+                if signed { v as i8 as i64 as u64 } else { v as u64 }
+            }
+            MemWidth::B2 => {
+                let mut v = 0u16;
+                self.ctx.read(addr, &mut v).await;
+                if signed { v as i16 as i64 as u64 } else { v as u64 }
+            }
+            MemWidth::B4 => {
+                let mut v = 0u32;
+                self.ctx.read(addr, &mut v).await;
+                if signed { v as i32 as i64 as u64 } else { v as u64 }
+            }
+            MemWidth::B8 => {
+                let mut v = 0u64;
+                self.ctx.read(addr, &mut v).await;
+                v
+            }
+        }
+    }
+
+    async fn store_mem(&mut self, addr: u64, width: MemWidth, v: u64) {
+        match width {
+            MemWidth::B1 => {
+                let mut slot = v as u8;
+                self.ctx.write(addr, &mut slot).await;
+            }
+            MemWidth::B2 => {
+                let mut slot = v as u16;
+                self.ctx.write(addr, &mut slot).await;
+            }
+            MemWidth::B4 => {
+                let mut slot = v as u32;
+                self.ctx.write(addr, &mut slot).await;
+            }
+            MemWidth::B8 => {
+                let mut slot = v;
+                self.ctx.write(addr, &mut slot).await;
+            }
+        }
+    }
+
+    async fn byte(&mut self, addr: u64) -> u8 {
+        let mut v = 0u8;
+        self.ctx.read(addr, &mut v).await;
+        v
+    }
+
+    async fn ecall(&mut self) -> bool {
+        // Default: treat any OS result as "continue interpreting".
+        let _ = self.os.syscall(self.ctx).await;
+        true
+    }
+}
+
 /// Async twin of [`interpret`] — identical control-flow/arithmetic logic,
 /// `.await`ing every [`AsyncStackHost`] call instead of calling [`StackHost`]
 /// synchronously. Kept as a separate function (rather than one generic over

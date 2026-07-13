@@ -14,7 +14,7 @@ gen-blocks = []
 # Adds `interp::AsyncStackHost`/`interp::interpret_async` for hosts whose
 # register/memory state may need to `.await` (e.g. a remote wsdom-backed
 # host). No extra dependencies -- uses async-fn-in-traits directly.
-async-host = []
+async-host = ["dep:os-async"]
 
 [dependencies]
 vane-target-js = { path = "../vane-target-js", optional = true }
@@ -22,5 +22,6 @@ vane-target-wasm = { path = "../vane-target-wasm", optional = true }
 vane-target-core = { path = "../vane-target-core" }
 os-page = { git = "https://github.com/portal-co/os-emulation.git" }
 paste = "1.0.15"
+os-async = { git = "https://github.com/portal-co/os-emulation.git", optional = true }
 either = { workspace = true, optional = true }
 wasmparser = { workspace = true, optional = true }
