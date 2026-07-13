@@ -10,3 +10,7 @@ description.workspace = true
 paste = "1.0.15"
 either.workspace = true
 vane-target-core = { path = "../vane-target-core" }
+os-target-core = { git = "https://github.com/portal-co/os-emulation.git" }
+os-build = { git = "https://github.com/portal-co/os-emulation.git" }
+os-page-codegen = { git = "https://github.com/portal-co/os-emulation.git" }
+os-page = { git = "https://github.com/portal-co/os-emulation.git" }
