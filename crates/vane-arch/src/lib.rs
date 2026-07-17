@@ -11,7 +11,6 @@ macro_rules! gen_block {
     };
 }
 
-
 use alloc::{boxed::Box, collections::btree_map::BTreeMap};
 #[doc(hidden)]
 pub use core;
@@ -38,6 +37,11 @@ pub use vane_target_wasm::{JitOpcode, WasmJit, WasmJitCtx};
 pub mod arch;
 pub mod interp;
 pub mod template;
+
+#[cfg(feature = "target-js")]
+pub use template::{
+    CoreJSWithNames, VaneHostMethod, render_stack_to_js_with_names, validate_host_method_names,
+};
 
 /// Paging mode selector
 ///
@@ -417,7 +421,12 @@ impl os_page::GuestMemory for Mem {
         Ok(value)
     }
 
-    fn write(&mut self, addr: u64, width: os_page::AccessWidth, value: u64) -> Result<(), os_page::GuestFault> {
+    fn write(
+        &mut self,
+        addr: u64,
+        width: os_page::AccessWidth,
+        value: u64,
+    ) -> Result<(), os_page::GuestFault> {
         let n = match width {
             os_page::AccessWidth::W8 => 1,
             os_page::AccessWidth::W16 => 2,

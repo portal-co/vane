@@ -7,6 +7,79 @@ use crate::*;
 #[cfg(feature = "target-js")]
 use crate::{Flate, PagingMode};
 
+#[cfg(feature = "target-js")]
+use alloc::string::{String, ToString};
+#[cfg(feature = "target-js")]
+use portal_jit_host_names::{CanonicalHostMethodNames, HostMethodNames, PropertyAccess};
+
+#[cfg(feature = "target-js")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VaneHostMethod {
+    Registers,
+    RegisterCache,
+    JitCache,
+    Max64,
+    GetPage,
+    System,
+    Ecall,
+    RegRead,
+    RegWrite,
+    MemRead,
+    MemWrite,
+}
+
+#[cfg(feature = "target-js")]
+impl Display for VaneHostMethod {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Registers => "r",
+            Self::RegisterCache => "_r",
+            Self::JitCache => "p",
+            Self::Max64 => "f",
+            Self::GetPage => "get_page",
+            Self::System => "_sys",
+            Self::Ecall => "ecall",
+            Self::RegRead => "reg_read",
+            Self::RegWrite => "reg_write",
+            Self::MemRead => "mem_read",
+            Self::MemWrite => "mem_write",
+        })
+    }
+}
+
+#[cfg(feature = "target-js")]
+pub fn validate_host_method_names<N: HostMethodNames<VaneHostMethod>>(
+    names: &N,
+) -> Result<(), String> {
+    for method in [
+        VaneHostMethod::Registers,
+        VaneHostMethod::RegisterCache,
+        VaneHostMethod::JitCache,
+        VaneHostMethod::Max64,
+        VaneHostMethod::GetPage,
+        VaneHostMethod::System,
+        VaneHostMethod::Ecall,
+        VaneHostMethod::RegRead,
+        VaneHostMethod::RegWrite,
+        VaneHostMethod::MemRead,
+        VaneHostMethod::MemWrite,
+    ] {
+        names.property(method).map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "target-js")]
+fn host_member<N: HostMethodNames<VaneHostMethod>>(
+    names: &N,
+    method: VaneHostMethod,
+) -> alloc::string::String {
+    names
+        .property(method)
+        .expect("Vane host names must be validated")
+        .on("$")
+}
+
 /// A single named loop label.  Owned strings so the label map can be cloned
 /// cheaply without lifetime constraints on the containing types.
 #[derive(Clone)]
@@ -177,20 +250,30 @@ impl<'b> TemplateJit<'b> {
 /// to `await $.reg_read`/`$.reg_write`/`$.mem_read`/`$.mem_write` calls. It
 /// defaults to `false`, so existing callers see byte-identical output.
 #[cfg(feature = "target-js")]
-pub fn render_stack_to_js(
+pub fn render_stack_to_js_with_names<N: HostMethodNames<VaneHostMethod>>(
     ops: impl Iterator<Item = StackOp>,
     f: &mut Formatter<'_>,
     flate: &(dyn crate::Flate + '_),
     flags: Flags,
+    names: &N,
 ) -> core::fmt::Result {
+    validate_host_method_names(names).map_err(|_| core::fmt::Error)?;
+    let registers = host_member(names, VaneHostMethod::Registers);
+    let register_cache = host_member(names, VaneHostMethod::RegisterCache);
+    let jit_cache = host_member(names, VaneHostMethod::JitCache);
+    let reg_read = host_member(names, VaneHostMethod::RegRead);
+    let reg_write = host_member(names, VaneHostMethod::RegWrite);
+    let mem_read = host_member(names, VaneHostMethod::MemRead);
+    let mem_write = host_member(names, VaneHostMethod::MemWrite);
+    let ecall = host_member(names, VaneHostMethod::Ecall);
     let async_mem = flags.async_mem;
     let max64 = alloc::format!("{}", flate.flate("max64"));
     let max32 = alloc::format!("{}", flate.flate("max32"));
     let signed = alloc::format!("{}", flate.flate("signed"));
     let unsigned = alloc::format!("{}", flate.flate("unsigned"));
-    let data = alloc::format!("{}", flate.flate("data"));
 
-    let mut val:  alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+    let data = alloc::format!("{}", flate.flate("data"));
+    let mut val: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
     let mut lbls: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
     let mut tmp = 0usize;
 
@@ -202,7 +285,11 @@ pub fn render_stack_to_js(
             val.push(name);
         }};
     }
-    macro_rules! pop  { () => { val.pop().unwrap_or_default() }; }
+    macro_rules! pop {
+        () => {
+            val.pop().unwrap_or_default()
+        };
+    }
     macro_rules! pop2 {
         () => {{
             let b = val.pop().unwrap_or_default();
@@ -222,186 +309,356 @@ pub fn render_stack_to_js(
                 let label = lbls.pop().unwrap_or_default();
                 write!(f, "break {label};}}")?;
             }
-            StackOp::Br { label, .. } => { write!(f, "continue {label};")?; }
+            StackOp::Br { label, .. } => {
+                write!(f, "continue {label};")?;
+            }
             StackOp::IfBegin => {
                 let cond = pop!();
                 write!(f, "if({cond}!==0n){{")?;
             }
-            StackOp::IfElse => { write!(f, "}}else{{")?; }
-            StackOp::IfEnd  => { write!(f, "}}")?; }
+            StackOp::IfElse => {
+                write!(f, "}}else{{")?;
+            }
+            StackOp::IfEnd => {
+                write!(f, "}}")?;
+            }
 
             // ── Literals / registers ──────────────────────────────────────
-            StackOp::PushImm(v) => { push!(alloc::format!("{v}n")); }
+            StackOp::PushImm(v) => {
+                push!(alloc::format!("{v}n"));
+            }
             StackOp::LoadReg(r) => {
-                if r == 0 { push!("0n"); }
-                else if async_mem { push!(alloc::format!("(await $.reg_read({r}))")); }
-                else       { push!(alloc::format!("(($._r??=$.r)[`x{r}`]??=0n)")); }
+                if r == 0 {
+                    push!("0n");
+                } else if async_mem {
+                    push!(alloc::format!("(await {reg_read}({r}))"));
+                } else {
+                    push!(alloc::format!(
+                        "(({register_cache}??={registers})[`x{r}`]??=0n)"
+                    ));
+                }
             }
             StackOp::StoreReg(r) => {
                 let v = pop!();
-                if r != 0 && async_mem { write!(f, "await $.reg_write({r},{v});")?; }
-                else if r != 0         { write!(f, "(($._r??=$.r)[`x{r}`]={v});")?; }
+                if r != 0 && async_mem {
+                    write!(f, "await {reg_write}({r},{v});")?;
+                } else if r != 0 {
+                    write!(f, "(({register_cache}??={registers})[`x{r}`]={v});")?;
+                }
                 // x0 is hardwired zero — discard silently.
             }
 
             // ── 64-bit arithmetic ─────────────────────────────────────────
-            StackOp::Add64 => { let (a,b)=pop2!(); push!(alloc::format!("({a}+{b})&{max64}")); }
-            StackOp::Sub64 => { let (a,b)=pop2!(); push!(alloc::format!("({a}-{b})&{max64}")); }
-            StackOp::Mul64 => { let (a,b)=pop2!(); push!(alloc::format!("({a}*{b})&{max64}")); }
+            StackOp::Add64 => {
+                let (a, b) = pop2!();
+                push!(alloc::format!("({a}+{b})&{max64}"));
+            }
+            StackOp::Sub64 => {
+                let (a, b) = pop2!();
+                push!(alloc::format!("({a}-{b})&{max64}"));
+            }
+            StackOp::Mul64 => {
+                let (a, b) = pop2!();
+                push!(alloc::format!("({a}*{b})&{max64}"));
+            }
             StackOp::DivU64 => {
-                let (a,b)=pop2!();
+                let (a, b) = pop2!();
                 push!(alloc::format!("{b}===0n?{unsigned}(-1n):({a}/{b})&{max64}"));
             }
             StackOp::DivS64 => {
-                let (a,b)=pop2!();
-                push!(alloc::format!("{b}===0n?{unsigned}(-1n):{unsigned}({signed}({a})/{signed}({b}))&{max64}"));
+                let (a, b) = pop2!();
+                push!(alloc::format!(
+                    "{b}===0n?{unsigned}(-1n):{unsigned}({signed}({a})/{signed}({b}))&{max64}"
+                ));
             }
             StackOp::RemU64 => {
-                let (a,b)=pop2!();
+                let (a, b) = pop2!();
                 push!(alloc::format!("{b}===0n?{unsigned}(-1n):({a}%{b})&{max64}"));
             }
             StackOp::RemS64 => {
-                let (a,b)=pop2!();
-                push!(alloc::format!("{b}===0n?{unsigned}(-1n):{unsigned}({signed}({a})%{signed}({b}))&{max64}"));
+                let (a, b) = pop2!();
+                push!(alloc::format!(
+                    "{b}===0n?{unsigned}(-1n):{unsigned}({signed}({a})%{signed}({b}))&{max64}"
+                ));
             }
-            StackOp::And64  => { let (a,b)=pop2!(); push!(alloc::format!("({a}&{b})&{max64}")); }
-            StackOp::Or64   => { let (a,b)=pop2!(); push!(alloc::format!("({a}|{b})&{max64}")); }
-            StackOp::Xor64  => { let (a,b)=pop2!(); push!(alloc::format!("({a}^{b})&{max64}")); }
-            StackOp::Shl64  => { let (a,b)=pop2!(); push!(alloc::format!("({a}<<{b})&{max64}")); }
-            StackOp::ShrU64 => { let (a,b)=pop2!(); push!(alloc::format!("({a}>>{b})&{max64}")); }
+            StackOp::And64 => {
+                let (a, b) = pop2!();
+                push!(alloc::format!("({a}&{b})&{max64}"));
+            }
+            StackOp::Or64 => {
+                let (a, b) = pop2!();
+                push!(alloc::format!("({a}|{b})&{max64}"));
+            }
+            StackOp::Xor64 => {
+                let (a, b) = pop2!();
+                push!(alloc::format!("({a}^{b})&{max64}"));
+            }
+            StackOp::Shl64 => {
+                let (a, b) = pop2!();
+                push!(alloc::format!("({a}<<{b})&{max64}"));
+            }
+            StackOp::ShrU64 => {
+                let (a, b) = pop2!();
+                push!(alloc::format!("({a}>>{b})&{max64}"));
+            }
             StackOp::ShrS64 => {
-                let (a,b)=pop2!();
-                push!(alloc::format!("{unsigned}({signed}({a})>>{signed}({b}))&{max64}"));
+                let (a, b) = pop2!();
+                push!(alloc::format!(
+                    "{unsigned}({signed}({a})>>{signed}({b}))&{max64}"
+                ));
             }
             StackOp::MulHU64 => {
-                let (a,b)=pop2!();
+                let (a, b) = pop2!();
                 push!(alloc::format!("(({a}*{b})>>64n)&{max64}"));
             }
             StackOp::MulHSU64 => {
-                let (a,b)=pop2!();
-                push!(alloc::format!("{unsigned}(({signed}({a})*{b})>>64n)&{max64}"));
+                let (a, b) = pop2!();
+                push!(alloc::format!(
+                    "{unsigned}(({signed}({a})*{b})>>64n)&{max64}"
+                ));
             }
             StackOp::MulHS64 => {
-                let (a,b)=pop2!();
-                push!(alloc::format!("{unsigned}(({signed}({a})*{signed}({b}))>>64n)&{max64}"));
+                let (a, b) = pop2!();
+                push!(alloc::format!(
+                    "{unsigned}(({signed}({a})*{signed}({b}))>>64n)&{max64}"
+                ));
             }
 
             // ── 32-bit arithmetic (result sign-extended to i64) ───────────
             StackOp::Add32 => {
-                let (a,b)=pop2!();
+                let (a, b) = pop2!();
                 push!(alloc::format!("{unsigned}(BigInt.asIntN(32,{a}+{b}))"));
             }
             StackOp::Sub32 => {
-                let (a,b)=pop2!();
+                let (a, b) = pop2!();
                 push!(alloc::format!("{unsigned}(BigInt.asIntN(32,{a}-{b}))"));
             }
             StackOp::Mul32 => {
-                let (a,b)=pop2!();
-                push!(alloc::format!("{unsigned}(BigInt.asIntN(32,({a}&{max32})*({b}&{max32})))"));
+                let (a, b) = pop2!();
+                push!(alloc::format!(
+                    "{unsigned}(BigInt.asIntN(32,({a}&{max32})*({b}&{max32})))"
+                ));
             }
             StackOp::DivU32 => {
-                let (a,b)=pop2!();
-                push!(alloc::format!("{b}===0n?{unsigned}(-1n):{unsigned}(BigInt.asIntN(32,({a}&{max32})/({b}&{max32})))"));
+                let (a, b) = pop2!();
+                push!(alloc::format!(
+                    "{b}===0n?{unsigned}(-1n):{unsigned}(BigInt.asIntN(32,({a}&{max32})/({b}&{max32})))"
+                ));
             }
             StackOp::DivS32 => {
-                let (a,b)=pop2!();
-                push!(alloc::format!("{b}===0n?{unsigned}(-1n):{unsigned}(BigInt.asIntN(32,{signed}({a}&{max32})/{signed}({b}&{max32})))"));
+                let (a, b) = pop2!();
+                push!(alloc::format!(
+                    "{b}===0n?{unsigned}(-1n):{unsigned}(BigInt.asIntN(32,{signed}({a}&{max32})/{signed}({b}&{max32})))"
+                ));
             }
             StackOp::RemU32 => {
-                let (a,b)=pop2!();
-                push!(alloc::format!("{b}===0n?{unsigned}(-1n):{unsigned}(BigInt.asIntN(32,({a}&{max32})%({b}&{max32})))"));
+                let (a, b) = pop2!();
+                push!(alloc::format!(
+                    "{b}===0n?{unsigned}(-1n):{unsigned}(BigInt.asIntN(32,({a}&{max32})%({b}&{max32})))"
+                ));
             }
             StackOp::RemS32 => {
-                let (a,b)=pop2!();
-                push!(alloc::format!("{b}===0n?{unsigned}(-1n):{unsigned}(BigInt.asIntN(32,{signed}({a}&{max32})%{signed}({b}&{max32})))"));
+                let (a, b) = pop2!();
+                push!(alloc::format!(
+                    "{b}===0n?{unsigned}(-1n):{unsigned}(BigInt.asIntN(32,{signed}({a}&{max32})%{signed}({b}&{max32})))"
+                ));
             }
             StackOp::Shl32 => {
-                let (a,b)=pop2!();
-                push!(alloc::format!("{unsigned}(BigInt.asIntN(32,({a}&{max32})<<({b}&{max32})))"));
+                let (a, b) = pop2!();
+                push!(alloc::format!(
+                    "{unsigned}(BigInt.asIntN(32,({a}&{max32})<<({b}&{max32})))"
+                ));
             }
             StackOp::ShrU32 => {
-                let (a,b)=pop2!();
-                push!(alloc::format!("{unsigned}(BigInt.asIntN(32,({a}&{max32})>>({b}&{max32})))"));
+                let (a, b) = pop2!();
+                push!(alloc::format!(
+                    "{unsigned}(BigInt.asIntN(32,({a}&{max32})>>({b}&{max32})))"
+                ));
             }
             StackOp::ShrS32 => {
-                let (a,b)=pop2!();
-                push!(alloc::format!("{unsigned}(BigInt.asIntN(32,{signed}({a}&{max32})>>{signed}({b}&{max32})))"));
+                let (a, b) = pop2!();
+                push!(alloc::format!(
+                    "{unsigned}(BigInt.asIntN(32,{signed}({a}&{max32})>>{signed}({b}&{max32})))"
+                ));
             }
 
             // ── Conversions ───────────────────────────────────────────────
-            StackOp::Trunc32   => { let a=pop!(); push!(alloc::format!("({a}&{max32})")); }
-            StackOp::SignExt32 => { let a=pop!(); push!(alloc::format!("{unsigned}(BigInt.asIntN(32,{a}))")); }
-            StackOp::AsSigned64   => { let a=pop!(); push!(alloc::format!("{signed}({a})")); }
-            StackOp::AsUnsigned64 => { let a=pop!(); push!(alloc::format!("{unsigned}({a})")); }
+            StackOp::Trunc32 => {
+                let a = pop!();
+                push!(alloc::format!("({a}&{max32})"));
+            }
+            StackOp::SignExt32 => {
+                let a = pop!();
+                push!(alloc::format!("{unsigned}(BigInt.asIntN(32,{a}))"));
+            }
+            StackOp::AsSigned64 => {
+                let a = pop!();
+                push!(alloc::format!("{signed}({a})"));
+            }
+            StackOp::AsUnsigned64 => {
+                let a = pop!();
+                push!(alloc::format!("{unsigned}({a})"));
+            }
 
             // ── Comparisons (push 1n or 0n) ───────────────────────────────
-            StackOp::Eq64  => { let (a,b)=pop2!(); push!(alloc::format!("({a}==={b}?1n:0n)")); }
-            StackOp::Ne64  => { let (a,b)=pop2!(); push!(alloc::format!("({a}!=={b}?1n:0n)")); }
-            StackOp::LtU64 => { let (a,b)=pop2!(); push!(alloc::format!("({a}<{b}?1n:0n)")); }
-            StackOp::LtS64 => { let (a,b)=pop2!(); push!(alloc::format!("({signed}({a})<{signed}({b})?1n:0n)")); }
-            StackOp::GeU64 => { let (a,b)=pop2!(); push!(alloc::format!("({a}>={b}?1n:0n)")); }
-            StackOp::GeS64 => { let (a,b)=pop2!(); push!(alloc::format!("({signed}({a})>={signed}({b})?1n:0n)")); }
+            StackOp::Eq64 => {
+                let (a, b) = pop2!();
+                push!(alloc::format!("({a}==={b}?1n:0n)"));
+            }
+            StackOp::Ne64 => {
+                let (a, b) = pop2!();
+                push!(alloc::format!("({a}!=={b}?1n:0n)"));
+            }
+            StackOp::LtU64 => {
+                let (a, b) = pop2!();
+                push!(alloc::format!("({a}<{b}?1n:0n)"));
+            }
+            StackOp::LtS64 => {
+                let (a, b) = pop2!();
+                push!(alloc::format!("({signed}({a})<{signed}({b})?1n:0n)"));
+            }
+            StackOp::GeU64 => {
+                let (a, b) = pop2!();
+                push!(alloc::format!("({a}>={b}?1n:0n)"));
+            }
+            StackOp::GeS64 => {
+                let (a, b) = pop2!();
+                push!(alloc::format!("({signed}({a})>={signed}({b})?1n:0n)"));
+            }
 
             // ── Memory ────────────────────────────────────────────────────
-            StackOp::LoadMem { width, signed: is_signed } => {
+            StackOp::LoadMem {
+                width,
+                signed: is_signed,
+            } => {
                 let addr = pop!();
                 if async_mem {
-                    let width_bytes = match width { MemWidth::B1=>1, MemWidth::B2=>2, MemWidth::B4=>4, MemWidth::B8=>8 };
+                    let width_bytes = match width {
+                        MemWidth::B1 => 1,
+                        MemWidth::B2 => 2,
+                        MemWidth::B4 => 4,
+                        MemWidth::B8 => 8,
+                    };
                     let is_signed = if is_signed { "true" } else { "false" };
-                    push!(alloc::format!("(await $.mem_read(({addr})&{max64},{width_bytes},{is_signed}))"));
+                    push!(alloc::format!(
+                        "(await {mem_read}(({addr})&{max64},{width_bytes},{is_signed}))"
+                    ));
                 } else {
                     let expr = match (width, is_signed) {
-                        (MemWidth::B1, true)  => alloc::format!("{unsigned}(BigInt({data}(({addr})&{max64}).getInt8(0,true)))"),
-                        (MemWidth::B1, false) => alloc::format!("BigInt({data}(({addr})&{max64}).getUint8(0,true))"),
-                        (MemWidth::B2, true)  => alloc::format!("{unsigned}(BigInt({data}(({addr})&{max64}).getInt16(0,true)))"),
-                        (MemWidth::B2, false) => alloc::format!("BigInt({data}(({addr})&{max64}).getUint16(0,true))"),
-                        (MemWidth::B4, true)  => alloc::format!("{unsigned}(BigInt({data}(({addr})&{max64}).getInt32(0,true)))"),
-                        (MemWidth::B4, false) => alloc::format!("BigInt({data}(({addr})&{max64}).getUint32(0,true))"),
-                        (MemWidth::B8, _)     => alloc::format!("{data}(({addr})&{max64}).getBigUint64(0,true)"),
+                        (MemWidth::B1, true) => alloc::format!(
+                            "{unsigned}(BigInt({data}(({addr})&{max64}).getInt8(0,true)))"
+                        ),
+                        (MemWidth::B1, false) => {
+                            alloc::format!("BigInt({data}(({addr})&{max64}).getUint8(0,true))")
+                        }
+                        (MemWidth::B2, true) => alloc::format!(
+                            "{unsigned}(BigInt({data}(({addr})&{max64}).getInt16(0,true)))"
+                        ),
+                        (MemWidth::B2, false) => {
+                            alloc::format!("BigInt({data}(({addr})&{max64}).getUint16(0,true))")
+                        }
+                        (MemWidth::B4, true) => alloc::format!(
+                            "{unsigned}(BigInt({data}(({addr})&{max64}).getInt32(0,true)))"
+                        ),
+                        (MemWidth::B4, false) => {
+                            alloc::format!("BigInt({data}(({addr})&{max64}).getUint32(0,true))")
+                        }
+                        (MemWidth::B8, _) => {
+                            alloc::format!("{data}(({addr})&{max64}).getBigUint64(0,true)")
+                        }
                     };
                     push!(expr);
                 }
             }
             StackOp::StoreMem { width } => {
-                let v    = pop!();
+                let v = pop!();
                 let addr = pop!();
                 if async_mem {
-                    let width_bytes = match width { MemWidth::B1=>1, MemWidth::B2=>2, MemWidth::B4=>4, MemWidth::B8=>8 };
-                    write!(f, "await $.mem_write(({addr})&{max64},{width_bytes},{v});")?;
+                    let width_bytes = match width {
+                        MemWidth::B1 => 1,
+                        MemWidth::B2 => 2,
+                        MemWidth::B4 => 4,
+                        MemWidth::B8 => 8,
+                    };
+                    write!(f, "await {mem_write}(({addr})&{max64},{width_bytes},{v});")?;
                 } else {
                     match width {
-                        MemWidth::B1 => write!(f, "{data}(({addr})&{max64}).setUint8(0,Number({v}&{max32}),true);")?,
-                        MemWidth::B2 => write!(f, "{data}(({addr})&{max64}).setUint16(0,Number({v}&{max32}),true);")?,
-                        MemWidth::B4 => write!(f, "{data}(({addr})&{max64}).setUint32(0,Number({v}&{max32}),true);")?,
-                        MemWidth::B8 => write!(f, "{data}(({addr})&{max64}).setBigUint64(0,{v},true);")?,
+                        MemWidth::B1 => write!(
+                            f,
+                            "{data}(({addr})&{max64}).setUint8(0,Number({v}&{max32}),true);"
+                        )?,
+                        MemWidth::B2 => write!(
+                            f,
+                            "{data}(({addr})&{max64}).setUint16(0,Number({v}&{max32}),true);"
+                        )?,
+                        MemWidth::B4 => write!(
+                            f,
+                            "{data}(({addr})&{max64}).setUint32(0,Number({v}&{max32}),true);"
+                        )?,
+                        MemWidth::B8 => {
+                            write!(f, "{data}(({addr})&{max64}).setBigUint64(0,{v},true);")?
+                        }
                     }
                 }
             }
 
             // ── Side effects ──────────────────────────────────────────────
-            StackOp::Ecall     => { write!(f, "await $.ecall();")?; }
-            StackOp::Trap(msg) => { write!(f, "throw new TypeError(`{msg}`);")?; }
-            StackOp::TailCall  => {
+            StackOp::Ecall => {
+                write!(f, "await {ecall}();")?;
+            }
+            StackOp::Trap(msg) => {
+                write!(f, "throw new TypeError(`{msg}`);")?;
+            }
+            StackOp::TailCall => {
                 let addr = pop!();
                 write!(f, "return ()=>J({addr});")?;
             }
-            StackOp::Log(msg)  => { write!(f, "console.log(`{msg}`);")?; }
+            StackOp::Log(msg) => {
+                write!(f, "console.log(`{msg}`);")?;
+            }
 
             // ── Integrity check ───────────────────────────────────────────
-            StackOp::CheckCode { addr, expected, miss_label } => {
+            StackOp::CheckCode {
+                addr,
+                expected,
+                miss_label,
+            } => {
                 match expected.len() {
                     4 => {
-                        let v = u32::from_le_bytes([expected[0],expected[1],expected[2],expected[3]]);
-                        write!(f, "if({data}({addr}n).getUint32(0,true)!=={v}){{delete $.p[`{miss_label}`];return J({addr}n);}};")? }
+                        let v = u32::from_le_bytes([
+                            expected[0],
+                            expected[1],
+                            expected[2],
+                            expected[3],
+                        ]);
+                        write!(
+                            f,
+                            "if({data}({addr}n).getUint32(0,true)!=={v}){{delete {jit_cache}[`{miss_label}`];return J({addr}n);}};"
+                        )?
+                    }
                     2 => {
-                        let v = u16::from_le_bytes([expected[0],expected[1]]);
-                        write!(f, "if({data}({addr}n).getUint16(0,true)!=={v}){{delete $.p[`{miss_label}`];return J({addr}n);}};")? }
+                        let v = u16::from_le_bytes([expected[0], expected[1]]);
+                        write!(
+                            f,
+                            "if({data}({addr}n).getUint16(0,true)!=={v}){{delete {jit_cache}[`{miss_label}`];return J({addr}n);}};"
+                        )?
+                    }
                     _ => {} // unknown width — skip check
                 }
             }
         }
     }
     Ok(())
+}
+
+/// Render with Vane's canonical, zero-sized host-name scheme.
+pub fn render_stack_to_js(
+    ops: impl Iterator<Item = StackOp>,
+    f: &mut Formatter<'_>,
+    flate: &(dyn crate::Flate + '_),
+    flags: Flags,
+) -> core::fmt::Result {
+    render_stack_to_js_with_names(ops, f, flate, flags, &CanonicalHostMethodNames)
 }
 
 /// Render a `StackOp` stream to a sequence of WASM opcodes.
@@ -421,97 +678,240 @@ pub fn render_stack_to_wasm<'a>(
                 // ── Control flow ──────────────────────────────────────────
                 StackOp::LoopBegin { .. } => {
                     yield JitOpcode::Operator {
-                        op: Operator::Loop { blockty: wasmparser::BlockType::Empty },
+                        op: Operator::Loop {
+                            blockty: wasmparser::BlockType::Empty,
+                        },
                     };
                 }
-                StackOp::LoopEnd => { yield JitOpcode::Operator { op: Operator::End }; }
+                StackOp::LoopEnd => {
+                    yield JitOpcode::Operator { op: Operator::End };
+                }
                 StackOp::Br { relative_depth, .. } => {
                     // StackOp rel_depth counts loop boundaries only; WASM br
                     // counts all open blocks.  Subtract 1 (br 0 = current loop
                     // in StackOp means rel_depth 1), then add if_depth.
                     let wasm_depth = (relative_depth - 1) + if_depth;
-                    yield JitOpcode::Operator { op: Operator::Br { relative_depth: wasm_depth } };
+                    yield JitOpcode::Operator {
+                        op: Operator::Br {
+                            relative_depth: wasm_depth,
+                        },
+                    };
                 }
                 StackOp::IfBegin => {
                     // Convert i64 condition (0=false) to i32 for WASM if.
-                    yield JitOpcode::Operator { op: Operator::I64Const { value: 0 } };
-                    yield JitOpcode::Operator { op: Operator::I64Ne };
                     yield JitOpcode::Operator {
-                        op: Operator::If { blockty: wasmparser::BlockType::Empty },
+                        op: Operator::I64Const { value: 0 },
+                    };
+                    yield JitOpcode::Operator {
+                        op: Operator::I64Ne,
+                    };
+                    yield JitOpcode::Operator {
+                        op: Operator::If {
+                            blockty: wasmparser::BlockType::Empty,
+                        },
                     };
                     if_depth += 1;
                 }
-                StackOp::IfElse => { yield JitOpcode::Operator { op: Operator::Else }; }
-                StackOp::IfEnd  => {
+                StackOp::IfElse => {
+                    yield JitOpcode::Operator { op: Operator::Else };
+                }
+                StackOp::IfEnd => {
                     if_depth -= 1;
                     yield JitOpcode::Operator { op: Operator::End };
                 }
 
                 // ── Literals / registers ──────────────────────────────────
                 StackOp::PushImm(v) => {
-                    yield JitOpcode::Operator { op: Operator::I64Const { value: v as i64 } };
+                    yield JitOpcode::Operator {
+                        op: Operator::I64Const { value: v as i64 },
+                    };
                 }
                 StackOp::LoadReg(r) => {
-                    yield JitOpcode::Operator { op: Operator::GlobalGet { global_index: r as u32 } };
+                    yield JitOpcode::Operator {
+                        op: Operator::GlobalGet {
+                            global_index: r as u32,
+                        },
+                    };
                 }
                 StackOp::StoreReg(r) => {
                     if r == 0 {
                         yield JitOpcode::Operator { op: Operator::Drop };
                     } else {
-                        yield JitOpcode::Operator { op: Operator::GlobalSet { global_index: r as u32 } };
+                        yield JitOpcode::Operator {
+                            op: Operator::GlobalSet {
+                                global_index: r as u32,
+                            },
+                        };
                     }
                 }
 
                 // ── 64-bit arithmetic ─────────────────────────────────────
-                StackOp::Add64  => { yield JitOpcode::Operator { op: Operator::I64Add }; }
-                StackOp::Sub64  => { yield JitOpcode::Operator { op: Operator::I64Sub }; }
-                StackOp::Mul64  => { yield JitOpcode::Operator { op: Operator::I64Mul }; }
-                StackOp::DivU64 => { yield JitOpcode::Operator { op: Operator::I64DivU }; }
-                StackOp::DivS64 => { yield JitOpcode::Operator { op: Operator::I64DivS }; }
-                StackOp::RemU64 => { yield JitOpcode::Operator { op: Operator::I64RemU }; }
-                StackOp::RemS64 => { yield JitOpcode::Operator { op: Operator::I64RemS }; }
-                StackOp::And64  => { yield JitOpcode::Operator { op: Operator::I64And }; }
-                StackOp::Or64   => { yield JitOpcode::Operator { op: Operator::I64Or }; }
-                StackOp::Xor64  => { yield JitOpcode::Operator { op: Operator::I64Xor }; }
-                StackOp::Shl64  => { yield JitOpcode::Operator { op: Operator::I64Shl }; }
-                StackOp::ShrU64 => { yield JitOpcode::Operator { op: Operator::I64ShrU }; }
-                StackOp::ShrS64 => { yield JitOpcode::Operator { op: Operator::I64ShrS }; }
+                StackOp::Add64 => {
+                    yield JitOpcode::Operator {
+                        op: Operator::I64Add,
+                    };
+                }
+                StackOp::Sub64 => {
+                    yield JitOpcode::Operator {
+                        op: Operator::I64Sub,
+                    };
+                }
+                StackOp::Mul64 => {
+                    yield JitOpcode::Operator {
+                        op: Operator::I64Mul,
+                    };
+                }
+                StackOp::DivU64 => {
+                    yield JitOpcode::Operator {
+                        op: Operator::I64DivU,
+                    };
+                }
+                StackOp::DivS64 => {
+                    yield JitOpcode::Operator {
+                        op: Operator::I64DivS,
+                    };
+                }
+                StackOp::RemU64 => {
+                    yield JitOpcode::Operator {
+                        op: Operator::I64RemU,
+                    };
+                }
+                StackOp::RemS64 => {
+                    yield JitOpcode::Operator {
+                        op: Operator::I64RemS,
+                    };
+                }
+                StackOp::And64 => {
+                    yield JitOpcode::Operator {
+                        op: Operator::I64And,
+                    };
+                }
+                StackOp::Or64 => {
+                    yield JitOpcode::Operator {
+                        op: Operator::I64Or,
+                    };
+                }
+                StackOp::Xor64 => {
+                    yield JitOpcode::Operator {
+                        op: Operator::I64Xor,
+                    };
+                }
+                StackOp::Shl64 => {
+                    yield JitOpcode::Operator {
+                        op: Operator::I64Shl,
+                    };
+                }
+                StackOp::ShrU64 => {
+                    yield JitOpcode::Operator {
+                        op: Operator::I64ShrU,
+                    };
+                }
+                StackOp::ShrS64 => {
+                    yield JitOpcode::Operator {
+                        op: Operator::I64ShrS,
+                    };
+                }
 
                 // ── Comparisons (i32 result extended to i64) ──────────────
-                StackOp::Eq64  => { yield JitOpcode::Operator{op:Operator::I64Eq};  yield JitOpcode::Operator{op:Operator::I64ExtendI32U}; }
-                StackOp::Ne64  => { yield JitOpcode::Operator{op:Operator::I64Ne};  yield JitOpcode::Operator{op:Operator::I64ExtendI32U}; }
-                StackOp::LtU64 => { yield JitOpcode::Operator{op:Operator::I64LtU}; yield JitOpcode::Operator{op:Operator::I64ExtendI32U}; }
-                StackOp::LtS64 => { yield JitOpcode::Operator{op:Operator::I64LtS}; yield JitOpcode::Operator{op:Operator::I64ExtendI32U}; }
-                StackOp::GeU64 => { yield JitOpcode::Operator{op:Operator::I64GeU}; yield JitOpcode::Operator{op:Operator::I64ExtendI32U}; }
-                StackOp::GeS64 => { yield JitOpcode::Operator{op:Operator::I64GeS}; yield JitOpcode::Operator{op:Operator::I64ExtendI32U}; }
+                StackOp::Eq64 => {
+                    yield JitOpcode::Operator {
+                        op: Operator::I64Eq,
+                    };
+                    yield JitOpcode::Operator {
+                        op: Operator::I64ExtendI32U,
+                    };
+                }
+                StackOp::Ne64 => {
+                    yield JitOpcode::Operator {
+                        op: Operator::I64Ne,
+                    };
+                    yield JitOpcode::Operator {
+                        op: Operator::I64ExtendI32U,
+                    };
+                }
+                StackOp::LtU64 => {
+                    yield JitOpcode::Operator {
+                        op: Operator::I64LtU,
+                    };
+                    yield JitOpcode::Operator {
+                        op: Operator::I64ExtendI32U,
+                    };
+                }
+                StackOp::LtS64 => {
+                    yield JitOpcode::Operator {
+                        op: Operator::I64LtS,
+                    };
+                    yield JitOpcode::Operator {
+                        op: Operator::I64ExtendI32U,
+                    };
+                }
+                StackOp::GeU64 => {
+                    yield JitOpcode::Operator {
+                        op: Operator::I64GeU,
+                    };
+                    yield JitOpcode::Operator {
+                        op: Operator::I64ExtendI32U,
+                    };
+                }
+                StackOp::GeS64 => {
+                    yield JitOpcode::Operator {
+                        op: Operator::I64GeS,
+                    };
+                    yield JitOpcode::Operator {
+                        op: Operator::I64ExtendI32U,
+                    };
+                }
 
                 // ── Conversions ───────────────────────────────────────────
                 StackOp::Trunc32 => {
-                    yield JitOpcode::Operator { op: Operator::I32WrapI64 };
-                    yield JitOpcode::Operator { op: Operator::I64ExtendI32U };
+                    yield JitOpcode::Operator {
+                        op: Operator::I32WrapI64,
+                    };
+                    yield JitOpcode::Operator {
+                        op: Operator::I64ExtendI32U,
+                    };
                 }
                 StackOp::SignExt32 => {
-                    yield JitOpcode::Operator { op: Operator::I32WrapI64 };
-                    yield JitOpcode::Operator { op: Operator::I64ExtendI32S };
+                    yield JitOpcode::Operator {
+                        op: Operator::I32WrapI64,
+                    };
+                    yield JitOpcode::Operator {
+                        op: Operator::I64ExtendI32S,
+                    };
                 }
                 // No-ops in WASM (i64 is two's-complement throughout).
                 StackOp::AsSigned64 | StackOp::AsUnsigned64 => {}
 
                 // ── High-word multiplies / 32-bit arithmetic (stubs) ──────
                 // These require local-variable management not yet implemented.
-                StackOp::MulHU64 | StackOp::MulHSU64 | StackOp::MulHS64
-                | StackOp::Add32 | StackOp::Sub32 | StackOp::Mul32
-                | StackOp::DivU32 | StackOp::DivS32
-                | StackOp::RemU32 | StackOp::RemS32
-                | StackOp::Shl32  | StackOp::ShrU32 | StackOp::ShrS32 => {
-                    yield JitOpcode::Operator { op: Operator::Unreachable };
+                StackOp::MulHU64
+                | StackOp::MulHSU64
+                | StackOp::MulHS64
+                | StackOp::Add32
+                | StackOp::Sub32
+                | StackOp::Mul32
+                | StackOp::DivU32
+                | StackOp::DivS32
+                | StackOp::RemU32
+                | StackOp::RemS32
+                | StackOp::Shl32
+                | StackOp::ShrU32
+                | StackOp::ShrS32 => {
+                    yield JitOpcode::Operator {
+                        op: Operator::Unreachable,
+                    };
                 }
 
                 // ── Memory / side-effects (stubs) ─────────────────────────
-                StackOp::LoadMem { .. } | StackOp::StoreMem { .. }
-                | StackOp::Ecall | StackOp::TailCall
-                | StackOp::Trap(_) | StackOp::CheckCode { .. } => {
-                    yield JitOpcode::Operator { op: Operator::Unreachable };
+                StackOp::LoadMem { .. }
+                | StackOp::StoreMem { .. }
+                | StackOp::Ecall
+                | StackOp::TailCall
+                | StackOp::Trap(_)
+                | StackOp::CheckCode { .. } => {
+                    yield JitOpcode::Operator {
+                        op: Operator::Unreachable,
+                    };
                 }
                 // Log is a diagnostic hint — no WASM equivalent.
                 StackOp::Log(_) => {}
@@ -536,6 +936,80 @@ pub struct CoreJS<'a> {
     pub content: &'a (dyn Display + 'a),
     pub flate: &'a (dyn Flate + 'a),
     pub flags: Flags,
+}
+
+#[cfg(feature = "target-js")]
+pub struct CoreJSWithNames<'a, N> {
+    pub content: &'a (dyn Display + 'a),
+    pub flate: &'a (dyn Flate + 'a),
+    pub flags: Flags,
+    pub names: N,
+}
+
+/// A name-configurable wrapper around [`CoreJS`].  It resolves all `$` ABI
+/// accesses while compiling the wrapper; the generated function retains only
+/// direct or safely escaped member expressions.
+#[cfg(feature = "target-js")]
+impl<'a, N: HostMethodNames<VaneHostMethod>> Display for CoreJSWithNames<'a, N> {
+    fn fmt(&self, fmt: &mut Formatter<'_>) -> core::fmt::Result {
+        validate_host_method_names(&self.names).map_err(|_| core::fmt::Error)?;
+        let canonical = alloc::format!(
+            "{}",
+            CoreJS {
+                content: self.content,
+                flate: self.flate,
+                flags: self.flags,
+            }
+        );
+        let source = rewrite_core_js_host_members(&canonical, &self.names);
+        fmt.write_str(&source)
+    }
+}
+
+#[cfg(feature = "target-js")]
+fn rewrite_core_js_host_members<N: HostMethodNames<VaneHostMethod>>(
+    source: &str,
+    names: &N,
+) -> alloc::string::String {
+    // One left-to-right pass is essential: a mapped spelling may itself equal
+    // a different canonical spelling and must not be rewritten twice.
+    let replacements = [
+        ("$._sys", VaneHostMethod::System),
+        ("$.get_page", VaneHostMethod::GetPage),
+        ("$.f", VaneHostMethod::Max64),
+    ];
+    let mut rest = source;
+    let mut out = alloc::string::String::with_capacity(source.len());
+    while !rest.is_empty() {
+        let next = replacements
+            .iter()
+            .filter_map(|(needle, method)| rest.find(needle).map(|at| (at, *needle, *method)))
+            .min_by_key(|(at, _, _)| *at);
+        let Some((at, needle, method)) = next else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..at]);
+        out.push_str(&host_member(names, method));
+        rest = &rest[at + needle.len()..];
+    }
+    out
+}
+
+#[cfg(feature = "target-js")]
+impl<'a> CoreJS<'a> {
+    /// Attach a custom, compile-time-resolved host-name scheme.
+    pub fn with_names<N: HostMethodNames<VaneHostMethod>>(
+        self,
+        names: N,
+    ) -> CoreJSWithNames<'a, N> {
+        CoreJSWithNames {
+            content: self.content,
+            flate: self.flate,
+            flags: self.flags,
+            names,
+        }
+    }
 }
 
 #[cfg(feature = "target-js")]
@@ -748,9 +1222,14 @@ mod async_mem_tests {
             StackOp::Add64,
             StackOp::StoreReg(3),
             StackOp::LoadReg(4),
-            StackOp::LoadMem { width: MemWidth::B8, signed: false },
+            StackOp::LoadMem {
+                width: MemWidth::B8,
+                signed: false
+            },
             StackOp::LoadReg(5),
-            StackOp::StoreMem { width: MemWidth::B4 },
+            StackOp::StoreMem {
+                width: MemWidth::B4
+            },
             StackOp::LoadReg(0),
             StackOp::StoreReg(0),
         ]
@@ -759,16 +1238,28 @@ mod async_mem_tests {
     #[test]
     fn async_mem_off_matches_existing_sync_codegen() {
         let out = render(sample_ops(), Flags::default());
-        assert!(out.contains("$._r??=$.r"), "sync register access should be untouched: {out}");
-        assert!(out.contains(".getBigUint64(0,true)"), "sync mem load should be untouched: {out}");
-        assert!(out.contains(".setUint32(0,"), "sync mem store should be untouched: {out}");
+        assert!(
+            out.contains("$._r??=$.r"),
+            "sync register access should be untouched: {out}"
+        );
+        assert!(
+            out.contains(".getBigUint64(0,true)"),
+            "sync mem load should be untouched: {out}"
+        );
+        assert!(
+            out.contains(".setUint32(0,"),
+            "sync mem store should be untouched: {out}"
+        );
         assert!(!out.contains("await $.reg_read"));
         assert!(!out.contains("await $.mem_read"));
     }
 
     #[test]
     fn async_mem_on_awaits_reg_and_mem_ops_only() {
-        let flags = Flags { async_mem: true, ..Default::default() };
+        let flags = Flags {
+            async_mem: true,
+            ..Default::default()
+        };
         let out = render(sample_ops(), flags);
         assert!(out.contains("await $.reg_read(1)"));
         assert!(out.contains("await $.reg_read(2)"));
@@ -781,13 +1272,75 @@ mod async_mem_tests {
     }
 
     #[test]
+    fn custom_names_are_resolved_into_async_memory_source() {
+        use portal_jit_host_names::MappedHostMethodNames;
+
+        let names = MappedHostMethodNames::new([
+            ("r".into(), "a".into()),
+            ("_r".into(), "b".into()),
+            ("p".into(), "c".into()),
+            ("f".into(), "d".into()),
+            ("get_page".into(), "e".into()),
+            ("_sys".into(), "f".into()),
+            ("ecall".into(), "g".into()),
+            ("reg_read".into(), "not-a-name".into()),
+            ("reg_write".into(), "i".into()),
+            ("mem_read".into(), "j".into()),
+            ("mem_write".into(), "k".into()),
+        ]);
+        struct W(
+            RefCell<alloc::vec::Vec<StackOp>>,
+            Flags,
+            MappedHostMethodNames,
+        );
+        impl Display for W {
+            fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+                let flate = crate::DebugFlate::default();
+                render_stack_to_js_with_names(
+                    self.0.borrow_mut().drain(..),
+                    f,
+                    &flate,
+                    self.1,
+                    &self.2,
+                )
+            }
+        }
+        let out = alloc::format!(
+            "{}",
+            W(
+                RefCell::new(alloc::vec![StackOp::LoadReg(1), StackOp::Ecall]),
+                Flags {
+                    async_mem: true,
+                    ..Default::default()
+                },
+                names,
+            )
+        );
+        assert!(out.contains("await $[\"not-a-name\"](1)"), "{out}");
+        assert!(out.contains("await $.g()"), "{out}");
+    }
+
+    #[test]
     fn async_mem_flag_leaves_non_mem_ops_byte_identical() {
         // Ops that never touch registers/memory should render identically
         // regardless of async_mem — only LoadReg/StoreReg/LoadMem/StoreMem
         // sites are allowed to change shape.
-        let arith = || alloc::vec![StackOp::PushImm(1), StackOp::PushImm(2), StackOp::Add64, StackOp::Trunc32];
+        let arith = || {
+            alloc::vec![
+                StackOp::PushImm(1),
+                StackOp::PushImm(2),
+                StackOp::Add64,
+                StackOp::Trunc32
+            ]
+        };
         let off = render(arith(), Flags::default());
-        let on = render(arith(), Flags { async_mem: true, ..Default::default() });
+        let on = render(
+            arith(),
+            Flags {
+                async_mem: true,
+                ..Default::default()
+            },
+        );
         assert_eq!(off, on);
     }
 }

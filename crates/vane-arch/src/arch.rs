@@ -1,4 +1,3 @@
-
 // ---- feature-gate helper macros ----------------------------------------
 //
 // These macros are defined *here* in vane-arch, so the `cfg` check is

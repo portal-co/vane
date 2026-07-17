@@ -164,9 +164,21 @@ pub fn interpret(ops: &[StackOp], host: &mut impl StackHost) -> Exit {
             }
 
             // ── 64-bit arithmetic ─────────────────────────────────────────
-            StackOp::Add64 => { let (a, b) = pop2!(); val.push(a.wrapping_add(b)); ip += 1; }
-            StackOp::Sub64 => { let (a, b) = pop2!(); val.push(a.wrapping_sub(b)); ip += 1; }
-            StackOp::Mul64 => { let (a, b) = pop2!(); val.push(a.wrapping_mul(b)); ip += 1; }
+            StackOp::Add64 => {
+                let (a, b) = pop2!();
+                val.push(a.wrapping_add(b));
+                ip += 1;
+            }
+            StackOp::Sub64 => {
+                let (a, b) = pop2!();
+                val.push(a.wrapping_sub(b));
+                ip += 1;
+            }
+            StackOp::Mul64 => {
+                let (a, b) = pop2!();
+                val.push(a.wrapping_mul(b));
+                ip += 1;
+            }
             StackOp::DivU64 => {
                 let (a, b) = pop2!();
                 val.push(if b == 0 { u64::MAX } else { a / b });
@@ -174,7 +186,11 @@ pub fn interpret(ops: &[StackOp], host: &mut impl StackHost) -> Exit {
             }
             StackOp::DivS64 => {
                 let (a, b) = pop2!();
-                val.push(if b == 0 { u64::MAX } else { (a as i64).wrapping_div(b as i64) as u64 });
+                val.push(if b == 0 {
+                    u64::MAX
+                } else {
+                    (a as i64).wrapping_div(b as i64) as u64
+                });
                 ip += 1;
             }
             StackOp::RemU64 => {
@@ -186,12 +202,28 @@ pub fn interpret(ops: &[StackOp], host: &mut impl StackHost) -> Exit {
             }
             StackOp::RemS64 => {
                 let (a, b) = pop2!();
-                val.push(if b == 0 { u64::MAX } else { (a as i64).wrapping_rem(b as i64) as u64 });
+                val.push(if b == 0 {
+                    u64::MAX
+                } else {
+                    (a as i64).wrapping_rem(b as i64) as u64
+                });
                 ip += 1;
             }
-            StackOp::And64 => { let (a, b) = pop2!(); val.push(a & b); ip += 1; }
-            StackOp::Or64 => { let (a, b) = pop2!(); val.push(a | b); ip += 1; }
-            StackOp::Xor64 => { let (a, b) = pop2!(); val.push(a ^ b); ip += 1; }
+            StackOp::And64 => {
+                let (a, b) = pop2!();
+                val.push(a & b);
+                ip += 1;
+            }
+            StackOp::Or64 => {
+                let (a, b) = pop2!();
+                val.push(a | b);
+                ip += 1;
+            }
+            StackOp::Xor64 => {
+                let (a, b) = pop2!();
+                val.push(a ^ b);
+                ip += 1;
+            }
             StackOp::Shl64 => {
                 let (a, b) = pop2!();
                 val.push(a.wrapping_shl((b & 63) as u32));
@@ -224,9 +256,21 @@ pub fn interpret(ops: &[StackOp], host: &mut impl StackHost) -> Exit {
             }
 
             // ── 32-bit arithmetic (result sign-extended to i64) ───────────
-            StackOp::Add32 => { let (a, b) = pop2!(); val.push(sext32((a as u32).wrapping_add(b as u32))); ip += 1; }
-            StackOp::Sub32 => { let (a, b) = pop2!(); val.push(sext32((a as u32).wrapping_sub(b as u32))); ip += 1; }
-            StackOp::Mul32 => { let (a, b) = pop2!(); val.push(sext32((a as u32).wrapping_mul(b as u32))); ip += 1; }
+            StackOp::Add32 => {
+                let (a, b) = pop2!();
+                val.push(sext32((a as u32).wrapping_add(b as u32)));
+                ip += 1;
+            }
+            StackOp::Sub32 => {
+                let (a, b) = pop2!();
+                val.push(sext32((a as u32).wrapping_sub(b as u32)));
+                ip += 1;
+            }
+            StackOp::Mul32 => {
+                let (a, b) = pop2!();
+                val.push(sext32((a as u32).wrapping_mul(b as u32)));
+                ip += 1;
+            }
             StackOp::DivU32 => {
                 let (a, b) = pop2!();
                 let (a, b) = (a as u32, b as u32);
@@ -236,7 +280,11 @@ pub fn interpret(ops: &[StackOp], host: &mut impl StackHost) -> Exit {
             StackOp::DivS32 => {
                 let (a, b) = pop2!();
                 let (a, b) = (a as u32 as i32, b as u32 as i32);
-                val.push(if b == 0 { u64::MAX } else { sext32(a.wrapping_div(b) as u32) });
+                val.push(if b == 0 {
+                    u64::MAX
+                } else {
+                    sext32(a.wrapping_div(b) as u32)
+                });
                 ip += 1;
             }
             StackOp::RemU32 => {
@@ -248,7 +296,11 @@ pub fn interpret(ops: &[StackOp], host: &mut impl StackHost) -> Exit {
             StackOp::RemS32 => {
                 let (a, b) = pop2!();
                 let (a, b) = (a as u32 as i32, b as u32 as i32);
-                val.push(if b == 0 { u64::MAX } else { sext32(a.wrapping_rem(b) as u32) });
+                val.push(if b == 0 {
+                    u64::MAX
+                } else {
+                    sext32(a.wrapping_rem(b) as u32)
+                });
                 ip += 1;
             }
             StackOp::Shl32 => {
@@ -263,23 +315,65 @@ pub fn interpret(ops: &[StackOp], host: &mut impl StackHost) -> Exit {
             }
             StackOp::ShrS32 => {
                 let (a, b) = pop2!();
-                val.push(sext32(((a as u32 as i32).wrapping_shr(b as u32 & 31)) as u32));
+                val.push(sext32(
+                    ((a as u32 as i32).wrapping_shr(b as u32 & 31)) as u32,
+                ));
                 ip += 1;
             }
 
             // ── Conversions ───────────────────────────────────────────────
-            StackOp::Trunc32 => { let a = pop!(); val.push(a & 0xffff_ffff); ip += 1; }
-            StackOp::SignExt32 => { let a = pop!(); val.push(sext32(a as u32)); ip += 1; }
-            StackOp::AsSigned64 => { let a = pop!(); val.push(a); ip += 1; } // no-op: representation is bit-identical
-            StackOp::AsUnsigned64 => { let a = pop!(); val.push(a); ip += 1; }
+            StackOp::Trunc32 => {
+                let a = pop!();
+                val.push(a & 0xffff_ffff);
+                ip += 1;
+            }
+            StackOp::SignExt32 => {
+                let a = pop!();
+                val.push(sext32(a as u32));
+                ip += 1;
+            }
+            StackOp::AsSigned64 => {
+                let a = pop!();
+                val.push(a);
+                ip += 1;
+            } // no-op: representation is bit-identical
+            StackOp::AsUnsigned64 => {
+                let a = pop!();
+                val.push(a);
+                ip += 1;
+            }
 
             // ── Comparisons (push 1 or 0) ──────────────────────────────────
-            StackOp::Eq64 => { let (a, b) = pop2!(); val.push((a == b) as u64); ip += 1; }
-            StackOp::Ne64 => { let (a, b) = pop2!(); val.push((a != b) as u64); ip += 1; }
-            StackOp::LtU64 => { let (a, b) = pop2!(); val.push((a < b) as u64); ip += 1; }
-            StackOp::LtS64 => { let (a, b) = pop2!(); val.push(((a as i64) < (b as i64)) as u64); ip += 1; }
-            StackOp::GeU64 => { let (a, b) = pop2!(); val.push((a >= b) as u64); ip += 1; }
-            StackOp::GeS64 => { let (a, b) = pop2!(); val.push(((a as i64) >= (b as i64)) as u64); ip += 1; }
+            StackOp::Eq64 => {
+                let (a, b) = pop2!();
+                val.push((a == b) as u64);
+                ip += 1;
+            }
+            StackOp::Ne64 => {
+                let (a, b) = pop2!();
+                val.push((a != b) as u64);
+                ip += 1;
+            }
+            StackOp::LtU64 => {
+                let (a, b) = pop2!();
+                val.push((a < b) as u64);
+                ip += 1;
+            }
+            StackOp::LtS64 => {
+                let (a, b) = pop2!();
+                val.push(((a as i64) < (b as i64)) as u64);
+                ip += 1;
+            }
+            StackOp::GeU64 => {
+                let (a, b) = pop2!();
+                val.push((a >= b) as u64);
+                ip += 1;
+            }
+            StackOp::GeS64 => {
+                let (a, b) = pop2!();
+                val.push(((a as i64) >= (b as i64)) as u64);
+                ip += 1;
+            }
 
             // ── Memory ────────────────────────────────────────────────────
             StackOp::LoadMem { width, signed } => {
@@ -313,8 +407,15 @@ pub fn interpret(ops: &[StackOp], host: &mut impl StackHost) -> Exit {
             }
 
             // ── Integrity check ─────────────────────────────────────────────
-            StackOp::CheckCode { addr, expected, miss_label: _ } => {
-                let matches = expected.iter().enumerate().all(|(i, b)| host.byte(addr + i as u64) == *b);
+            StackOp::CheckCode {
+                addr,
+                expected,
+                miss_label: _,
+            } => {
+                let matches = expected
+                    .iter()
+                    .enumerate()
+                    .all(|(i, b)| host.byte(addr + i as u64) == *b);
                 if matches {
                     ip += 1;
                 } else {
@@ -379,17 +480,29 @@ impl<'a, C: os_async::AsyncCtx + ?Sized, O: os_async::AsyncOS<C> + ?Sized> Async
             MemWidth::B1 => {
                 let mut v = 0u8;
                 self.ctx.read(addr, &mut v).await;
-                if signed { v as i8 as i64 as u64 } else { v as u64 }
+                if signed {
+                    v as i8 as i64 as u64
+                } else {
+                    v as u64
+                }
             }
             MemWidth::B2 => {
                 let mut v = 0u16;
                 self.ctx.read(addr, &mut v).await;
-                if signed { v as i16 as i64 as u64 } else { v as u64 }
+                if signed {
+                    v as i16 as i64 as u64
+                } else {
+                    v as u64
+                }
             }
             MemWidth::B4 => {
                 let mut v = 0u32;
                 self.ctx.read(addr, &mut v).await;
-                if signed { v as i32 as i64 as u64 } else { v as u64 }
+                if signed {
+                    v as i32 as i64 as u64
+                } else {
+                    v as u64
+                }
             }
             MemWidth::B8 => {
                 let mut v = 0u64;
@@ -504,9 +617,21 @@ pub async fn interpret_async(ops: &[StackOp], host: &mut impl AsyncStackHost) ->
                 }
                 ip += 1;
             }
-            StackOp::Add64 => { let (a, b) = pop2!(); val.push(a.wrapping_add(b)); ip += 1; }
-            StackOp::Sub64 => { let (a, b) = pop2!(); val.push(a.wrapping_sub(b)); ip += 1; }
-            StackOp::Mul64 => { let (a, b) = pop2!(); val.push(a.wrapping_mul(b)); ip += 1; }
+            StackOp::Add64 => {
+                let (a, b) = pop2!();
+                val.push(a.wrapping_add(b));
+                ip += 1;
+            }
+            StackOp::Sub64 => {
+                let (a, b) = pop2!();
+                val.push(a.wrapping_sub(b));
+                ip += 1;
+            }
+            StackOp::Mul64 => {
+                let (a, b) = pop2!();
+                val.push(a.wrapping_mul(b));
+                ip += 1;
+            }
             StackOp::DivU64 => {
                 let (a, b) = pop2!();
                 val.push(if b == 0 { u64::MAX } else { a / b });
@@ -514,7 +639,11 @@ pub async fn interpret_async(ops: &[StackOp], host: &mut impl AsyncStackHost) ->
             }
             StackOp::DivS64 => {
                 let (a, b) = pop2!();
-                val.push(if b == 0 { u64::MAX } else { (a as i64).wrapping_div(b as i64) as u64 });
+                val.push(if b == 0 {
+                    u64::MAX
+                } else {
+                    (a as i64).wrapping_div(b as i64) as u64
+                });
                 ip += 1;
             }
             StackOp::RemU64 => {
@@ -524,14 +653,38 @@ pub async fn interpret_async(ops: &[StackOp], host: &mut impl AsyncStackHost) ->
             }
             StackOp::RemS64 => {
                 let (a, b) = pop2!();
-                val.push(if b == 0 { u64::MAX } else { (a as i64).wrapping_rem(b as i64) as u64 });
+                val.push(if b == 0 {
+                    u64::MAX
+                } else {
+                    (a as i64).wrapping_rem(b as i64) as u64
+                });
                 ip += 1;
             }
-            StackOp::And64 => { let (a, b) = pop2!(); val.push(a & b); ip += 1; }
-            StackOp::Or64 => { let (a, b) = pop2!(); val.push(a | b); ip += 1; }
-            StackOp::Xor64 => { let (a, b) = pop2!(); val.push(a ^ b); ip += 1; }
-            StackOp::Shl64 => { let (a, b) = pop2!(); val.push(a.wrapping_shl((b & 63) as u32)); ip += 1; }
-            StackOp::ShrU64 => { let (a, b) = pop2!(); val.push(a.wrapping_shr((b & 63) as u32)); ip += 1; }
+            StackOp::And64 => {
+                let (a, b) = pop2!();
+                val.push(a & b);
+                ip += 1;
+            }
+            StackOp::Or64 => {
+                let (a, b) = pop2!();
+                val.push(a | b);
+                ip += 1;
+            }
+            StackOp::Xor64 => {
+                let (a, b) = pop2!();
+                val.push(a ^ b);
+                ip += 1;
+            }
+            StackOp::Shl64 => {
+                let (a, b) = pop2!();
+                val.push(a.wrapping_shl((b & 63) as u32));
+                ip += 1;
+            }
+            StackOp::ShrU64 => {
+                let (a, b) = pop2!();
+                val.push(a.wrapping_shr((b & 63) as u32));
+                ip += 1;
+            }
             StackOp::ShrS64 => {
                 let (a, b) = pop2!();
                 val.push(((a as i64).wrapping_shr((b & 63) as u32)) as u64);
@@ -552,9 +705,21 @@ pub async fn interpret_async(ops: &[StackOp], host: &mut impl AsyncStackHost) ->
                 val.push((((a as i64 as i128) * (b as i64 as i128)) >> 64) as u64);
                 ip += 1;
             }
-            StackOp::Add32 => { let (a, b) = pop2!(); val.push(sext32((a as u32).wrapping_add(b as u32))); ip += 1; }
-            StackOp::Sub32 => { let (a, b) = pop2!(); val.push(sext32((a as u32).wrapping_sub(b as u32))); ip += 1; }
-            StackOp::Mul32 => { let (a, b) = pop2!(); val.push(sext32((a as u32).wrapping_mul(b as u32))); ip += 1; }
+            StackOp::Add32 => {
+                let (a, b) = pop2!();
+                val.push(sext32((a as u32).wrapping_add(b as u32)));
+                ip += 1;
+            }
+            StackOp::Sub32 => {
+                let (a, b) = pop2!();
+                val.push(sext32((a as u32).wrapping_sub(b as u32)));
+                ip += 1;
+            }
+            StackOp::Mul32 => {
+                let (a, b) = pop2!();
+                val.push(sext32((a as u32).wrapping_mul(b as u32)));
+                ip += 1;
+            }
             StackOp::DivU32 => {
                 let (a, b) = pop2!();
                 let (a, b) = (a as u32, b as u32);
@@ -564,7 +729,11 @@ pub async fn interpret_async(ops: &[StackOp], host: &mut impl AsyncStackHost) ->
             StackOp::DivS32 => {
                 let (a, b) = pop2!();
                 let (a, b) = (a as u32 as i32, b as u32 as i32);
-                val.push(if b == 0 { u64::MAX } else { sext32(a.wrapping_div(b) as u32) });
+                val.push(if b == 0 {
+                    u64::MAX
+                } else {
+                    sext32(a.wrapping_div(b) as u32)
+                });
                 ip += 1;
             }
             StackOp::RemU32 => {
@@ -576,26 +745,80 @@ pub async fn interpret_async(ops: &[StackOp], host: &mut impl AsyncStackHost) ->
             StackOp::RemS32 => {
                 let (a, b) = pop2!();
                 let (a, b) = (a as u32 as i32, b as u32 as i32);
-                val.push(if b == 0 { u64::MAX } else { sext32(a.wrapping_rem(b) as u32) });
+                val.push(if b == 0 {
+                    u64::MAX
+                } else {
+                    sext32(a.wrapping_rem(b) as u32)
+                });
                 ip += 1;
             }
-            StackOp::Shl32 => { let (a, b) = pop2!(); val.push(sext32((a as u32).wrapping_shl(b as u32 & 31))); ip += 1; }
-            StackOp::ShrU32 => { let (a, b) = pop2!(); val.push(sext32((a as u32).wrapping_shr(b as u32 & 31))); ip += 1; }
+            StackOp::Shl32 => {
+                let (a, b) = pop2!();
+                val.push(sext32((a as u32).wrapping_shl(b as u32 & 31)));
+                ip += 1;
+            }
+            StackOp::ShrU32 => {
+                let (a, b) = pop2!();
+                val.push(sext32((a as u32).wrapping_shr(b as u32 & 31)));
+                ip += 1;
+            }
             StackOp::ShrS32 => {
                 let (a, b) = pop2!();
-                val.push(sext32(((a as u32 as i32).wrapping_shr(b as u32 & 31)) as u32));
+                val.push(sext32(
+                    ((a as u32 as i32).wrapping_shr(b as u32 & 31)) as u32,
+                ));
                 ip += 1;
             }
-            StackOp::Trunc32 => { let a = pop!(); val.push(a & 0xffff_ffff); ip += 1; }
-            StackOp::SignExt32 => { let a = pop!(); val.push(sext32(a as u32)); ip += 1; }
-            StackOp::AsSigned64 => { let a = pop!(); val.push(a); ip += 1; }
-            StackOp::AsUnsigned64 => { let a = pop!(); val.push(a); ip += 1; }
-            StackOp::Eq64 => { let (a, b) = pop2!(); val.push((a == b) as u64); ip += 1; }
-            StackOp::Ne64 => { let (a, b) = pop2!(); val.push((a != b) as u64); ip += 1; }
-            StackOp::LtU64 => { let (a, b) = pop2!(); val.push((a < b) as u64); ip += 1; }
-            StackOp::LtS64 => { let (a, b) = pop2!(); val.push(((a as i64) < (b as i64)) as u64); ip += 1; }
-            StackOp::GeU64 => { let (a, b) = pop2!(); val.push((a >= b) as u64); ip += 1; }
-            StackOp::GeS64 => { let (a, b) = pop2!(); val.push(((a as i64) >= (b as i64)) as u64); ip += 1; }
+            StackOp::Trunc32 => {
+                let a = pop!();
+                val.push(a & 0xffff_ffff);
+                ip += 1;
+            }
+            StackOp::SignExt32 => {
+                let a = pop!();
+                val.push(sext32(a as u32));
+                ip += 1;
+            }
+            StackOp::AsSigned64 => {
+                let a = pop!();
+                val.push(a);
+                ip += 1;
+            }
+            StackOp::AsUnsigned64 => {
+                let a = pop!();
+                val.push(a);
+                ip += 1;
+            }
+            StackOp::Eq64 => {
+                let (a, b) = pop2!();
+                val.push((a == b) as u64);
+                ip += 1;
+            }
+            StackOp::Ne64 => {
+                let (a, b) = pop2!();
+                val.push((a != b) as u64);
+                ip += 1;
+            }
+            StackOp::LtU64 => {
+                let (a, b) = pop2!();
+                val.push((a < b) as u64);
+                ip += 1;
+            }
+            StackOp::LtS64 => {
+                let (a, b) = pop2!();
+                val.push(((a as i64) < (b as i64)) as u64);
+                ip += 1;
+            }
+            StackOp::GeU64 => {
+                let (a, b) = pop2!();
+                val.push((a >= b) as u64);
+                ip += 1;
+            }
+            StackOp::GeS64 => {
+                let (a, b) = pop2!();
+                val.push(((a as i64) >= (b as i64)) as u64);
+                ip += 1;
+            }
             StackOp::LoadMem { width, signed } => {
                 let addr = pop!();
                 val.push(host.load_mem(addr, *width, *signed).await);
@@ -623,7 +846,11 @@ pub async fn interpret_async(ops: &[StackOp], host: &mut impl AsyncStackHost) ->
                 host.log(msg).await;
                 ip += 1;
             }
-            StackOp::CheckCode { addr, expected, miss_label: _ } => {
+            StackOp::CheckCode {
+                addr,
+                expected,
+                miss_label: _,
+            } => {
                 let mut matches = true;
                 for (i, b) in expected.iter().enumerate() {
                     if host.byte(addr + i as u64).await != *b {
@@ -691,7 +918,12 @@ mod tests {
     }
     impl TestHost {
         fn new() -> Self {
-            Self { regs: [0; 32], mem: Default::default(), ecalls: Vec::new(), logs: Vec::new() }
+            Self {
+                regs: [0; 32],
+                mem: Default::default(),
+                ecalls: Vec::new(),
+                logs: Vec::new(),
+            }
         }
     }
     impl StackHost for TestHost {
@@ -702,7 +934,12 @@ mod tests {
             self.regs[r as usize] = v;
         }
         fn load_mem(&mut self, addr: u64, width: MemWidth, signed: bool) -> u64 {
-            let n = match width { MemWidth::B1 => 1, MemWidth::B2 => 2, MemWidth::B4 => 4, MemWidth::B8 => 8 };
+            let n = match width {
+                MemWidth::B1 => 1,
+                MemWidth::B2 => 2,
+                MemWidth::B4 => 4,
+                MemWidth::B8 => 8,
+            };
             let mut bytes = [0u8; 8];
             for i in 0..n {
                 bytes[i] = *self.mem.get(&(addr + i as u64)).unwrap_or(&0);
@@ -716,7 +953,12 @@ mod tests {
             }
         }
         fn store_mem(&mut self, addr: u64, width: MemWidth, v: u64) {
-            let n = match width { MemWidth::B1 => 1, MemWidth::B2 => 2, MemWidth::B4 => 4, MemWidth::B8 => 8 };
+            let n = match width {
+                MemWidth::B1 => 1,
+                MemWidth::B2 => 2,
+                MemWidth::B4 => 4,
+                MemWidth::B8 => 8,
+            };
             for (i, b) in v.to_le_bytes().into_iter().take(n).enumerate() {
                 self.mem.insert(addr + i as u64, b);
             }
@@ -789,7 +1031,10 @@ mod tests {
             StackOp::StoreReg(1),
             StackOp::LoadReg(1),
             StackOp::IfBegin,
-            StackOp::Br { relative_depth: 1, label: "L".into() },
+            StackOp::Br {
+                relative_depth: 1,
+                label: "L".into(),
+            },
             StackOp::IfElse,
             StackOp::IfEnd,
             StackOp::LoopEnd,
@@ -837,9 +1082,14 @@ mod tests {
         let ops = vec![
             StackOp::PushImm(0x100), // addr
             StackOp::PushImm(0x1234),
-            StackOp::StoreMem { width: MemWidth::B2 },
+            StackOp::StoreMem {
+                width: MemWidth::B2,
+            },
             StackOp::PushImm(0x100),
-            StackOp::LoadMem { width: MemWidth::B2, signed: false },
+            StackOp::LoadMem {
+                width: MemWidth::B2,
+                signed: false,
+            },
             StackOp::StoreReg(5),
             StackOp::PushImm(0),
             StackOp::TailCall,
@@ -852,7 +1102,11 @@ mod tests {
     #[test]
     fn check_code_mismatch_tailcalls_to_addr() {
         let ops = vec![
-            StackOp::CheckCode { addr: 0x1000, expected: alloc::boxed::Box::from([0xAAu8, 0xBB, 0xCC, 0xDD]), miss_label: "x".into() },
+            StackOp::CheckCode {
+                addr: 0x1000,
+                expected: alloc::boxed::Box::from([0xAAu8, 0xBB, 0xCC, 0xDD]),
+                miss_label: "x".into(),
+            },
             StackOp::PushImm(0),
             StackOp::TailCall,
         ];
@@ -865,7 +1119,11 @@ mod tests {
     fn check_code_match_falls_through() {
         let expected = [0xAAu8, 0xBB, 0xCC, 0xDD];
         let ops = vec![
-            StackOp::CheckCode { addr: 0x1000, expected: alloc::boxed::Box::from(expected), miss_label: "x".into() },
+            StackOp::CheckCode {
+                addr: 0x1000,
+                expected: alloc::boxed::Box::from(expected),
+                miss_label: "x".into(),
+            },
             StackOp::PushImm(0x2000),
             StackOp::TailCall,
         ];
@@ -930,7 +1188,10 @@ mod async_tests {
     }
     impl AsyncTestHost {
         fn new() -> Self {
-            Self { regs: [0; 32], mem: Default::default() }
+            Self {
+                regs: [0; 32],
+                mem: Default::default(),
+            }
         }
     }
     impl AsyncStackHost for AsyncTestHost {
@@ -941,7 +1202,12 @@ mod async_tests {
             self.regs[r as usize] = v;
         }
         async fn load_mem(&mut self, addr: u64, width: MemWidth, _signed: bool) -> u64 {
-            let n = match width { MemWidth::B1 => 1, MemWidth::B2 => 2, MemWidth::B4 => 4, MemWidth::B8 => 8 };
+            let n = match width {
+                MemWidth::B1 => 1,
+                MemWidth::B2 => 2,
+                MemWidth::B4 => 4,
+                MemWidth::B8 => 8,
+            };
             let mut bytes = [0u8; 8];
             for i in 0..n {
                 bytes[i] = *self.mem.get(&(addr + i as u64)).unwrap_or(&0);
@@ -949,7 +1215,12 @@ mod async_tests {
             u64::from_le_bytes(bytes)
         }
         async fn store_mem(&mut self, addr: u64, width: MemWidth, v: u64) {
-            let n = match width { MemWidth::B1 => 1, MemWidth::B2 => 2, MemWidth::B4 => 4, MemWidth::B8 => 8 };
+            let n = match width {
+                MemWidth::B1 => 1,
+                MemWidth::B2 => 2,
+                MemWidth::B4 => 4,
+                MemWidth::B8 => 8,
+            };
             for (i, b) in v.to_le_bytes().into_iter().take(n).enumerate() {
                 self.mem.insert(addr + i as u64, b);
             }
@@ -960,7 +1231,9 @@ mod async_tests {
     }
 
     fn noop_waker() -> Waker {
-        fn clone(_: *const ()) -> RawWaker { RawWaker::new(core::ptr::null(), &VTABLE) }
+        fn clone(_: *const ()) -> RawWaker {
+            RawWaker::new(core::ptr::null(), &VTABLE)
+        }
         fn noop(_: *const ()) {}
         static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
         unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &VTABLE)) }

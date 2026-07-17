@@ -94,6 +94,13 @@ The submodule at `crates/vane/_tests/rv-corpus` must be checked out (`git submod
 
 The workspace sets `opt-level = "s"` in the release profile.
 
+## Configurable JIT host names
+
+Vane can compile JIT output for a consistently property-mangled `$` runtime
+object. Canonical code generation remains the default; use the documented
+name-aware rendering APIs only when the host uses a complete alternate scheme.
+See [`JIT_HOST_METHOD_NAMES.md`](JIT_HOST_METHOD_NAMES.md).
+
 ## Status
 
 - Interpreter: implemented and tested for RV64IM

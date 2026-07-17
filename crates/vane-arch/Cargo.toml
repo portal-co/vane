@@ -25,3 +25,4 @@ paste = "1.0.15"
 os-async = { git = "https://github.com/portal-co/os-emulation.git", optional = true }
 either = { workspace = true, optional = true }
 wasmparser = { workspace = true, optional = true }
+portal-jit-host-names = { path = "../../../codegen-utils/crates/host-method-names" }
