@@ -11,7 +11,8 @@ use core::{array, fmt::Formatter};
 
 use disarm64::decoder_full::{
     ADDSUB_IMM, ADDSUB_SHIFT, BRANCH_IMM, BRANCH_REG, COMPBRANCH, CONDBRANCH, CONDSEL, IC_SYSTEM,
-    LDST_POS, LOG_SHIFT, MOVEWIDE, Operation, PCRELADDR,
+    LDST_IMM9, LDST_POS, LDST_REGOFF, LDST_UNSCALED, LDSTPAIR_INDEXED, LDSTPAIR_OFF, LOG_SHIFT,
+    MOVEWIDE, Operation, PCRELADDR,
 };
 use vane_arch::template::TemplateJit;
 use vane_arch::{Heat, StackOp};
@@ -28,6 +29,10 @@ fn word_at(this: &TemplateJit<'_>) -> u32 {
 fn rd(word: u32) -> u8 {
     (word & 0x1f) as u8
 }
+fn rt2(word: u32) -> u8 {
+    ((word >> 10) & 0x1f) as u8
+}
+
 #[inline]
 fn rn(word: u32) -> u8 {
     ((word >> 5) & 0x1f) as u8
@@ -432,6 +437,170 @@ fn emit_addsub_imm(
     }
 }
 
+fn emit_regoff_mem(
+    ops: &mut Vec<StackOp>,
+    word: u32,
+    load: bool,
+    width: vane_arch::MemWidth,
+    signed: bool,
+) {
+    let scale = match width {
+        vane_arch::MemWidth::B1 => 0,
+        vane_arch::MemWidth::B2 => 1,
+        vane_arch::MemWidth::B4 => 2,
+        vane_arch::MemWidth::B8 => 3,
+    };
+    read_gpr(ops, rn(word), true);
+    read_gpr(ops, ((word >> 16) & 0x1f) as u8, false);
+    match (word >> 13) & 7 {
+        2 => {
+            ops.push(StackOp::PushImm(0xffff_ffff));
+            ops.push(StackOp::And64);
+        }
+        6 => ops.push(StackOp::SignExt32),
+        3 | 7 => {}
+        _ => unreachable!("invalid A64 register-offset extension"),
+    }
+    if word & (1 << 12) != 0 && scale != 0 {
+        ops.push(StackOp::PushImm(scale));
+        ops.push(StackOp::Shl64);
+    }
+    ops.push(StackOp::Add64);
+    if load {
+        ops.push(StackOp::LoadMem { width, signed });
+        if width == vane_arch::MemWidth::B4 && !signed {
+            ops.push(StackOp::Trunc32);
+        }
+        write_gpr(ops, rd(word), false);
+    } else {
+        read_gpr(ops, rd(word), false);
+        ops.push(StackOp::StoreMem { width });
+    }
+}
+
+fn emit_imm9_mem(
+    ops: &mut Vec<StackOp>,
+    word: u32,
+    load: bool,
+    width: vane_arch::MemWidth,
+    signed: bool,
+) {
+    let offset = signed_bits((word >> 12) & 0x1ff, 9) as u64;
+    let mode = (word >> 10) & 3; // 00 offset, 01 post-index, 11 pre-index
+    read_gpr(ops, rn(word), true);
+    ops.push(StackOp::StoreState(state::scratch('a')));
+    if mode == 3 {
+        ops.push(StackOp::LoadState(state::scratch('a')));
+        ops.push(StackOp::PushImm(offset));
+        ops.push(StackOp::Add64);
+        ops.push(StackOp::StoreState(state::scratch('a')));
+        ops.push(StackOp::LoadState(state::scratch('a')));
+        write_gpr(ops, rn(word), true);
+    }
+    ops.push(StackOp::LoadState(state::scratch('a')));
+    if load {
+        ops.push(StackOp::LoadMem { width, signed });
+        if width == vane_arch::MemWidth::B4 && !signed {
+            ops.push(StackOp::Trunc32);
+        }
+        write_gpr(ops, rd(word), false);
+    } else {
+        read_gpr(ops, rd(word), false);
+        ops.push(StackOp::StoreMem { width });
+    }
+    if mode == 1 {
+        ops.push(StackOp::LoadState(state::scratch('a')));
+        ops.push(StackOp::PushImm(offset));
+        ops.push(StackOp::Add64);
+        write_gpr(ops, rn(word), true);
+    }
+}
+
+fn emit_pair_mem(
+    ops: &mut Vec<StackOp>,
+    word: u32,
+    load: bool,
+    width: vane_arch::MemWidth,
+    signed: bool,
+    writeback: bool,
+    pre_index: bool,
+) {
+    let scale = match width {
+        vane_arch::MemWidth::B4 => 4,
+        vane_arch::MemWidth::B8 => 8,
+        _ => unreachable!("A64 integer pairs are word or doubleword"),
+    };
+    let offset = signed_bits((word >> 15) & 0x7f, 7) * scale;
+    read_gpr(ops, rn(word), true);
+    ops.push(StackOp::StoreState(state::scratch('b')));
+    if writeback && !pre_index {
+        // Post-index accesses the old base, then applies the displacement.
+        ops.push(StackOp::LoadState(state::scratch('b')));
+    } else {
+        ops.push(StackOp::LoadState(state::scratch('b')));
+        ops.push(StackOp::PushImm(offset as u64));
+        ops.push(StackOp::Add64);
+    }
+    ops.push(StackOp::StoreState(state::scratch('a')));
+    if writeback && pre_index {
+        ops.push(StackOp::LoadState(state::scratch('a')));
+        write_gpr(ops, rn(word), true);
+    }
+    if load {
+        ops.push(StackOp::LoadState(state::scratch('a')));
+        ops.push(StackOp::LoadMem { width, signed });
+        if width == vane_arch::MemWidth::B4 && !signed {
+            ops.push(StackOp::Trunc32);
+        }
+        write_gpr(ops, rd(word), false);
+        ops.push(StackOp::LoadState(state::scratch('a')));
+        ops.push(StackOp::PushImm(scale as u64));
+        ops.push(StackOp::Add64);
+        ops.push(StackOp::LoadMem { width, signed });
+        if width == vane_arch::MemWidth::B4 && !signed {
+            ops.push(StackOp::Trunc32);
+        }
+        write_gpr(ops, rt2(word), false);
+    } else {
+        ops.push(StackOp::LoadState(state::scratch('a')));
+        read_gpr(ops, rd(word), false);
+        ops.push(StackOp::StoreMem { width });
+        ops.push(StackOp::LoadState(state::scratch('a')));
+        ops.push(StackOp::PushImm(scale as u64));
+        ops.push(StackOp::Add64);
+        read_gpr(ops, rt2(word), false);
+        ops.push(StackOp::StoreMem { width });
+    }
+    if writeback && !pre_index {
+        ops.push(StackOp::LoadState(state::scratch('b')));
+        ops.push(StackOp::PushImm(offset as u64));
+        ops.push(StackOp::Add64);
+        write_gpr(ops, rn(word), true);
+    }
+}
+
+fn emit_signed_mem(
+    ops: &mut Vec<StackOp>,
+    word: u32,
+    load: bool,
+    width: vane_arch::MemWidth,
+    signed: bool,
+) {
+    read_gpr(ops, rn(word), true);
+    ops.push(StackOp::PushImm(signed_bits((word >> 12) & 0x1ff, 9) as u64));
+    ops.push(StackOp::Add64);
+    if load {
+        ops.push(StackOp::LoadMem { width, signed });
+        if width == vane_arch::MemWidth::B4 && !signed {
+            ops.push(StackOp::Trunc32);
+        }
+        write_gpr(ops, rd(word), false);
+    } else {
+        read_gpr(ops, rd(word), false);
+        ops.push(StackOp::StoreMem { width });
+    }
+}
+
 fn emit_pos_mem(
     ops: &mut Vec<StackOp>,
     word: u32,
@@ -602,6 +771,103 @@ fn a64_body(
             );
             emit_to(&mut ops, this, next, labels, depth);
         }
+        Operation::LDST_REGOFF(inner) => {
+            use vane_arch::MemWidth::{B1, B2, B4, B8};
+            let (word, load, width, signed) = match inner {
+                LDST_REGOFF::LDR_Rt_ADDR_REGOFF(v) => {
+                    (v.0, true, if v.0 >> 30 == 0b11 { B8 } else { B4 }, false)
+                }
+                LDST_REGOFF::STR_Rt_ADDR_REGOFF(v) => {
+                    (v.0, false, if v.0 >> 30 == 0b11 { B8 } else { B4 }, false)
+                }
+                LDST_REGOFF::LDRB_Rt_ADDR_REGOFF(v) => (v.0, true, B1, false),
+                LDST_REGOFF::STRB_Rt_ADDR_REGOFF(v) => (v.0, false, B1, false),
+                LDST_REGOFF::LDRH_Rt_ADDR_REGOFF(v) => (v.0, true, B2, false),
+                LDST_REGOFF::STRH_Rt_ADDR_REGOFF(v) => (v.0, false, B2, false),
+                LDST_REGOFF::LDRSB_Rt_ADDR_REGOFF(v) => (v.0, true, B1, true),
+                LDST_REGOFF::LDRSH_Rt_ADDR_REGOFF(v) => (v.0, true, B2, true),
+                LDST_REGOFF::LDRSW_Rt_ADDR_REGOFF(v) => (v.0, true, B4, true),
+                _ => return unsupported(&mut ops, word, "LDST_REGOFF"),
+            };
+            emit_regoff_mem(&mut ops, word, load, width, signed);
+            emit_to(&mut ops, this, next, labels, depth);
+        }
+        Operation::LDST_IMM9(inner) => {
+            use vane_arch::MemWidth::{B1, B2, B4, B8};
+            let (word, load, width, signed) = match inner {
+                LDST_IMM9::LDR_Rt_ADDR_SIMM9(v) => {
+                    (v.0, true, if v.0 >> 30 == 0b11 { B8 } else { B4 }, false)
+                }
+                LDST_IMM9::STR_Rt_ADDR_SIMM9(v) => {
+                    (v.0, false, if v.0 >> 30 == 0b11 { B8 } else { B4 }, false)
+                }
+                LDST_IMM9::LDRB_Rt_ADDR_SIMM9(v) => (v.0, true, B1, false),
+                LDST_IMM9::STRB_Rt_ADDR_SIMM9(v) => (v.0, false, B1, false),
+                LDST_IMM9::LDRH_Rt_ADDR_SIMM9(v) => (v.0, true, B2, false),
+                LDST_IMM9::STRH_Rt_ADDR_SIMM9(v) => (v.0, false, B2, false),
+                LDST_IMM9::LDRSB_Rt_ADDR_SIMM9(v) => (v.0, true, B1, true),
+                LDST_IMM9::LDRSH_Rt_ADDR_SIMM9(v) => (v.0, true, B2, true),
+                LDST_IMM9::LDRSW_Rt_ADDR_SIMM9(v) => (v.0, true, B4, true),
+                _ => return unsupported(&mut ops, word, "LDST_IMM9"),
+            };
+            emit_imm9_mem(&mut ops, word, load, width, signed);
+            emit_to(&mut ops, this, next, labels, depth);
+        }
+        Operation::LDSTPAIR_INDEXED(inner) => {
+            use vane_arch::MemWidth::B4;
+            let (word, load, width, signed) = match inner {
+                LDSTPAIR_INDEXED::LDP_Rt_W_Rt2_W_ADDR_SIMM7_S_S(v) => (v.0, true, B4, false),
+                LDSTPAIR_INDEXED::STP_Rt_W_Rt2_W_ADDR_SIMM7_S_S(v) => (v.0, false, B4, false),
+                LDSTPAIR_INDEXED::LDPSW_Rt_X_Rt2_X_ADDR_SIMM7_S_S(v) => (v.0, true, B4, true),
+                _ => return unsupported(&mut ops, word, "LDSTPAIR_INDEXED"),
+            };
+            emit_pair_mem(
+                &mut ops,
+                word,
+                load,
+                width,
+                signed,
+                true,
+                word & (1 << 24) != 0,
+            );
+            emit_to(&mut ops, this, next, labels, depth);
+        }
+        Operation::LDSTPAIR_OFF(inner) => {
+            use vane_arch::MemWidth::{B4, B8};
+            let (word, load, width, signed) = match inner {
+                LDSTPAIR_OFF::LDP_Rt_Rt2_ADDR_SIMM7(v) => {
+                    (v.0, true, if v.0 >> 31 == 0 { B4 } else { B8 }, false)
+                }
+                LDSTPAIR_OFF::STP_Rt_Rt2_ADDR_SIMM7(v) => {
+                    (v.0, false, if v.0 >> 31 == 0 { B4 } else { B8 }, false)
+                }
+                LDSTPAIR_OFF::LDPSW_Rt_Rt2_ADDR_SIMM7(v) => (v.0, true, B4, true),
+                _ => return unsupported(&mut ops, word, "LDSTPAIR_OFF"),
+            };
+            emit_pair_mem(&mut ops, word, load, width, signed, false, false);
+            emit_to(&mut ops, this, next, labels, depth);
+        }
+        Operation::LDST_UNSCALED(inner) => {
+            use vane_arch::MemWidth::{B1, B2, B4, B8};
+            let (word, load, width, signed) = match inner {
+                LDST_UNSCALED::LDUR_Rt_ADDR_SIMM9(v) => {
+                    (v.0, true, if v.0 >> 30 == 0b11 { B8 } else { B4 }, false)
+                }
+                LDST_UNSCALED::STUR_Rt_ADDR_SIMM9(v) => {
+                    (v.0, false, if v.0 >> 30 == 0b11 { B8 } else { B4 }, false)
+                }
+                LDST_UNSCALED::LDURB_Rt_ADDR_SIMM9(v) => (v.0, true, B1, false),
+                LDST_UNSCALED::STURB_Rt_ADDR_SIMM9(v) => (v.0, false, B1, false),
+                LDST_UNSCALED::LDURH_Rt_ADDR_SIMM9(v) => (v.0, true, B2, false),
+                LDST_UNSCALED::STURH_Rt_ADDR_SIMM9(v) => (v.0, false, B2, false),
+                LDST_UNSCALED::LDURSB_Rt_ADDR_SIMM9(v) => (v.0, true, B1, true),
+                LDST_UNSCALED::LDURSH_Rt_ADDR_SIMM9(v) => (v.0, true, B2, true),
+                LDST_UNSCALED::LDURSW_Rt_ADDR_SIMM9(v) => (v.0, true, B4, true),
+                _ => return unsupported(&mut ops, word, "LDST_UNSCALED"),
+            };
+            emit_signed_mem(&mut ops, word, load, width, signed);
+            emit_to(&mut ops, this, next, labels, depth);
+        }
         Operation::LDST_POS(inner) => {
             use vane_arch::MemWidth::{B1, B2, B4, B8};
             let (word, load, width, signed, scale) = match inner {
@@ -617,6 +883,8 @@ fn a64_body(
                 LDST_POS::STRB_Rt_ADDR_UIMM12(v) => (v.0, false, B1, false, 1),
                 LDST_POS::LDRH_Rt_ADDR_UIMM12(v) => (v.0, true, B2, false, 2),
                 LDST_POS::STRH_Rt_ADDR_UIMM12(v) => (v.0, false, B2, false, 2),
+                LDST_POS::LDRSB_Rt_ADDR_UIMM12(v) => (v.0, true, B1, true, 1),
+                LDST_POS::LDRSH_Rt_ADDR_UIMM12(v) => (v.0, true, B2, true, 2),
                 LDST_POS::LDRSW_Rt_ADDR_UIMM12(v) => (v.0, true, B4, true, 4),
                 _ => return unsupported(&mut ops, word, "LDST_POS"),
             };
@@ -1014,6 +1282,141 @@ mod tests {
             Exit::TailCall(0xfeed)
         ));
         assert_eq!(host.state.get(&state::x(2)), Some(&23));
+    }
+
+    #[test]
+    fn integer_memory_addressing_forms_execute() {
+        // LDUR, STUR, register-offset LDR, and pair pre/post-index forms.
+        let words = [
+            0xf85f_8020u32, // ldur x0, [x1, #-8]
+            0xb800_4022,    // stur w2, [x1, #4]
+            0xf862_7823,    // ldr x3, [x1, x2, lsl #3]
+            0x2941_1825,    // ldp w5, w6, [x1, #8]
+            0x2881_2027,    // stp w7, w8, [x1], #8
+            0xd61f_03c0,    // br x30
+        ];
+        let mut code = Mem::default();
+        for (offset, word) in words.into_iter().enumerate() {
+            for (i, byte) in word.to_le_bytes().into_iter().enumerate() {
+                code.write_byte((offset * 4 + i) as u64, byte);
+            }
+        }
+        let code = Box::leak(Box::new(code));
+        let jit = TemplateJit {
+            params: vane_arch::template::Params {
+                react: code,
+                trial: &|_| Heat::New,
+                #[cfg(feature = "target-js")]
+                flate: &vane_arch::DebugFlate {},
+                root: 0,
+                flags: vane_arch::template::Flags::default(),
+            },
+            pc: 0,
+            labels: Default::default(),
+            depth: 0,
+        };
+        struct Host {
+            state: BTreeMap<StateSlot, u64>,
+            mem: BTreeMap<u64, u8>,
+            code: BTreeMap<u64, u8>,
+        }
+        impl StackHost for Host {
+            fn load_reg(&mut self, _r: u8) -> u64 {
+                0
+            }
+            fn store_reg(&mut self, _r: u8, _v: u64) {}
+            fn load_state(&mut self, slot: &StateSlot) -> u64 {
+                self.state.get(slot).copied().unwrap_or(0)
+            }
+            fn store_state(&mut self, slot: &StateSlot, value: u64) {
+                self.state.insert(slot.clone(), value);
+            }
+            fn load_mem(&mut self, addr: u64, width: vane_arch::MemWidth, signed: bool) -> u64 {
+                let bytes = match width {
+                    vane_arch::MemWidth::B1 => 1,
+                    vane_arch::MemWidth::B2 => 2,
+                    vane_arch::MemWidth::B4 => 4,
+                    vane_arch::MemWidth::B8 => 8,
+                };
+                let mut value = 0u64;
+                for i in 0..bytes {
+                    value |= (self.mem.get(&(addr + i)).copied().unwrap_or(0) as u64) << (i * 8);
+                }
+                if signed {
+                    match bytes {
+                        1 => value as u8 as i8 as i64 as u64,
+                        2 => value as u16 as i16 as i64 as u64,
+                        4 => value as u32 as i32 as i64 as u64,
+                        _ => value,
+                    }
+                } else {
+                    value
+                }
+            }
+            fn store_mem(&mut self, addr: u64, width: vane_arch::MemWidth, value: u64) {
+                let bytes = match width {
+                    vane_arch::MemWidth::B1 => 1,
+                    vane_arch::MemWidth::B2 => 2,
+                    vane_arch::MemWidth::B4 => 4,
+                    vane_arch::MemWidth::B8 => 8,
+                };
+                for i in 0..bytes {
+                    self.mem.insert(addr + i, (value >> (i * 8)) as u8);
+                }
+            }
+            fn byte(&mut self, addr: u64) -> u8 {
+                self.code.get(&addr).copied().unwrap_or(0)
+            }
+            fn ecall(&mut self) -> bool {
+                false
+            }
+        }
+        let mut host = Host {
+            state: BTreeMap::new(),
+            mem: BTreeMap::new(),
+            code: BTreeMap::new(),
+        };
+        for (offset, word) in words.into_iter().enumerate() {
+            for (i, byte) in word.to_le_bytes().into_iter().enumerate() {
+                host.code.insert((offset * 4 + i) as u64, byte);
+            }
+        }
+        host.state.insert(state::x(1), 0x100);
+        host.state.insert(state::x(2), 1);
+        host.state.insert(state::x(7), 0xaabb_ccdd);
+        host.state.insert(state::x(8), 0x1122_3344);
+        host.state.insert(state::x(30), 0xfeed);
+        for (addr, byte) in 0x1122_3344_5566_7788u64
+            .to_le_bytes()
+            .into_iter()
+            .enumerate()
+        {
+            host.mem.insert(0xf8 + addr as u64, byte);
+        }
+        for (addr, byte) in 0x8877_6655u32.to_le_bytes().into_iter().enumerate() {
+            host.mem.insert(0x108 + addr as u64, byte);
+        }
+        assert!(matches!(
+            interpret(&a64_emit(&jit), &mut host),
+            Exit::TailCall(0xfeed)
+        ));
+        assert_eq!(host.state.get(&state::x(0)), Some(&0x1122_3344_5566_7788));
+        assert_eq!(host.state.get(&state::x(3)), Some(&0x8877_6655));
+        assert_eq!(host.state.get(&state::x(5)), Some(&0x8877_6655));
+        assert_eq!(host.state.get(&state::x(6)), Some(&0));
+        assert_eq!(host.state.get(&state::x(1)), Some(&0x108));
+        assert_eq!(
+            host.load_mem(0x104, vane_arch::MemWidth::B4, false),
+            0x1122_3344
+        );
+        assert_eq!(
+            host.load_mem(0x100, vane_arch::MemWidth::B4, false),
+            0xaabb_ccdd
+        );
+        assert_eq!(
+            host.load_mem(0x104, vane_arch::MemWidth::B4, false),
+            0x1122_3344
+        );
     }
 
     #[test]
