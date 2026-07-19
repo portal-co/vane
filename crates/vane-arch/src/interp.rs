@@ -39,7 +39,7 @@
 //! an intentional choice worth mirroring.
 
 use alloc::{string::String, vec::Vec};
-use vane_target_core::{MemWidth, StackOp};
+use vane_target_core::{MemWidth, StackOp, StateSlot};
 
 /// Host state a [`StackOp`] trace reads and writes as it interprets.
 ///
@@ -51,6 +51,14 @@ use vane_target_core::{MemWidth, StackOp};
 pub trait StackHost {
     fn load_reg(&mut self, r: u8) -> u64;
     fn store_reg(&mut self, r: u8, v: u64);
+    /// Read an architecture-defined state slot. The default makes newly added
+    /// slot-aware traces fail closed on legacy hosts rather than inheriting
+    /// RISC-V's special register-zero semantics.
+    fn load_state(&mut self, _slot: &StateSlot) -> u64 {
+        0
+    }
+    /// Write an architecture-defined state slot. See [`Self::load_state`].
+    fn store_state(&mut self, _slot: &StateSlot, _v: u64) {}
     fn load_mem(&mut self, addr: u64, width: MemWidth, signed: bool) -> u64;
     fn store_mem(&mut self, addr: u64, width: MemWidth, v: u64);
     /// A single byte at `addr`, used only by `StackOp::CheckCode`'s
@@ -160,6 +168,18 @@ pub fn interpret(ops: &[StackOp], host: &mut impl StackHost) -> Exit {
                 if *r != 0 {
                     host.store_reg(*r, v);
                 }
+                ip += 1;
+            }
+            StackOp::Drop => {
+                let _ = pop!();
+                ip += 1;
+            }
+            StackOp::LoadState(slot) => {
+                val.push(host.load_state(slot));
+                ip += 1;
+            }
+            StackOp::StoreState(slot) => {
+                host.store_state(slot, pop!());
                 ip += 1;
             }
 
@@ -438,6 +458,10 @@ pub fn interpret(ops: &[StackOp], host: &mut impl StackHost) -> Exit {
 pub trait AsyncStackHost {
     async fn load_reg(&mut self, r: u8) -> u64;
     async fn store_reg(&mut self, r: u8, v: u64);
+    async fn load_state(&mut self, _slot: &StateSlot) -> u64 {
+        0
+    }
+    async fn store_state(&mut self, _slot: &StateSlot, _v: u64) {}
     async fn load_mem(&mut self, addr: u64, width: MemWidth, signed: bool) -> u64;
     async fn store_mem(&mut self, addr: u64, width: MemWidth, v: u64);
     /// See [`StackHost::byte`].
@@ -615,6 +639,18 @@ pub async fn interpret_async(ops: &[StackOp], host: &mut impl AsyncStackHost) ->
                 if *r != 0 {
                     host.store_reg(*r, v).await;
                 }
+                ip += 1;
+            }
+            StackOp::Drop => {
+                let _ = pop!();
+                ip += 1;
+            }
+            StackOp::LoadState(slot) => {
+                val.push(host.load_state(slot).await);
+                ip += 1;
+            }
+            StackOp::StoreState(slot) => {
+                host.store_state(slot, pop!()).await;
                 ip += 1;
             }
             StackOp::Add64 => {

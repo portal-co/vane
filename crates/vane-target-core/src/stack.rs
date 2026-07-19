@@ -12,6 +12,25 @@ pub enum MemWidth {
     B8,
 }
 
+/// A named architectural state slot.
+///
+/// Unlike [`StackOp::LoadReg`], a state slot has no implicit RISC-V x0
+/// behaviour. Architectures use it for ordinary registers, flags, and special
+/// registers whose identity cannot be represented by the historic `x{n}`
+/// register convention.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct StateSlot(pub alloc::string::String);
+
+impl StateSlot {
+    pub fn new(name: impl Into<alloc::string::String>) -> Self {
+        Self(name.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// A single operation in the shared stack-based IR.
 ///
 /// All variants hold only owned data, so `StackOp` is `'static`.  Structural
@@ -58,6 +77,17 @@ pub enum StackOp {
     LoadReg(u8),
     /// Pop and write to architectural register `r`.  Register 0 discards.
     StoreReg(u8),
+
+    /// Pop and discard a value. This is architecture-neutral; do not use a
+    /// distinguished register as a discard sink.
+    Drop,
+
+    /// Push a named architecture-defined state slot. Unlike `LoadReg`, this
+    /// never reserves slot zero and is suitable for AArch64 X0, SP, NZCV, and
+    /// scalar V-register raw-bit state.
+    LoadState(StateSlot),
+    /// Pop and write a named architecture-defined state slot.
+    StoreState(StateSlot),
 
     // ── 64-bit integer arithmetic ─────────────────────────────────────────
     Add64,
@@ -112,9 +142,14 @@ pub enum StackOp {
 
     // ── Memory ────────────────────────────────────────────────────────────
     /// Pop addr from stack; push loaded value (sign-extended if `signed`).
-    LoadMem { width: MemWidth, signed: bool },
+    LoadMem {
+        width: MemWidth,
+        signed: bool,
+    },
     /// Pop value then addr from stack; store value at addr.
-    StoreMem { width: MemWidth },
+    StoreMem {
+        width: MemWidth,
+    },
 
     // ── Side effects ──────────────────────────────────────────────────────
     /// Architecture environment call (`ecall` / syscall).
@@ -185,7 +220,9 @@ pub struct StackOpBackend {
 
 impl StackOpBackend {
     pub fn new() -> Self {
-        Self { ops: alloc::vec::Vec::new() }
+        Self {
+            ops: alloc::vec::Vec::new(),
+        }
     }
 
     pub fn into_ops(self) -> alloc::vec::Vec<StackOp> {
@@ -208,19 +245,23 @@ impl OsBackend for StackOpBackend {
         match op {
             OsOp::PushU64(v) => self.push(StackOp::PushImm(v)),
             OsOp::PushU32(v) => self.push(StackOp::PushImm(v as u64)),
-            OsOp::Pop => self.push(StackOp::StoreReg(0)), // register 0 discards
+            OsOp::Pop => self.push(StackOp::Drop),
             OsOp::Load { width, signed } => {
                 if let Some(w) = os_mem_width_to_stack(width) {
                     self.push(StackOp::LoadMem { width: w, signed });
                 } else {
-                    self.push(StackOp::Trap(alloc::string::String::from("unsupported load width")));
+                    self.push(StackOp::Trap(alloc::string::String::from(
+                        "unsupported load width",
+                    )));
                 }
             }
             OsOp::Store { width } => {
                 if let Some(w) = os_mem_width_to_stack(width) {
                     self.push(StackOp::StoreMem { width: w });
                 } else {
-                    self.push(StackOp::Trap(alloc::string::String::from("unsupported store width")));
+                    self.push(StackOp::Trap(alloc::string::String::from(
+                        "unsupported store width",
+                    )));
                 }
             }
             OsOp::Ecall { .. } => self.push(StackOp::Ecall),
@@ -228,7 +269,9 @@ impl OsBackend for StackOpBackend {
                 self.push(StackOp::PushImm(target));
                 self.push(StackOp::TailCall);
             }
-            OsOp::Trap => self.push(StackOp::Trap(alloc::string::String::from("os emulation trap"))),
+            OsOp::Trap => self.push(StackOp::Trap(alloc::string::String::from(
+                "os emulation trap",
+            ))),
             OsOp::TailCall { helper } => {
                 // Static helper tail-calls do not exist in `StackOp`; record
                 // the symbol and then perform a dynamic tail-call dispatch.
@@ -251,16 +294,25 @@ mod tests {
         let ops = b.into_ops();
         assert_eq!(ops.len(), 2);
         assert!(matches!(ops[0], StackOp::PushImm(42)));
-        assert!(matches!(ops[1], StackOp::StoreReg(0)));
+        assert!(matches!(ops[1], StackOp::Drop));
     }
 
     #[test]
     fn load_maps_to_load_mem() {
         let mut b = StackOpBackend::new();
         b.op(OsOp::PushU64(0x100));
-        b.op(OsOp::Load { width: OsMemWidth::W32, signed: true });
+        b.op(OsOp::Load {
+            width: OsMemWidth::W32,
+            signed: true,
+        });
         let ops = b.into_ops();
-        assert!(matches!(ops[1], StackOp::LoadMem { width: MemWidth::B4, signed: true }));
+        assert!(matches!(
+            ops[1],
+            StackOp::LoadMem {
+                width: MemWidth::B4,
+                signed: true
+            }
+        ));
     }
 
     #[test]
@@ -268,9 +320,16 @@ mod tests {
         let mut b = StackOpBackend::new();
         b.op(OsOp::PushU64(0x200)); // value
         b.op(OsOp::PushU64(0x100)); // addr
-        b.op(OsOp::Store { width: OsMemWidth::W16 });
+        b.op(OsOp::Store {
+            width: OsMemWidth::W16,
+        });
         let ops = b.into_ops();
-        assert!(matches!(ops[2], StackOp::StoreMem { width: MemWidth::B2 }));
+        assert!(matches!(
+            ops[2],
+            StackOp::StoreMem {
+                width: MemWidth::B2
+            }
+        ));
     }
 
     #[test]
@@ -286,7 +345,10 @@ mod tests {
     fn w128_load_traps() {
         let mut b = StackOpBackend::new();
         b.op(OsOp::PushU64(0));
-        b.op(OsOp::Load { width: OsMemWidth::W128, signed: false });
+        b.op(OsOp::Load {
+            width: OsMemWidth::W128,
+            signed: false,
+        });
         assert!(matches!(b.into_ops().last(), Some(StackOp::Trap(_))));
     }
 }

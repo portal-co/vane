@@ -6,6 +6,7 @@ members = [
     "crates/vane-target-wasm",
     "crates/vane-arch",
     "crates/vane-riscv", "crates/vane-target-core",
+    "crates/vane-aarch64",
     "crates/vane-wsdom",
 ]
 
@@ -61,15 +62,16 @@ swc_ecma_quote = "^17"
 portal-solutions-swibb = "^0.2.6"
 
 rv-asm = "0.2.1"
+disarm64 = "0.1.26"
 
 wasm-bindgen = "0.2.100"
 spin = "0.10.0"
 
 either = { version = "1.15.0", default-features = false }
 
-wsdom = { package = "px-wsdom", version = "0.0.6", git = "https://github.com/wishawa/wsdom.git" }
-wsdom-core = { package = "px-wsdom-core", version = "0.0.6", git = "https://github.com/wishawa/wsdom.git" }
-wsdom-axum = { package = "px-wsdom-axum", version = "0.0.6", git = "https://github.com/wishawa/wsdom.git" }
+wsdom = { package = "px-wsdom", version = "0.0.6", git = "https://github.com/portal-co/wsdom.git" }
+wsdom-core = { package = "px-wsdom-core", version = "0.0.6", git = "https://github.com/portal-co/wsdom.git" }
+wsdom-axum = { package = "px-wsdom-axum", version = "0.0.6", git = "https://github.com/portal-co/wsdom.git" }
 
 tokio = { version = "1", default-features = false }
 axum = { version = "0.7", default-features = false }

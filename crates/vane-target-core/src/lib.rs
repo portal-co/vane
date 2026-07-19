@@ -4,7 +4,7 @@ extern crate alloc;
 use core::fmt::Display;
 
 mod stack;
-pub use stack::{MemWidth, StackOp, StackOpBackend};
+pub use stack::{MemWidth, StackOp, StackOpBackend, StateSlot};
 
 /// Control-flow abstraction shared by all codegen targets.
 ///

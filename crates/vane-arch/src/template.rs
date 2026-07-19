@@ -80,6 +80,30 @@ fn host_member<N: HostMethodNames<VaneHostMethod>>(
         .on("$")
 }
 
+/// Return a JavaScript string literal for an internal state-slot name.
+/// State slots are architecture-defined, but quote defensively so a custom
+/// slot can never alter generated source.
+#[cfg(feature = "target-js")]
+fn js_string_literal(input: &str) -> alloc::string::String {
+    let mut output = alloc::string::String::from("\"");
+    for ch in input.chars() {
+        match ch {
+            '\\' => output.push_str("\\\\"),
+            '\"' => output.push_str("\\\""),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            ch if ch.is_control() => {
+                use core::fmt::Write;
+                write!(output, "\\u{:04x}", ch as u32).expect("writing to String cannot fail");
+            }
+            ch => output.push(ch),
+        }
+    }
+    output.push('\"');
+    output
+}
+
 /// A single named loop label.  Owned strings so the label map can be cloned
 /// cheaply without lifetime constraints on the containing types.
 #[derive(Clone)]
@@ -346,6 +370,20 @@ pub fn render_stack_to_js_with_names<N: HostMethodNames<VaneHostMethod>>(
                     write!(f, "(({register_cache}??={registers})[`x{r}`]={v});")?;
                 }
                 // x0 is hardwired zero — discard silently.
+            }
+            StackOp::Drop => {
+                let _ = pop!();
+            }
+            StackOp::LoadState(slot) => {
+                let slot = js_string_literal(slot.as_str());
+                push!(alloc::format!(
+                    "(({register_cache}??={registers})[{slot}]??=0n)"
+                ));
+            }
+            StackOp::StoreState(slot) => {
+                let value = pop!();
+                let slot = js_string_literal(slot.as_str());
+                write!(f, "(({register_cache}??={registers})[{slot}]={value});")?;
             }
 
             // ── 64-bit arithmetic ─────────────────────────────────────────
@@ -743,6 +781,17 @@ pub fn render_stack_to_wasm<'a>(
                             },
                         };
                     }
+                }
+                // Named state has no global-index convention in the stub WASM
+                // target. Keep the target explicitly unsupported rather than
+                // accidentally giving AArch64 its RISC-V register semantics.
+                StackOp::Drop => {
+                    yield JitOpcode::Operator { op: Operator::Drop };
+                }
+                StackOp::LoadState(_) | StackOp::StoreState(_) => {
+                    yield JitOpcode::Operator {
+                        op: Operator::Unreachable,
+                    };
                 }
 
                 // ── 64-bit arithmetic ─────────────────────────────────────
@@ -1196,7 +1245,7 @@ impl<'a> CoreJS<'a> {
 mod async_mem_tests {
     use super::*;
     use core::cell::RefCell;
-    use vane_target_core::MemWidth;
+    use vane_target_core::{MemWidth, StackOp, StateSlot};
 
     /// Renders `ops` via `render_stack_to_js` and returns the resulting JS
     /// text. `Formatter` has no public constructor, so this goes through a
@@ -1252,6 +1301,21 @@ mod async_mem_tests {
         );
         assert!(!out.contains("await $.reg_read"));
         assert!(!out.contains("await $.mem_read"));
+    }
+
+    #[test]
+    fn named_state_slots_are_escaped_and_do_not_use_riscv_x0() {
+        let out = render(
+            alloc::vec![
+                StackOp::PushImm(9),
+                StackOp::StoreState(StateSlot::new("a64:x0")),
+                StackOp::LoadState(StateSlot::new("a64:x0")),
+                StackOp::Drop,
+            ],
+            Flags::default(),
+        );
+        assert!(out.contains("[\"a64:x0\"]"), "state key missing: {out}");
+        assert!(!out.contains("[`x0`]"), "state key used RV64 x0: {out}");
     }
 
     #[test]

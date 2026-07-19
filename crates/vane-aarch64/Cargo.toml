@@ -1,0 +1,16 @@
+[package]
+name = "vane-aarch64"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+description = "AArch64 guest frontend for Vane's StackOp and JavaScript JIT backends"
+
+[features]
+default = ["target-js", "target-wasm"]
+target-js = ["vane-arch/target-js"]
+target-wasm = ["vane-arch/target-wasm"]
+
+[dependencies]
+vane-arch = { path = "../vane-arch", default-features = false }
+vane-target-core = { path = "../vane-target-core" }
+disarm64.workspace = true
