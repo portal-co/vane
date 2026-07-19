@@ -20,9 +20,13 @@ use vane_arch::{FloatBinOp, FloatUnaryOp, FloatWidth, Heat, StackOp};
 
 use crate::{Aarch64Display, state};
 
-#[cfg(all(test, feature = "target-js"))]
+#[cfg(all(test, feature = "target-js", not(target_arch = "wasm32")))]
 #[path = "aarch64/aarch64_js_tests.rs"]
 mod aarch64_js_tests;
+
+#[cfg(all(test, feature = "target-js", target_arch = "wasm32"))]
+#[path = "aarch64/aarch64_browser_tests.rs"]
+mod aarch64_browser_tests;
 
 fn word_at(this: &TemplateJit<'_>) -> u32 {
     u32::from_le_bytes(array::from_fn(|i| {

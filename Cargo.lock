@@ -1165,8 +1165,12 @@ name = "vane-aarch64"
 version = "0.1.0"
 dependencies = [
  "disarm64",
+ "js-sys",
  "vane-arch",
  "vane-target-core",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
 ]
 
 [[package]]

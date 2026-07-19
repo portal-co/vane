@@ -82,10 +82,10 @@ multiply-add/subtract, SMULH/UMULH, and BRK in addition to the earlier integer
 subset. Its scalar FP support also includes the documented non-fused `FMADD`
 family policy, immediate moves, compares/selects, and the basic
 `FMOV`/`SCVTF`/`UCVTF`/`FCVTZS`/`FCVTZU` integer boundary forms. Native
-execution is covered by raw-word tests and the generated JavaScript is checked
-with Node's `Function` parser; a browser execution corpus is still pending.
-It still traps rounding-mode FP variants and scalar FP memory; Vane's WASM
-JIT remains out of scope.
+execution is covered by raw-word tests, a headless-Chrome `wasm-pack` CoreJS
+micro-corpus smoke test, and a Node `Function` parser check. A broader browser
+corpus is still pending. It still traps rounding-mode FP variants and scalar
+FP memory; Vane's WASM JIT remains out of scope.
 
 ## Testing
 
@@ -98,7 +98,13 @@ Current test cases:
 
 To run tests:
 ```
-# Build the WASM package first
+# AArch64 native StackOp coverage
+RUSTC_BOOTSTRAP=1 cargo test -p vane-aarch64 --lib --offline
+
+# AArch64 generated CoreJS execution in headless Chrome
+wasm-pack test --headless --chrome crates/vane-aarch64
+
+# Build the RV64 WASM package first
 wasm-pack build crates/vane
 
 # Run in-browser tests

@@ -14,3 +14,9 @@ target-wasm = ["vane-arch/target-wasm"]
 vane-arch = { path = "../vane-arch", default-features = false }
 vane-target-core = { path = "../vane-target-core" }
 disarm64.workspace = true
+
+[dev-dependencies]
+wasm-bindgen.workspace = true
+wasm-bindgen-test = "0.3.34"
+wasm-bindgen-futures = "0.4.50"
+js-sys = "0.3.77"
