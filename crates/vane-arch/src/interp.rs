@@ -39,7 +39,7 @@
 //! an intentional choice worth mirroring.
 
 use alloc::{string::String, vec::Vec};
-use vane_target_core::{MemWidth, StackOp, StateSlot};
+use vane_target_core::{FloatBinOp, FloatUnaryOp, FloatWidth, MemWidth, StackOp, StateSlot};
 
 /// Host state a [`StackOp`] trace reads and writes as it interprets.
 ///
@@ -89,6 +89,73 @@ pub enum Exit {
     Trap(String),
     /// `StackOp::Ecall` and `StackHost::ecall` returned `false`.
     Ecall,
+}
+
+/// Interpret a fully materialized `StackOp` trace against `host`, returning
+/// why it stopped.
+fn float_unary(width: FloatWidth, op: FloatUnaryOp, value: u64) -> u64 {
+    match width {
+        FloatWidth::F32 => {
+            let value = f32::from_bits(value as u32);
+            let result = match op {
+                FloatUnaryOp::Abs => value.abs(),
+                FloatUnaryOp::Neg => -value,
+                FloatUnaryOp::Sqrt => libm::sqrtf(value),
+            };
+            result.to_bits() as u64
+        }
+        FloatWidth::F64 => {
+            let value = f64::from_bits(value);
+            let result = match op {
+                FloatUnaryOp::Abs => value.abs(),
+                FloatUnaryOp::Neg => -value,
+                FloatUnaryOp::Sqrt => libm::sqrt(value),
+            };
+            result.to_bits()
+        }
+    }
+}
+
+fn float_binary(width: FloatWidth, op: FloatBinOp, lhs: u64, rhs: u64) -> u64 {
+    match width {
+        FloatWidth::F32 => {
+            let (lhs, rhs) = (f32::from_bits(lhs as u32), f32::from_bits(rhs as u32));
+            let value = match op {
+                FloatBinOp::Add => lhs + rhs,
+                FloatBinOp::Sub => lhs - rhs,
+                FloatBinOp::Mul => lhs * rhs,
+                FloatBinOp::Div => lhs / rhs,
+                FloatBinOp::Min => lhs.min(rhs),
+                FloatBinOp::Max => lhs.max(rhs),
+            };
+            value.to_bits() as u64
+        }
+        FloatWidth::F64 => {
+            let (lhs, rhs) = (f64::from_bits(lhs), f64::from_bits(rhs));
+            let value = match op {
+                FloatBinOp::Add => lhs + rhs,
+                FloatBinOp::Sub => lhs - rhs,
+                FloatBinOp::Mul => lhs * rhs,
+                FloatBinOp::Div => lhs / rhs,
+                FloatBinOp::Min => lhs.min(rhs),
+                FloatBinOp::Max => lhs.max(rhs),
+            };
+            value.to_bits()
+        }
+    }
+}
+
+fn float_lt(width: FloatWidth, lhs: u64, rhs: u64) -> bool {
+    match width {
+        FloatWidth::F32 => f32::from_bits(lhs as u32) < f32::from_bits(rhs as u32),
+        FloatWidth::F64 => f64::from_bits(lhs) < f64::from_bits(rhs),
+    }
+}
+fn float_eq(width: FloatWidth, lhs: u64, rhs: u64) -> bool {
+    match width {
+        FloatWidth::F32 => f32::from_bits(lhs as u32) == f32::from_bits(rhs as u32),
+        FloatWidth::F64 => f64::from_bits(lhs) == f64::from_bits(rhs),
+    }
 }
 
 /// Interpret a fully materialized `StackOp` trace against `host`, returning
@@ -392,6 +459,27 @@ pub fn interpret(ops: &[StackOp], host: &mut impl StackHost) -> Exit {
             StackOp::GeS64 => {
                 let (a, b) = pop2!();
                 val.push(((a as i64) >= (b as i64)) as u64);
+                ip += 1;
+            }
+
+            StackOp::FloatUnary { width, op } => {
+                let a = pop!();
+                val.push(float_unary(*width, *op, a));
+                ip += 1;
+            }
+            StackOp::FloatBinary { width, op } => {
+                let (a, b) = pop2!();
+                val.push(float_binary(*width, *op, a, b));
+                ip += 1;
+            }
+            StackOp::FloatLt { width } => {
+                let (a, b) = pop2!();
+                val.push(float_lt(*width, a, b) as u64);
+                ip += 1;
+            }
+            StackOp::FloatEq { width } => {
+                let (a, b) = pop2!();
+                val.push(float_eq(*width, a, b) as u64);
                 ip += 1;
             }
 
@@ -855,6 +943,25 @@ pub async fn interpret_async(ops: &[StackOp], host: &mut impl AsyncStackHost) ->
                 val.push(((a as i64) >= (b as i64)) as u64);
                 ip += 1;
             }
+            StackOp::FloatUnary { width, op } => {
+                val.push(float_unary(*width, *op, pop!()));
+                ip += 1;
+            }
+            StackOp::FloatBinary { width, op } => {
+                let (a, b) = pop2!();
+                val.push(float_binary(*width, *op, a, b));
+                ip += 1;
+            }
+            StackOp::FloatLt { width } => {
+                let (a, b) = pop2!();
+                val.push(float_lt(*width, a, b) as u64);
+                ip += 1;
+            }
+            StackOp::FloatEq { width } => {
+                let (a, b) = pop2!();
+                val.push(float_eq(*width, a, b) as u64);
+                ip += 1;
+            }
             StackOp::LoadMem { width, signed } => {
                 let addr = pop!();
                 val.push(host.load_mem(addr, *width, *signed).await);
@@ -1287,6 +1394,65 @@ mod async_tests {
                 return v;
             }
         }
+    }
+
+    #[test]
+    fn scalar_float_ops_preserve_width_and_nan_ordering() {
+        let ops = vec![
+            StackOp::PushImm(1.25f32.to_bits() as u64),
+            StackOp::PushImm(2.5f32.to_bits() as u64),
+            StackOp::FloatBinary {
+                width: FloatWidth::F32,
+                op: FloatBinOp::Add,
+            },
+            StackOp::StoreState(StateSlot::new("fp32")),
+            StackOp::PushImm(f64::NAN.to_bits()),
+            StackOp::PushImm(1.0f64.to_bits()),
+            StackOp::FloatEq {
+                width: FloatWidth::F64,
+            },
+            StackOp::StoreState(StateSlot::new("nan_eq")),
+            StackOp::PushImm(4.0f64.to_bits()),
+            StackOp::FloatUnary {
+                width: FloatWidth::F64,
+                op: FloatUnaryOp::Sqrt,
+            },
+            StackOp::StoreState(StateSlot::new("sqrt")),
+            StackOp::PushImm(0),
+            StackOp::TailCall,
+        ];
+        struct Host {
+            values: alloc::collections::BTreeMap<StateSlot, u64>,
+        }
+        impl StackHost for Host {
+            fn load_reg(&mut self, _: u8) -> u64 {
+                0
+            }
+            fn store_reg(&mut self, _: u8, _: u64) {}
+            fn load_state(&mut self, slot: &StateSlot) -> u64 {
+                self.values.get(slot).copied().unwrap_or(0)
+            }
+            fn store_state(&mut self, slot: &StateSlot, value: u64) {
+                self.values.insert(slot.clone(), value);
+            }
+            fn load_mem(&mut self, _: u64, _: MemWidth, _: bool) -> u64 {
+                0
+            }
+            fn store_mem(&mut self, _: u64, _: MemWidth, _: u64) {}
+            fn ecall(&mut self) -> bool {
+                false
+            }
+        }
+        let mut host = Host {
+            values: Default::default(),
+        };
+        assert!(matches!(interpret(&ops, &mut host), Exit::TailCall(0)));
+        assert_eq!(
+            host.values[&StateSlot::new("fp32")],
+            3.75f32.to_bits() as u64
+        );
+        assert_eq!(host.values[&StateSlot::new("nan_eq")], 0);
+        assert_eq!(host.values[&StateSlot::new("sqrt")], 2.0f64.to_bits());
     }
 
     #[test]

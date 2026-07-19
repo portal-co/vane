@@ -1,4 +1,4 @@
-use vane_target_core::{CoreOpcode, MemWidth, StackOp};
+use vane_target_core::{CoreOpcode, FloatBinOp, FloatUnaryOp, FloatWidth, MemWidth, StackOp};
 #[cfg(feature = "target-wasm")]
 use wasmparser::Operator;
 
@@ -563,6 +563,51 @@ pub fn render_stack_to_js_with_names<N: HostMethodNames<VaneHostMethod>>(
                 let (a, b) = pop2!();
                 push!(alloc::format!("({signed}({a})>={signed}({b})?1n:0n)"));
             }
+            StackOp::FloatUnary { width, op } => {
+                let a = pop!();
+                let width = match width {
+                    FloatWidth::F32 => "32",
+                    FloatWidth::F64 => "64",
+                };
+                let op = match op {
+                    FloatUnaryOp::Abs => "abs",
+                    FloatUnaryOp::Neg => "neg",
+                    FloatUnaryOp::Sqrt => "sqrt",
+                };
+                push!(alloc::format!("fp_unary({width},\"{op}\",{a})"));
+            }
+            StackOp::FloatBinary { width, op } => {
+                let (a, b) = pop2!();
+                let width = match width {
+                    FloatWidth::F32 => "32",
+                    FloatWidth::F64 => "64",
+                };
+                let op = match op {
+                    FloatBinOp::Add => "add",
+                    FloatBinOp::Sub => "sub",
+                    FloatBinOp::Mul => "mul",
+                    FloatBinOp::Div => "div",
+                    FloatBinOp::Min => "min",
+                    FloatBinOp::Max => "max",
+                };
+                push!(alloc::format!("fp_binary({width},\"{op}\",{a},{b})"));
+            }
+            StackOp::FloatLt { width } => {
+                let (a, b) = pop2!();
+                let width = match width {
+                    FloatWidth::F32 => "32",
+                    FloatWidth::F64 => "64",
+                };
+                push!(alloc::format!("fp_lt({width},{a},{b})?1n:0n"));
+            }
+            StackOp::FloatEq { width } => {
+                let (a, b) = pop2!();
+                let width = match width {
+                    FloatWidth::F32 => "32",
+                    FloatWidth::F64 => "64",
+                };
+                push!(alloc::format!("fp_eq({width},{a},{b})?1n:0n"));
+            }
 
             // ── Memory ────────────────────────────────────────────────────
             StackOp::LoadMem {
@@ -952,7 +997,11 @@ pub fn render_stack_to_wasm<'a>(
                 }
 
                 // ── Memory / side-effects (stubs) ─────────────────────────
-                StackOp::LoadMem { .. }
+                StackOp::FloatUnary { .. }
+                | StackOp::FloatBinary { .. }
+                | StackOp::FloatLt { .. }
+                | StackOp::FloatEq { .. }
+                | StackOp::LoadMem { .. }
                 | StackOp::StoreMem { .. }
                 | StackOp::Ecall
                 | StackOp::TailCall
@@ -1072,7 +1121,7 @@ impl<'a> Display for CoreJS<'a> {
 
         write!(
             fmt,
-            "return async function(){{let {max64}=$.f,{max32}=0xffff_ffffn,{signed}=(a=>BigInt.asIntN(64,a)),{unsigned}=(a=>BigInt.asUintN(64,a)),",
+            "return async function(){{let {max64}=$.f,{max32}=0xffff_ffffn,{signed}=(a=>BigInt.asIntN(64,a)),{unsigned}=(a=>BigInt.asUintN(64,a)),fp_buf=new ArrayBuffer(8),fp_dv=new DataView(fp_buf),fp_unary=((w,o,a)=>{{if(w===32){{fp_dv.setUint32(0,Number(a&0xffffffffn),true);let v=fp_dv.getFloat32(0,true);v=o===\"abs\"?Math.abs(v):o===\"neg\"?-v:Math.sqrt(v);fp_dv.setFloat32(0,v,true);return BigInt(fp_dv.getUint32(0,true));}}fp_dv.setBigUint64(0,a,true);let v=fp_dv.getFloat64(0,true);v=o===\"abs\"?Math.abs(v):o===\"neg\"?-v:Math.sqrt(v);fp_dv.setFloat64(0,v,true);return fp_dv.getBigUint64(0,true);}}),fp_binary=((w,o,a,b)=>{{let cv=(x=>{{if(w===32){{fp_dv.setUint32(0,Number(x&0xffffffffn),true);return fp_dv.getFloat32(0,true);}}fp_dv.setBigUint64(0,x,true);return fp_dv.getFloat64(0,true);}}),av=cv(a),bv=cv(b),v=o===\"add\"?av+bv:o===\"sub\"?av-bv:o===\"mul\"?av*bv:o===\"div\"?av/bv:o===\"min\"?Math.min(av,bv):Math.max(av,bv);if(w===32){{fp_dv.setFloat32(0,v,true);return BigInt(fp_dv.getUint32(0,true));}}fp_dv.setFloat64(0,v,true);return fp_dv.getBigUint64(0,true);}}),fp_lt=((w,a,b)=>{{if(w===32){{fp_dv.setUint32(0,Number(a&0xffffffffn),true);let av=fp_dv.getFloat32(0,true);fp_dv.setUint32(0,Number(b&0xffffffffn),true);return av<fp_dv.getFloat32(0,true);}}fp_dv.setBigUint64(0,a,true);let av=fp_dv.getFloat64(0,true);fp_dv.setBigUint64(0,b,true);return av<fp_dv.getFloat64(0,true);}}),fp_eq=((w,a,b)=>{{if(w===32){{fp_dv.setUint32(0,Number(a&0xffffffffn),true);let av=fp_dv.getFloat32(0,true);fp_dv.setUint32(0,Number(b&0xffffffffn),true);return av===fp_dv.getFloat32(0,true);}}fp_dv.setBigUint64(0,a,true);let av=fp_dv.getFloat64(0,true);fp_dv.setBigUint64(0,b,true);return av===fp_dv.getFloat64(0,true);}}),",
         )?;
 
         self.write_data_function(fmt, &data)?;

@@ -19,6 +19,7 @@ description = "Risc-V emulator for the Web, WASM, and anything based on them"
 
 [workspace.dependencies]
 wasmparser = { version = "0.239.0", default-features = false }
+libm = "0.2.16"
 wasm-encoder = { version = "0.239.0", default-features = false, features = [
     "wasmparser",
 ] }

@@ -26,3 +26,4 @@ os-async = { git = "https://github.com/portal-co/os-emulation.git", optional = t
 either = { workspace = true, optional = true }
 wasmparser = { workspace = true, optional = true }
 portal-jit-host-names = { path = "../../../codegen-utils/crates/host-method-names" }
+libm.workspace = true

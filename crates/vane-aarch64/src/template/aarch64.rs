@@ -10,14 +10,14 @@ use alloc::{boxed::Box, vec::Vec};
 use core::{array, fmt::Formatter};
 
 use disarm64::decoder_full::{
-    ADDSUB_IMM, ADDSUB_SHIFT, BRANCH_IMM, BRANCH_REG, COMPBRANCH, CONDBRANCH, CONDSEL, IC_SYSTEM,
-    LDST_IMM9, LDST_POS, LDST_REGOFF, LDST_UNSCALED, LDSTPAIR_INDEXED, LDSTPAIR_OFF, LOG_SHIFT,
-    MOVEWIDE, Operation, PCRELADDR,
+    ADDSUB_IMM, ADDSUB_SHIFT, BRANCH_IMM, BRANCH_REG, COMPBRANCH, CONDBRANCH, CONDSEL, FLOATDP1,
+    FLOATDP2, IC_SYSTEM, LDST_IMM9, LDST_POS, LDST_REGOFF, LDST_UNSCALED, LDSTPAIR_INDEXED,
+    LDSTPAIR_OFF, LOG_SHIFT, MOVEWIDE, Operation, PCRELADDR,
 };
 use vane_arch::template::TemplateJit;
-use vane_arch::{Heat, StackOp};
+use vane_arch::{FloatBinOp, FloatUnaryOp, FloatWidth, Heat, StackOp};
 
-use crate::{Aarch64Display, StateSlot, state};
+use crate::{Aarch64Display, state};
 
 fn word_at(this: &TemplateJit<'_>) -> u32 {
     u32::from_le_bytes(array::from_fn(|i| {
@@ -354,6 +354,42 @@ fn emit_condsel(ops: &mut Vec<StackOp>, word: u32, kind: u8) {
     write_gpr(ops, rd(word), false);
 }
 
+fn emit_float_dp2(ops: &mut Vec<StackOp>, word: u32, op: FloatBinOp) {
+    let width = if word & (1 << 22) == 0 {
+        FloatWidth::F32
+    } else {
+        FloatWidth::F64
+    };
+    let rn = rn(word);
+    let rm = ((word >> 16) & 0x1f) as u8;
+    read_fp(ops, rn);
+    read_fp(ops, rm);
+    ops.push(StackOp::FloatBinary { width, op });
+    write_fp(ops, rd(word), width);
+}
+
+fn read_fp(ops: &mut Vec<StackOp>, reg: u8) {
+    ops.push(StackOp::LoadState(state::v(reg)));
+}
+
+fn write_fp(ops: &mut Vec<StackOp>, reg: u8, width: FloatWidth) {
+    if width == FloatWidth::F32 {
+        ops.push(StackOp::Trunc32);
+    }
+    ops.push(StackOp::StoreState(state::v(reg)));
+}
+
+fn emit_float_dp1(ops: &mut Vec<StackOp>, word: u32, op: FloatUnaryOp) {
+    let width = if word & (1 << 22) == 0 {
+        FloatWidth::F32
+    } else {
+        FloatWidth::F64
+    };
+    read_fp(ops, rn(word));
+    ops.push(StackOp::FloatUnary { width, op });
+    write_fp(ops, rd(word), width);
+}
+
 fn emit_pcreladdr(ops: &mut Vec<StackOp>, this: &TemplateJit<'_>, word: u32, page: bool) {
     let immhi = ((word >> 5) & 0x7ffff) << 2;
     let immlo = (word >> 29) & 3;
@@ -625,7 +661,7 @@ fn emit_pos_mem(
     }
 }
 
-fn a64_emit(this: &TemplateJit<'_>) -> Vec<StackOp> {
+pub(crate) fn a64_emit(this: &TemplateJit<'_>) -> Vec<StackOp> {
     if (this.params.trial)(this.pc) == Heat::Cached {
         return alloc::vec![StackOp::PushImm(this.pc), StackOp::TailCall];
     }
@@ -711,6 +747,96 @@ fn a64_body(
                 _ => return unsupported(&mut ops, word, "ADDSUB_IMM"),
             };
             emit_addsub_imm(&mut ops, word, is_sub, true, set_flags);
+            emit_to(&mut ops, this, next, labels, depth);
+        }
+        Operation::FLOATDP2(inner) => {
+            let (word, op, negate) = match inner {
+                FLOATDP2::FADD_Fd_Fn_Fm(v) => (v.0, FloatBinOp::Add, false),
+                FLOATDP2::FADD_Fd_S_S_Fn_S_S_Fm_S_S(v) => (v.0, FloatBinOp::Add, false),
+                FLOATDP2::FSUB_Fd_Fn_Fm(v) => (v.0, FloatBinOp::Sub, false),
+                FLOATDP2::FSUB_Fd_S_S_Fn_S_S_Fm_S_S(v) => (v.0, FloatBinOp::Sub, false),
+                FLOATDP2::FMUL_Fd_Fn_Fm(v) => (v.0, FloatBinOp::Mul, false),
+                FLOATDP2::FMUL_Fd_S_S_Fn_S_S_Fm_S_S(v) => (v.0, FloatBinOp::Mul, false),
+                FLOATDP2::FDIV_Fd_Fn_Fm(v) => (v.0, FloatBinOp::Div, false),
+                FLOATDP2::FDIV_Fd_S_S_Fn_S_S_Fm_S_S(v) => (v.0, FloatBinOp::Div, false),
+                FLOATDP2::FNMUL_Fd_Fn_Fm(v) => (v.0, FloatBinOp::Mul, true),
+                FLOATDP2::FNMUL_Fd_S_S_Fn_S_S_Fm_S_S(v) => (v.0, FloatBinOp::Mul, true),
+                FLOATDP2::FMIN_Fd_Fn_Fm(v) => (v.0, FloatBinOp::Min, false),
+                FLOATDP2::FMIN_Fd_S_S_Fn_S_S_Fm_S_S(v) => (v.0, FloatBinOp::Min, false),
+                FLOATDP2::FMINNM_Fd_Fn_Fm(v) => (v.0, FloatBinOp::Min, false),
+                FLOATDP2::FMINNM_Fd_S_S_Fn_S_S_Fm_S_S(v) => (v.0, FloatBinOp::Min, false),
+                FLOATDP2::FMAX_Fd_Fn_Fm(v) => (v.0, FloatBinOp::Max, false),
+                FLOATDP2::FMAX_Fd_S_S_Fn_S_S_Fm_S_S(v) => (v.0, FloatBinOp::Max, false),
+                FLOATDP2::FMAXNM_Fd_Fn_Fm(v) => (v.0, FloatBinOp::Max, false),
+                FLOATDP2::FMAXNM_Fd_S_S_Fn_S_S_Fm_S_S(v) => (v.0, FloatBinOp::Max, false),
+            };
+            emit_float_dp2(&mut ops, word, op);
+            if negate {
+                // Re-read the just-written result so the width-specific negation
+                // preserves scalar S register bits.
+                let width = if word & (1 << 22) == 0 {
+                    FloatWidth::F32
+                } else {
+                    FloatWidth::F64
+                };
+                read_fp(&mut ops, rd(word));
+                ops.push(StackOp::FloatUnary {
+                    width,
+                    op: FloatUnaryOp::Neg,
+                });
+                write_fp(&mut ops, rd(word), width);
+            }
+            emit_to(&mut ops, this, next, labels, depth);
+        }
+        Operation::FLOATDP1(inner) => {
+            let word = match inner {
+                FLOATDP1::FABS_Fd_Fn(v) => {
+                    emit_float_dp1(&mut ops, v.0, FloatUnaryOp::Abs);
+                    v.0
+                }
+                FLOATDP1::FABS_Fd_S_S_Fn_S_S(v) => {
+                    emit_float_dp1(&mut ops, v.0, FloatUnaryOp::Abs);
+                    v.0
+                }
+                FLOATDP1::FNEG_Fd_Fn(v) => {
+                    emit_float_dp1(&mut ops, v.0, FloatUnaryOp::Neg);
+                    v.0
+                }
+                FLOATDP1::FNEG_Fd_S_S_Fn_S_S(v) => {
+                    emit_float_dp1(&mut ops, v.0, FloatUnaryOp::Neg);
+                    v.0
+                }
+                FLOATDP1::FSQRT_Fd_Fn(v) => {
+                    emit_float_dp1(&mut ops, v.0, FloatUnaryOp::Sqrt);
+                    v.0
+                }
+                FLOATDP1::FSQRT_Fd_S_S_Fn_S_S(v) => {
+                    emit_float_dp1(&mut ops, v.0, FloatUnaryOp::Sqrt);
+                    v.0
+                }
+                FLOATDP1::FMOV_Fd_Fn(v) => {
+                    let width = if v.0 & (1 << 22) == 0 {
+                        FloatWidth::F32
+                    } else {
+                        FloatWidth::F64
+                    };
+                    read_fp(&mut ops, rn(v.0));
+                    write_fp(&mut ops, rd(v.0), width);
+                    v.0
+                }
+                FLOATDP1::FMOV_Fd_S_S_Fn_S_S(v) => {
+                    let width = if v.0 & (1 << 22) == 0 {
+                        FloatWidth::F32
+                    } else {
+                        FloatWidth::F64
+                    };
+                    read_fp(&mut ops, rn(v.0));
+                    write_fp(&mut ops, rd(v.0), width);
+                    v.0
+                }
+                _ => return unsupported(&mut ops, word, "FLOATDP1"),
+            };
+            let _ = word;
             emit_to(&mut ops, this, next, labels, depth);
         }
         Operation::IC_SYSTEM(inner) => {
@@ -1002,6 +1128,7 @@ vane_arch::cfg_target_js! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::StateSlot;
     use alloc::collections::BTreeMap;
     use vane_arch::{
         Mem,
@@ -1014,6 +1141,94 @@ mod tests {
         for word in [0xd280_0020, 0x9100_0801, 0x1400_0000] {
             assert!(disarm64::decoder::decode(word).is_some(), "{word:08x}");
         }
+    }
+
+    #[test]
+    fn scalar_fp_binary_and_unary_execute() {
+        // fadd d0,d1,d2 ; fadd s3,s4,s5 ; fneg d6,d7 ; fsqrt s8,s9 ; br x30
+        let words = [
+            0x1e62_2820u32,
+            0x1e25_2883,
+            0x1e61_40e6,
+            0x1e21_c128,
+            0xd61f_03c0,
+        ];
+        let mut code = Mem::default();
+        for (offset, word) in words.into_iter().enumerate() {
+            for (i, byte) in word.to_le_bytes().into_iter().enumerate() {
+                code.write_byte((offset * 4 + i) as u64, byte);
+            }
+        }
+        let code = Box::leak(Box::new(code));
+        let jit = TemplateJit {
+            params: vane_arch::template::Params {
+                react: code,
+                trial: &|_| Heat::New,
+                #[cfg(feature = "target-js")]
+                flate: &vane_arch::DebugFlate {},
+                root: 0,
+                flags: vane_arch::template::Flags::default(),
+            },
+            pc: 0,
+            labels: Default::default(),
+            depth: 0,
+        };
+        struct Host {
+            state: BTreeMap<StateSlot, u64>,
+            code: BTreeMap<u64, u8>,
+        }
+        impl StackHost for Host {
+            fn load_reg(&mut self, _: u8) -> u64 {
+                0
+            }
+            fn store_reg(&mut self, _: u8, _: u64) {}
+            fn load_state(&mut self, slot: &StateSlot) -> u64 {
+                self.state.get(slot).copied().unwrap_or(0)
+            }
+            fn store_state(&mut self, slot: &StateSlot, value: u64) {
+                self.state.insert(slot.clone(), value);
+            }
+            fn load_mem(&mut self, _: u64, _: vane_arch::MemWidth, _: bool) -> u64 {
+                0
+            }
+            fn store_mem(&mut self, _: u64, _: vane_arch::MemWidth, _: u64) {}
+            fn byte(&mut self, addr: u64) -> u8 {
+                self.code.get(&addr).copied().unwrap_or(0)
+            }
+            fn ecall(&mut self) -> bool {
+                false
+            }
+        }
+        let mut host = Host {
+            state: BTreeMap::new(),
+            code: BTreeMap::new(),
+        };
+        for (offset, word) in words.into_iter().enumerate() {
+            for (i, byte) in word.to_le_bytes().into_iter().enumerate() {
+                host.code.insert((offset * 4 + i) as u64, byte);
+            }
+        }
+        host.state.insert(state::v(1), 1.5f64.to_bits());
+        host.state.insert(state::v(2), 2.25f64.to_bits());
+        host.state.insert(state::v(4), 1.25f32.to_bits() as u64);
+        host.state.insert(state::v(5), 2.5f32.to_bits() as u64);
+        host.state.insert(state::v(7), 3.0f64.to_bits());
+        host.state.insert(state::v(9), 9.0f32.to_bits() as u64);
+        host.state.insert(state::x(30), 0xfeed);
+        assert!(matches!(
+            interpret(&a64_emit(&jit), &mut host),
+            Exit::TailCall(0xfeed)
+        ));
+        assert_eq!(host.state.get(&state::v(0)), Some(&3.75f64.to_bits()));
+        assert_eq!(
+            host.state.get(&state::v(3)),
+            Some(&(3.75f32.to_bits() as u64))
+        );
+        assert_eq!(host.state.get(&state::v(6)), Some(&(-3.0f64).to_bits()));
+        assert_eq!(
+            host.state.get(&state::v(8)),
+            Some(&(3.0f32.to_bits() as u64))
+        );
     }
 
     #[test]

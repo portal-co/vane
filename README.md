@@ -21,6 +21,7 @@ The WASM JIT target (`vane-target-wasm`) exists as a stub with only a trait defi
 | `vane` | Root cdylib. Wires together `vane-riscv` and `vane-meta-gen` to produce the `Reactor` WASM-bindgen type. Contains the interpreter loop (`interp`). |
 | `vane-arch` | Architecture-agnostic infrastructure: `Mem` (paged memory), `JitCtx` trait, `TemplateJit` (JS codegen driver), `CoreJS` (JS wrapper/prologue generator), `PagingMode`, and the `renders!` / `cfg_target_js!` / `cfg_target_wasm!` macros. |
 | `vane-riscv` | RV64 back-end. Implements the `RiscvDisplay` trait on `TemplateJit` to emit JavaScript for each RISC-V instruction. Also contains the `hint` module for detecting RISC-V HINT instructions. |
+| `vane-aarch64` | Explicitly selected AArch64 frontend using `disarm64` 0.1.26. `Aarch64Reactor` executes StackOp traces against a caller-provided state host without changing the RV64 `Reactor` ABI. |
 | `vane-target-js` | JS codegen helpers. Defines the `Flate` trait used to optionally minify identifier names in generated JS (`ReleaseFlate` substitutes short names like `f`, `g`, `s`, `u`, `d`; `DebugFlate` is a passthrough). |
 | `vane-target-wasm` | Stub crate. Declares `WasmJit`, `WasmJitCtx`, and `JitOpcode` traits/types. The actual WASM JIT implementation is not yet written. |
 | `vane-meta-gen` | Procedural-macro-like glue. Exports the `vane_meta!` declarative macro that generates the `Reactor` and `Core` structs along with all `wasm-bindgen` method impls (register access, page table control, `jit_code`, `jit_run`, paging mode setters, etc.). |
@@ -66,6 +67,19 @@ The JS codegen covers the same instruction set. `MULH`, `MULHU`, `MULHSU` use JS
 
 Floating-point (F/D extensions) and atomics (A extension) are not implemented.
 
+The shared StackOp runtime now supports scalar raw-bit F32/F64 operations.
+RV64 supports `FLW`/`FLD`, `FSW`/`FSD`, `FADD.{S,D}`, `FSUB.{S,D}`,
+`FMUL.{S,D}`, `FDIV.{S,D}`, and `FSQRT.{S,D}` in its trace frontend.
+AArch64 supports the matching initial `FLOATDP1`/`FLOATDP2` scalar subset
+(`FADD`, `FSUB`, `FMUL`, `FDIV`, `FNMUL`, `FMIN`/`FMINNM`, `FMAX`/`FMAXNM`,
+`FABS`, `FNEG`, `FSQRT`, and register `FMOV`) for S and D values. F32
+operations round through the F32 representation after each operation.
+
+AArch64 remains an opt-in library frontend, not a replacement for the current
+WASM-bindgen RV64 reactor. It intentionally still traps the unimplemented
+scalar FP conversion, comparison/select, immediate, and fused families, and
+Vane's WASM JIT remains out of scope.
+
 ## Testing
 
 Tests require `wasm-bindgen-test` and run in-browser only (configured via `wasm_bindgen_test_configure!(run_in_browser)`). The test suite (`crates/vane/_tests/rv_corpus.rs`) loads ELF binaries from the `rv-corpus` git submodule, maps PT_LOAD segments into `Mem`, and runs them through either the interpreter or JIT. A test passes when execution terminates via `ecall` with `a7=93` (the Linux `exit` syscall number), which vane treats as a success sentinel.
@@ -106,7 +120,7 @@ See [`JIT_HOST_METHOD_NAMES.md`](JIT_HOST_METHOD_NAMES.md).
 - Interpreter: implemented and tested for RV64IM
 - JS JIT: implemented and tested for RV64IM
 - WASM JIT: stub only, not functional
-- Floating-point: not implemented
+- Floating-point: scalar raw-bit F32/F64 runtime plus the initial RV64 and AArch64 trace subsets; conversions, fused operations, and most AArch64 FP families remain unsupported
 - Atomics: not implemented
 - System/privilege modes: not implemented; `ecall` handling is minimal (only syscall 93 is meaningful)
 

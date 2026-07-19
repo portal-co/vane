@@ -12,6 +12,34 @@ pub enum MemWidth {
     B8,
 }
 
+/// IEEE-754 scalar width used by architecture-neutral floating-point stack
+/// operations. Floating values travel through the stack as raw IEEE bits in a
+/// `u64`; `F32` occupies the low 32 bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FloatWidth {
+    F32,
+    F64,
+}
+
+/// Scalar floating-point binary operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FloatBinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Min,
+    Max,
+}
+
+/// Scalar floating-point unary operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FloatUnaryOp {
+    Abs,
+    Neg,
+    Sqrt,
+}
+
 /// A named architectural state slot.
 ///
 /// Unlike [`StackOp::LoadReg`], a state slot has no implicit RISC-V x0
@@ -139,6 +167,29 @@ pub enum StackOp {
     LtS64,
     GeU64,
     GeS64,
+
+    // ── Scalar IEEE-754 operations ───────────────────────────────────────
+    /// Pop raw IEEE bits and push the result's raw bits. `F32` rounds each
+    /// operation at single precision; state slots retain the result bits.
+    FloatUnary {
+        width: FloatWidth,
+        op: FloatUnaryOp,
+    },
+    /// Pop rhs then lhs raw IEEE bits and push raw result bits.
+    FloatBinary {
+        width: FloatWidth,
+        op: FloatBinOp,
+    },
+    /// Pop rhs then lhs raw IEEE bits and push `1` when lhs < rhs. NaNs yield
+    /// zero, matching ordered AArch64/RISC-V predicate use.
+    FloatLt {
+        width: FloatWidth,
+    },
+    /// Pop rhs then lhs raw IEEE bits and push `1` when lhs == rhs. NaNs yield
+    /// zero.
+    FloatEq {
+        width: FloatWidth,
+    },
 
     // ── Memory ────────────────────────────────────────────────────────────
     /// Pop addr from stack; push loaded value (sign-extended if `signed`).

@@ -5,7 +5,9 @@ extern crate alloc;
 pub use vane_arch::*;
 pub use vane_target_core::{StackOp, StateSlot};
 
+pub mod reactor;
 pub mod template;
+pub use reactor::Aarch64Reactor;
 
 vane_arch::renders!(Aarch64);
 
@@ -34,5 +36,11 @@ pub mod state {
     pub fn nzcv(flag: char) -> StateSlot {
         assert!(matches!(flag, 'n' | 'z' | 'c' | 'v'));
         StateSlot::new(alloc::format!("a64:nzcv:{flag}"))
+    }
+
+    /// Raw scalar S/D bits for V0–V31. S values occupy the low 32 bits.
+    pub fn v(reg: u8) -> StateSlot {
+        assert!(reg <= 31, "AArch64 has V0 through V31");
+        StateSlot::new(alloc::format!("a64:v{reg}"))
     }
 }

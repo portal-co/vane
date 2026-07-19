@@ -1174,6 +1174,7 @@ name = "vane-arch"
 version = "0.1.0"
 dependencies = [
  "either",
+ "libm",
  "os-async",
  "os-page",
  "paste",
