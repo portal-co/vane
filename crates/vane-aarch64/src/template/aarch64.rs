@@ -10,8 +10,8 @@ use alloc::{boxed::Box, vec::Vec};
 use core::{array, fmt::Formatter};
 
 use disarm64::decoder_full::{
-    ADDSUB_IMM, ADDSUB_SHIFT, BRANCH_IMM, BRANCH_REG, COMPBRANCH, CONDBRANCH, LDST_POS, MOVEWIDE,
-    Operation,
+    ADDSUB_IMM, ADDSUB_SHIFT, BRANCH_IMM, BRANCH_REG, COMPBRANCH, CONDBRANCH, LDST_POS, LOG_SHIFT,
+    MOVEWIDE, Operation, PCRELADDR,
 };
 use vane_arch::template::TemplateJit;
 use vane_arch::{Heat, StackOp};
@@ -76,23 +76,62 @@ fn signed_bits(word: u32, bits: u32) -> i64 {
     ((word << (32 - bits)) as i32 >> (32 - bits)) as i64
 }
 
+fn bool_not(ops: &mut Vec<StackOp>) {
+    ops.push(StackOp::PushImm(0));
+    ops.push(StackOp::Eq64);
+}
+
+fn bool_and(ops: &mut Vec<StackOp>) {
+    // Booleans are normalized to 0/1, so multiplication is logical AND.
+    ops.push(StackOp::Mul64);
+}
+
+fn bool_xor(ops: &mut Vec<StackOp>) {
+    ops.push(StackOp::Xor64);
+}
+
 fn condition_test(ops: &mut Vec<StackOp>, cond: u8) -> bool {
-    // Conditions are defined over individual NZCV bits. The StackOp integer
-    // subset cannot synthesize boolean OR yet, so support the common Z and
-    // NZ tests now; the remaining conditions stay explicit unsupported traps.
-    match cond {
-        0 => {
-            ops.push(StackOp::LoadState(state::nzcv('z')));
-            true
-        } // EQ
-        1 => {
-            ops.push(StackOp::LoadState(state::nzcv('z')));
-            ops.push(StackOp::PushImm(0));
-            ops.push(StackOp::Eq64);
-            true
-        } // NE
-        _ => false,
+    let flag = |ops: &mut Vec<StackOp>, flag| ops.push(StackOp::LoadState(state::nzcv(flag)));
+    let invert = cond & 1 != 0;
+    match cond & !1 {
+        0 => flag(ops, 'z'), // EQ / NE
+        2 => flag(ops, 'c'), // CS / CC
+        4 => flag(ops, 'n'), // MI / PL
+        6 => flag(ops, 'v'), // VS / VC
+        8 => {
+            // HI / LS: C && !Z
+            flag(ops, 'c');
+            flag(ops, 'z');
+            bool_not(ops);
+            bool_and(ops);
+        }
+        10 => {
+            // GE / LT: !(N ^ V)
+            flag(ops, 'n');
+            flag(ops, 'v');
+            bool_xor(ops);
+            bool_not(ops);
+        }
+        12 => {
+            // GT / LE: !Z && (N == V)
+            flag(ops, 'z');
+            bool_not(ops);
+            flag(ops, 'n');
+            flag(ops, 'v');
+            bool_xor(ops);
+            bool_not(ops);
+            bool_and(ops);
+        }
+        14 => {
+            ops.push(StackOp::PushImm(1)); // AL / NV are unconditional.
+            return true;
+        }
+        _ => unreachable!(),
     }
+    if invert {
+        bool_not(ops);
+    }
+    true
 }
 
 fn branch(
@@ -110,33 +149,220 @@ fn branch(
     ops.push(StackOp::IfEnd);
 }
 
-fn emit_addsub(ops: &mut Vec<StackOp>, word: u32, is_sub: bool, allow_sp: bool) {
-    read_gpr(ops, rn(word), allow_sp);
-    read_gpr(ops, ((word >> 16) & 0x1f) as u8, false);
-    ops.push(if is_sub {
-        StackOp::Sub64
-    } else {
-        StackOp::Add64
-    });
-    if word >> 31 == 0 {
+fn load_scratch(ops: &mut Vec<StackOp>, name: char, is_32bit: bool) {
+    ops.push(StackOp::LoadState(state::scratch(name)));
+    if is_32bit {
         ops.push(StackOp::Trunc32);
     }
-    write_gpr(ops, rd(word), allow_sp);
 }
 
-fn emit_addsub_imm(ops: &mut Vec<StackOp>, word: u32, is_sub: bool, allow_sp: bool) {
-    let imm = (((word >> 10) & 0xfff) as u64) << if word & (1 << 22) != 0 { 12 } else { 0 };
+fn load_scratch_signed(ops: &mut Vec<StackOp>, name: char, is_32bit: bool) {
+    load_scratch(ops, name, is_32bit);
+    if is_32bit {
+        ops.push(StackOp::SignExt32);
+    }
+}
+
+fn emit_shifted_gpr(ops: &mut Vec<StackOp>, reg: u8, shift_type: u8, shift: u8, is_32bit: bool) {
+    read_gpr(ops, reg, false);
+    if is_32bit {
+        ops.push(StackOp::Trunc32);
+    }
+    if shift != 0 {
+        if shift_type == 2 && is_32bit {
+            ops.push(StackOp::SignExt32);
+        }
+        ops.push(StackOp::PushImm(shift as u64));
+        ops.push(match shift_type {
+            0 => StackOp::Shl64,
+            1 => StackOp::ShrU64,
+            2 => StackOp::ShrS64,
+            _ => unreachable!("invalid shifted-register shift type"),
+        });
+    }
+    if is_32bit {
+        ops.push(StackOp::Trunc32);
+    }
+}
+
+fn emit_result_and_flags(
+    ops: &mut Vec<StackOp>,
+    dst: u8,
+    allow_sp: bool,
+    is_32bit: bool,
+    is_sub: bool,
+) {
+    // The arithmetic producer leaves its result on stack. Preserve it, then
+    // derive all NZCV bits from explicitly saved operands and result.
+    ops.push(StackOp::StoreState(state::scratch('r')));
+    load_scratch(ops, 'r', is_32bit);
+    write_gpr(ops, dst, allow_sp);
+
+    load_scratch_signed(ops, 'r', is_32bit);
+    ops.push(StackOp::PushImm(0));
+    ops.push(StackOp::LtS64);
+    ops.push(StackOp::StoreState(state::nzcv('n')));
+    load_scratch(ops, 'r', is_32bit);
+    ops.push(StackOp::PushImm(0));
+    ops.push(StackOp::Eq64);
+    ops.push(StackOp::StoreState(state::nzcv('z')));
+
+    // C is carry out for addition and no-borrow for subtraction.
+    load_scratch(ops, if is_sub { 'a' } else { 'r' }, is_32bit);
+    load_scratch(ops, if is_sub { 'b' } else { 'a' }, is_32bit);
+    ops.push(if is_sub {
+        StackOp::GeU64
+    } else {
+        StackOp::LtU64
+    });
+    ops.push(StackOp::StoreState(state::nzcv('c')));
+
+    // V: ADD => sign(a)==sign(b) && sign(r)!=sign(a);
+    //    SUB => sign(a)!=sign(b) && sign(r)!=sign(a).
+    for name in ['a', 'b', 'r'] {
+        load_scratch_signed(ops, name, is_32bit);
+        ops.push(StackOp::PushImm(0));
+        ops.push(StackOp::LtS64);
+        ops.push(StackOp::StoreState(state::scratch(name)));
+    }
+    load_scratch(ops, 'a', false);
+    load_scratch(ops, 'b', false);
+    bool_xor(ops);
+    if !is_sub {
+        bool_not(ops);
+    }
+    load_scratch(ops, 'r', false);
+    load_scratch(ops, 'a', false);
+    bool_xor(ops);
+    bool_and(ops);
+    ops.push(StackOp::StoreState(state::nzcv('v')));
+}
+
+fn emit_addsub(
+    ops: &mut Vec<StackOp>,
+    word: u32,
+    is_sub: bool,
+    allow_sp: bool,
+    set_flags: bool,
+    shift_type: u8,
+    shift: u8,
+) {
+    let is_32bit = word >> 31 == 0;
     read_gpr(ops, rn(word), allow_sp);
-    ops.push(StackOp::PushImm(imm));
+    if is_32bit {
+        ops.push(StackOp::Trunc32);
+    }
+    if set_flags {
+        ops.push(StackOp::StoreState(state::scratch('a')));
+        load_scratch(ops, 'a', is_32bit);
+    }
+    emit_shifted_gpr(
+        ops,
+        ((word >> 16) & 0x1f) as u8,
+        shift_type,
+        shift,
+        is_32bit,
+    );
+    if set_flags {
+        ops.push(StackOp::StoreState(state::scratch('b')));
+        load_scratch(ops, 'b', is_32bit);
+    }
     ops.push(if is_sub {
         StackOp::Sub64
     } else {
         StackOp::Add64
     });
-    if word >> 31 == 0 {
+    if set_flags {
+        emit_result_and_flags(ops, rd(word), allow_sp, is_32bit, is_sub);
+    } else {
+        if is_32bit {
+            ops.push(StackOp::Trunc32);
+        }
+        write_gpr(ops, rd(word), allow_sp);
+    }
+}
+
+fn emit_pcreladdr(ops: &mut Vec<StackOp>, this: &TemplateJit<'_>, word: u32, page: bool) {
+    let immhi = ((word >> 5) & 0x7ffff) << 2;
+    let immlo = (word >> 29) & 3;
+    let offset = signed_bits(immhi | immlo, 21);
+    let base = if page { this.pc & !0xfff } else { this.pc };
+    ops.push(StackOp::PushImm(
+        base.wrapping_add_signed(offset << if page { 12 } else { 0 }),
+    ));
+    write_gpr(ops, rd(word), false);
+}
+
+fn emit_log_shift(
+    ops: &mut Vec<StackOp>,
+    word: u32,
+    op: StackOp,
+    invert_rhs: bool,
+    shift_type: u8,
+    shift: u8,
+) {
+    let is_32bit = word >> 31 == 0;
+    read_gpr(ops, rn(word), false);
+    if is_32bit {
         ops.push(StackOp::Trunc32);
     }
-    write_gpr(ops, rd(word), allow_sp);
+    emit_shifted_gpr(
+        ops,
+        ((word >> 16) & 0x1f) as u8,
+        shift_type,
+        shift,
+        is_32bit,
+    );
+    if invert_rhs {
+        ops.push(StackOp::PushImm(if is_32bit {
+            0xffff_ffff
+        } else {
+            u64::MAX
+        }));
+        ops.push(StackOp::Xor64);
+    }
+    ops.push(op);
+    if is_32bit {
+        ops.push(StackOp::Trunc32);
+    }
+    write_gpr(ops, rd(word), false);
+}
+
+fn emit_addsub_imm(
+    ops: &mut Vec<StackOp>,
+    word: u32,
+    is_sub: bool,
+    allow_sp: bool,
+    set_flags: bool,
+) {
+    let is_32bit = word >> 31 == 0;
+    let imm = (((word >> 10) & 0xfff) as u64) << if word & (1 << 22) != 0 { 12 } else { 0 };
+    read_gpr(ops, rn(word), allow_sp);
+    if is_32bit {
+        ops.push(StackOp::Trunc32);
+    }
+    if set_flags {
+        ops.push(StackOp::StoreState(state::scratch('a')));
+        load_scratch(ops, 'a', is_32bit);
+    }
+    ops.push(StackOp::PushImm(imm));
+    if set_flags {
+        ops.push(StackOp::StoreState(state::scratch('b')));
+        load_scratch(ops, 'b', is_32bit);
+    }
+    ops.push(if is_sub {
+        StackOp::Sub64
+    } else {
+        StackOp::Add64
+    });
+    if set_flags {
+        emit_result_and_flags(ops, rd(word), allow_sp, is_32bit, is_sub);
+    } else {
+        if is_32bit {
+            ops.push(StackOp::Trunc32);
+        }
+        write_gpr(ops, rd(word), allow_sp);
+    }
 }
 
 fn emit_pos_mem(
@@ -248,10 +474,40 @@ fn a64_body(
                 ADDSUB_IMM::SUBS_Rd_Rn_SP_AIMM(v) => (true, true, v.0),
                 _ => return unsupported(&mut ops, word, "ADDSUB_IMM"),
             };
-            if set_flags {
-                return unsupported(&mut ops, word, "ADDSUB_IMM flags pending NZCV lowering");
-            }
-            emit_addsub_imm(&mut ops, word, is_sub, true);
+            emit_addsub_imm(&mut ops, word, is_sub, true, set_flags);
+            emit_to(&mut ops, this, next, labels, depth);
+        }
+        Operation::PCRELADDR(inner) => {
+            let (word, page) = match inner {
+                PCRELADDR::ADR_Rd_ADDR_PCREL21(v) => (v.0, false),
+                PCRELADDR::ADRP_Rd_ADDR_ADRP(v) => (v.0, true),
+            };
+            emit_pcreladdr(&mut ops, this, word, page);
+            emit_to(&mut ops, this, next, labels, depth);
+        }
+        Operation::LOG_SHIFT(inner) => {
+            let (word, op, invert_rhs) = match inner {
+                LOG_SHIFT::AND_Rd_Rn_Rm_SFT(v) => (v.0, StackOp::And64, false),
+                LOG_SHIFT::BIC_Rd_Rn_Rm_SFT(v) => (v.0, StackOp::And64, true),
+                LOG_SHIFT::ORR_Rd_Rn_Rm_SFT(v) => (v.0, StackOp::Or64, false),
+                LOG_SHIFT::ORN_Rd_Rn_Rm_SFT(v) => (v.0, StackOp::Or64, true),
+                LOG_SHIFT::EOR_Rd_Rn_Rm_SFT(v) => (v.0, StackOp::Xor64, false),
+                LOG_SHIFT::EON_Rd_Rn_Rm_SFT(v) => (v.0, StackOp::Xor64, true),
+                LOG_SHIFT::ANDS_Rd_Rn_Rm_SFT(v) => {
+                    return unsupported(&mut ops, v.0, "LOG_SHIFT flags pending");
+                }
+                LOG_SHIFT::BICS_Rd_Rn_Rm_SFT(v) => {
+                    return unsupported(&mut ops, v.0, "LOG_SHIFT flags pending");
+                }
+            };
+            emit_log_shift(
+                &mut ops,
+                word,
+                op,
+                invert_rhs,
+                ((word >> 22) & 3) as u8,
+                ((word >> 10) & 0x3f) as u8,
+            );
             emit_to(&mut ops, this, next, labels, depth);
         }
         Operation::LDST_POS(inner) => {
@@ -276,18 +532,21 @@ fn a64_body(
             emit_to(&mut ops, this, next, labels, depth);
         }
         Operation::ADDSUB_SHIFT(inner) => {
-            let (is_sub, word) = match inner {
-                ADDSUB_SHIFT::ADD_Rd_Rn_Rm_SFT(v) => (false, v.0),
-                ADDSUB_SHIFT::ADDS_Rd_Rn_Rm_SFT(v) => (false, v.0),
-                ADDSUB_SHIFT::SUB_Rd_Rn_Rm_SFT(v) => (true, v.0),
-                ADDSUB_SHIFT::SUBS_Rd_Rn_Rm_SFT(v) => (true, v.0),
+            let (is_sub, set_flags, word) = match inner {
+                ADDSUB_SHIFT::ADD_Rd_Rn_Rm_SFT(v) => (false, false, v.0),
+                ADDSUB_SHIFT::ADDS_Rd_Rn_Rm_SFT(v) => (false, true, v.0),
+                ADDSUB_SHIFT::SUB_Rd_Rn_Rm_SFT(v) => (true, false, v.0),
+                ADDSUB_SHIFT::SUBS_Rd_Rn_Rm_SFT(v) => (true, true, v.0),
             };
-            // Shifted-register variants with flag updates need NZCV lowering;
-            // the initial subset accepts only LSL #0 semantics.
-            if word & ((1 << 29) | (0b11 << 22) | (0b11_1111 << 10)) != 0 {
-                return unsupported(&mut ops, word, "ADDSUB_SHIFT flags/shift pending");
-            }
-            emit_addsub(&mut ops, word, is_sub, false);
+            emit_addsub(
+                &mut ops,
+                word,
+                is_sub,
+                false,
+                set_flags,
+                (word >> 22 & 3) as u8,
+                ((word >> 10) & 0x3f) as u8,
+            );
             emit_to(&mut ops, this, next, labels, depth);
         }
         Operation::COMPBRANCH(inner) => {
@@ -398,6 +657,69 @@ mod tests {
     }
 
     #[test]
+    fn conditions_cover_all_nzcv_forms() {
+        let cases: &[(u8, &[(char, u64)], bool)] = &[
+            (0, &[('z', 1)], true),                      // EQ
+            (1, &[('z', 0)], true),                      // NE
+            (2, &[('c', 1)], true),                      // CS
+            (3, &[('c', 0)], true),                      // CC
+            (8, &[('c', 1), ('z', 0)], true),            // HI
+            (9, &[('c', 0), ('z', 0)], true),            // LS
+            (10, &[('n', 1), ('v', 1)], true),           // GE
+            (11, &[('n', 1), ('v', 0)], true),           // LT
+            (12, &[('z', 0), ('n', 1), ('v', 1)], true), // GT
+            (13, &[('z', 1), ('n', 1), ('v', 1)], true), // LE
+            (14, &[], true),                             // AL
+        ];
+        for &(cond, flags, expected) in cases {
+            let mut ops = Vec::new();
+            assert!(condition_test(&mut ops, cond));
+            ops.push(StackOp::IfBegin);
+            ops.push(StackOp::PushImm(1));
+            ops.push(StackOp::StoreState(StateSlot::new("result")));
+            ops.push(StackOp::IfElse);
+            ops.push(StackOp::IfEnd);
+            ops.push(StackOp::PushImm(0));
+            ops.push(StackOp::TailCall);
+            struct Host(BTreeMap<StateSlot, u64>);
+            impl StackHost for Host {
+                fn load_reg(&mut self, _r: u8) -> u64 {
+                    0
+                }
+                fn store_reg(&mut self, _r: u8, _v: u64) {}
+                fn load_state(&mut self, slot: &StateSlot) -> u64 {
+                    self.0.get(slot).copied().unwrap_or(0)
+                }
+                fn store_state(&mut self, slot: &StateSlot, value: u64) {
+                    self.0.insert(slot.clone(), value);
+                }
+                fn load_mem(
+                    &mut self,
+                    _addr: u64,
+                    _width: vane_arch::MemWidth,
+                    _signed: bool,
+                ) -> u64 {
+                    0
+                }
+                fn store_mem(&mut self, _addr: u64, _width: vane_arch::MemWidth, _value: u64) {}
+                fn ecall(&mut self) -> bool {
+                    false
+                }
+            }
+            let mut host = Host(BTreeMap::new());
+            for &(flag, value) in flags {
+                host.0.insert(state::nzcv(flag), value);
+            }
+            let _ = interpret(&ops, &mut host);
+            assert_eq!(
+                host.0.get(&StateSlot::new("result")).copied().unwrap_or(0) != 0,
+                expected,
+                "condition {cond}"
+            );
+        }
+    }
+
+    #[test]
     fn cbz_selects_the_taken_trace() {
         // cbz x0,+8 ; br x30 ; br x30. X0 starts as zero, so the first
         // indirect branch must be skipped and the target at PC 8 selected.
@@ -462,6 +784,144 @@ mod tests {
             interpret(&a64_emit(&jit), &mut host),
             Exit::TailCall(0xfeed)
         ));
+    }
+
+    #[test]
+    fn subs_sets_all_nzcv_bits() {
+        // movz x0,#0 ; subs x1,x0,#1 ; br x30
+        let words = [0xd280_0000u32, 0xf100_0401, 0xd61f_03c0];
+        let mut code = Mem::default();
+        for (offset, word) in words.into_iter().enumerate() {
+            for (i, byte) in word.to_le_bytes().into_iter().enumerate() {
+                code.write_byte((offset * 4 + i) as u64, byte);
+            }
+        }
+        let code = Box::leak(Box::new(code));
+        let jit = TemplateJit {
+            params: vane_arch::template::Params {
+                react: code,
+                trial: &|_| Heat::New,
+                #[cfg(feature = "target-js")]
+                flate: &vane_arch::DebugFlate {},
+                root: 0,
+                flags: vane_arch::template::Flags::default(),
+            },
+            pc: 0,
+            labels: Default::default(),
+            depth: 0,
+        };
+        struct Host {
+            state: BTreeMap<StateSlot, u64>,
+            code: BTreeMap<u64, u8>,
+        }
+        impl StackHost for Host {
+            fn load_reg(&mut self, _r: u8) -> u64 {
+                0
+            }
+            fn store_reg(&mut self, _r: u8, _v: u64) {}
+            fn load_state(&mut self, slot: &StateSlot) -> u64 {
+                self.state.get(slot).copied().unwrap_or(0)
+            }
+            fn store_state(&mut self, slot: &StateSlot, value: u64) {
+                self.state.insert(slot.clone(), value);
+            }
+            fn load_mem(&mut self, addr: u64, _width: vane_arch::MemWidth, _signed: bool) -> u64 {
+                self.code.get(&addr).copied().unwrap_or(0) as u64
+            }
+            fn store_mem(&mut self, _addr: u64, _width: vane_arch::MemWidth, _value: u64) {}
+            fn byte(&mut self, addr: u64) -> u8 {
+                self.code.get(&addr).copied().unwrap_or(0)
+            }
+            fn ecall(&mut self) -> bool {
+                false
+            }
+        }
+        let mut host = Host {
+            state: BTreeMap::new(),
+            code: BTreeMap::new(),
+        };
+        for (offset, word) in words.into_iter().enumerate() {
+            for (i, byte) in word.to_le_bytes().into_iter().enumerate() {
+                host.code.insert((offset * 4 + i) as u64, byte);
+            }
+        }
+        host.state.insert(state::x(30), 0xfeed);
+        assert!(matches!(
+            interpret(&a64_emit(&jit), &mut host),
+            Exit::TailCall(0xfeed)
+        ));
+        assert_eq!(host.state.get(&state::x(1)), Some(&u64::MAX));
+        assert_eq!(host.state.get(&state::nzcv('n')), Some(&1));
+        assert_eq!(host.state.get(&state::nzcv('z')), Some(&0));
+        assert_eq!(host.state.get(&state::nzcv('c')), Some(&0));
+        assert_eq!(host.state.get(&state::nzcv('v')), Some(&0));
+    }
+
+    #[test]
+    fn shifted_register_add_executes() {
+        // movz x0,#3 ; movz x1,#5 ; add x2,x0,x1,lsl #2 ; br x30
+        let words = [0xd280_0060u32, 0xd280_00a1, 0x8b01_0802, 0xd61f_03c0];
+        let mut code = Mem::default();
+        for (offset, word) in words.into_iter().enumerate() {
+            for (i, byte) in word.to_le_bytes().into_iter().enumerate() {
+                code.write_byte((offset * 4 + i) as u64, byte);
+            }
+        }
+        let code = Box::leak(Box::new(code));
+        let jit = TemplateJit {
+            params: vane_arch::template::Params {
+                react: code,
+                trial: &|_| Heat::New,
+                #[cfg(feature = "target-js")]
+                flate: &vane_arch::DebugFlate {},
+                root: 0,
+                flags: vane_arch::template::Flags::default(),
+            },
+            pc: 0,
+            labels: Default::default(),
+            depth: 0,
+        };
+        struct Host {
+            state: BTreeMap<StateSlot, u64>,
+            code: BTreeMap<u64, u8>,
+        }
+        impl StackHost for Host {
+            fn load_reg(&mut self, _r: u8) -> u64 {
+                0
+            }
+            fn store_reg(&mut self, _r: u8, _v: u64) {}
+            fn load_state(&mut self, slot: &StateSlot) -> u64 {
+                self.state.get(slot).copied().unwrap_or(0)
+            }
+            fn store_state(&mut self, slot: &StateSlot, value: u64) {
+                self.state.insert(slot.clone(), value);
+            }
+            fn load_mem(&mut self, addr: u64, _width: vane_arch::MemWidth, _signed: bool) -> u64 {
+                self.code.get(&addr).copied().unwrap_or(0) as u64
+            }
+            fn store_mem(&mut self, _addr: u64, _width: vane_arch::MemWidth, _value: u64) {}
+            fn byte(&mut self, addr: u64) -> u8 {
+                self.code.get(&addr).copied().unwrap_or(0)
+            }
+            fn ecall(&mut self) -> bool {
+                false
+            }
+        }
+        let mut host = Host {
+            state: BTreeMap::new(),
+            code: BTreeMap::new(),
+        };
+        for (offset, word) in words.into_iter().enumerate() {
+            for (i, byte) in word.to_le_bytes().into_iter().enumerate() {
+                host.code.insert((offset * 4 + i) as u64, byte);
+            }
+        }
+        host.state.insert(state::x(30), 0xfeed);
+        assert!(matches!(
+            interpret(&a64_emit(&jit), &mut host),
+            Exit::TailCall(0xfeed)
+        ));
+        assert_eq!(host.state.get(&state::x(2)), Some(&23));
     }
 
     #[test]

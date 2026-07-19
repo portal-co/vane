@@ -26,6 +26,11 @@ pub mod state {
         StateSlot::new("a64:sp")
     }
 
+    pub fn scratch(name: char) -> StateSlot {
+        assert!(matches!(name, 'a' | 'b' | 'r'));
+        StateSlot::new(alloc::format!("a64:scratch:{name}"))
+    }
+
     pub fn nzcv(flag: char) -> StateSlot {
         assert!(matches!(flag, 'n' | 'z' | 'c' | 'v'));
         StateSlot::new(alloc::format!("a64:nzcv:{flag}"))
