@@ -157,6 +157,56 @@ fn float_eq(width: FloatWidth, lhs: u64, rhs: u64) -> bool {
         FloatWidth::F64 => f64::from_bits(lhs) == f64::from_bits(rhs),
     }
 }
+fn float_unordered(width: FloatWidth, lhs: u64, rhs: u64) -> bool {
+    match width {
+        FloatWidth::F32 => {
+            f32::from_bits(lhs as u32).is_nan() || f32::from_bits(rhs as u32).is_nan()
+        }
+        FloatWidth::F64 => f64::from_bits(lhs).is_nan() || f64::from_bits(rhs).is_nan(),
+    }
+}
+
+fn int_to_float(width: FloatWidth, signed: bool, int_width: u8, value: u64) -> u64 {
+    let value = if signed {
+        if int_width == 32 {
+            value as u32 as i32 as i64 as f64
+        } else {
+            value as i64 as f64
+        }
+    } else if int_width == 32 {
+        value as u32 as f64
+    } else {
+        value as f64
+    };
+    match width {
+        FloatWidth::F32 => (value as f32).to_bits() as u64,
+        FloatWidth::F64 => value.to_bits(),
+    }
+}
+fn float_to_int(width: FloatWidth, signed: bool, int_width: u8, value: u64) -> u64 {
+    let value = match width {
+        FloatWidth::F32 => f32::from_bits(value as u32) as f64,
+        FloatWidth::F64 => f64::from_bits(value),
+    };
+    if signed {
+        if int_width == 32 {
+            (value as i32) as i64 as u64
+        } else {
+            value as i64 as u64
+        }
+    } else if int_width == 32 {
+        value as u32 as u64
+    } else {
+        value as u64
+    }
+}
+fn float_convert(from: FloatWidth, to: FloatWidth, value: u64) -> u64 {
+    match (from, to) {
+        (FloatWidth::F32, FloatWidth::F32) | (FloatWidth::F64, FloatWidth::F64) => value,
+        (FloatWidth::F32, FloatWidth::F64) => (f32::from_bits(value as u32) as f64).to_bits(),
+        (FloatWidth::F64, FloatWidth::F32) => (f64::from_bits(value) as f32).to_bits() as u64,
+    }
+}
 
 /// Interpret a fully materialized `StackOp` trace against `host`, returning
 /// why it stopped.
@@ -480,6 +530,34 @@ pub fn interpret(ops: &[StackOp], host: &mut impl StackHost) -> Exit {
             StackOp::FloatEq { width } => {
                 let (a, b) = pop2!();
                 val.push(float_eq(*width, a, b) as u64);
+                ip += 1;
+            }
+            StackOp::FloatUnordered { width } => {
+                let (a, b) = pop2!();
+                val.push(float_unordered(*width, a, b) as u64);
+                ip += 1;
+            }
+            StackOp::IntToFloat {
+                width,
+                signed,
+                int_width,
+            } => {
+                let value = pop!();
+                val.push(int_to_float(*width, *signed, *int_width, value));
+                ip += 1;
+            }
+            StackOp::FloatToInt {
+                width,
+                signed,
+                int_width,
+            } => {
+                let value = pop!();
+                val.push(float_to_int(*width, *signed, *int_width, value));
+                ip += 1;
+            }
+            StackOp::FloatConvert { from, to } => {
+                let value = pop!();
+                val.push(float_convert(*from, *to, value));
                 ip += 1;
             }
 
@@ -944,7 +1022,8 @@ pub async fn interpret_async(ops: &[StackOp], host: &mut impl AsyncStackHost) ->
                 ip += 1;
             }
             StackOp::FloatUnary { width, op } => {
-                val.push(float_unary(*width, *op, pop!()));
+                let value = pop!();
+                val.push(float_unary(*width, *op, value));
                 ip += 1;
             }
             StackOp::FloatBinary { width, op } => {
@@ -960,6 +1039,34 @@ pub async fn interpret_async(ops: &[StackOp], host: &mut impl AsyncStackHost) ->
             StackOp::FloatEq { width } => {
                 let (a, b) = pop2!();
                 val.push(float_eq(*width, a, b) as u64);
+                ip += 1;
+            }
+            StackOp::FloatUnordered { width } => {
+                let (a, b) = pop2!();
+                val.push(float_unordered(*width, a, b) as u64);
+                ip += 1;
+            }
+            StackOp::IntToFloat {
+                width,
+                signed,
+                int_width,
+            } => {
+                let value = pop!();
+                val.push(int_to_float(*width, *signed, *int_width, value));
+                ip += 1;
+            }
+            StackOp::FloatToInt {
+                width,
+                signed,
+                int_width,
+            } => {
+                let value = pop!();
+                val.push(float_to_int(*width, *signed, *int_width, value));
+                ip += 1;
+            }
+            StackOp::FloatConvert { from, to } => {
+                let value = pop!();
+                val.push(float_convert(*from, *to, value));
                 ip += 1;
             }
             StackOp::LoadMem { width, signed } => {

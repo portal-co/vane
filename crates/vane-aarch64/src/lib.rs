@@ -1,6 +1,8 @@
 #![no_std]
 #[allow(hidden_glob_reexports)]
 extern crate alloc;
+#[cfg(test)]
+extern crate std;
 
 pub use vane_arch::*;
 pub use vane_target_core::{StackOp, StateSlot};
@@ -29,7 +31,7 @@ pub mod state {
     }
 
     pub fn scratch(name: char) -> StateSlot {
-        assert!(matches!(name, 'a' | 'b' | 'r'));
+        assert!(matches!(name, 'a' | 'b' | 'r' | 'f' | 'g'));
         StateSlot::new(alloc::format!("a64:scratch:{name}"))
     }
 

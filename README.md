@@ -76,9 +76,13 @@ AArch64 supports the matching initial `FLOATDP1`/`FLOATDP2` scalar subset
 operations round through the F32 representation after each operation.
 
 AArch64 remains an opt-in library frontend, not a replacement for the current
-WASM-bindgen RV64 reactor. It intentionally still traps the unimplemented
-scalar FP conversion, comparison/select, immediate, and fused families, and
-Vane's WASM JIT remains out of scope.
+WASM-bindgen RV64 reactor. Its scalar FP support also includes the documented
+non-fused `FMADD` family policy, immediate moves, compares/selects, and the
+basic `FMOV`/`SCVTF`/`UCVTF`/`FCVTZS`/`FCVTZU` integer boundary forms. Native
+execution is covered by raw-word tests and the generated JavaScript is checked
+with Node's `Function` parser; a browser execution corpus is still pending.
+It still traps rounding-mode variants and scalar FP memory; Vane's WASM JIT
+remains out of scope.
 
 ## Testing
 

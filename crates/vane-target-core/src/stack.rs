@@ -40,6 +40,9 @@ pub enum FloatUnaryOp {
     Sqrt,
 }
 
+/// Direction of an integer/scalar-FP conversion. Integer values are carried as
+/// u64; `int_width` selects W (32) versus X (64) representation.
+
 /// A named architectural state slot.
 ///
 /// Unlike [`StackOp::LoadReg`], a state slot has no implicit RISC-V x0
@@ -189,6 +192,29 @@ pub enum StackOp {
     /// zero.
     FloatEq {
         width: FloatWidth,
+    },
+    /// Pop rhs then lhs raw IEEE bits and push `1` when either operand is
+    /// NaN, enabling guest ordered/unordered FP comparison semantics.
+    FloatUnordered {
+        width: FloatWidth,
+    },
+    /// Pop an integer and push scalar IEEE bits.
+    IntToFloat {
+        width: FloatWidth,
+        signed: bool,
+        int_width: u8,
+    },
+    /// Pop scalar IEEE bits and push an integer rounded toward zero.
+    FloatToInt {
+        width: FloatWidth,
+        signed: bool,
+        int_width: u8,
+    },
+    /// Pop raw IEEE bits at `from` width and push bits rounded/converted to
+    /// `to` width.
+    FloatConvert {
+        from: FloatWidth,
+        to: FloatWidth,
     },
 
     // ── Memory ────────────────────────────────────────────────────────────

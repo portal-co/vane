@@ -10,14 +10,19 @@ use alloc::{boxed::Box, vec::Vec};
 use core::{array, fmt::Formatter};
 
 use disarm64::decoder_full::{
-    ADDSUB_IMM, ADDSUB_SHIFT, BRANCH_IMM, BRANCH_REG, COMPBRANCH, CONDBRANCH, CONDSEL, FLOATDP1,
-    FLOATDP2, IC_SYSTEM, LDST_IMM9, LDST_POS, LDST_REGOFF, LDST_UNSCALED, LDSTPAIR_INDEXED,
-    LDSTPAIR_OFF, LOG_SHIFT, MOVEWIDE, Operation, PCRELADDR,
+    ADDSUB_IMM, ADDSUB_SHIFT, BRANCH_IMM, BRANCH_REG, COMPBRANCH, CONDBRANCH, CONDSEL, FLOAT2INT,
+    FLOATCMP, FLOATDP1, FLOATDP2, FLOATDP3, FLOATIMM, FLOATSEL, IC_SYSTEM, LDST_IMM9, LDST_POS,
+    LDST_REGOFF, LDST_UNSCALED, LDSTPAIR_INDEXED, LDSTPAIR_OFF, LOG_SHIFT, MOVEWIDE, Operation,
+    PCRELADDR,
 };
 use vane_arch::template::TemplateJit;
 use vane_arch::{FloatBinOp, FloatUnaryOp, FloatWidth, Heat, StackOp};
 
 use crate::{Aarch64Display, state};
+
+#[cfg(all(test, feature = "target-js"))]
+#[path = "aarch64/aarch64_js_tests.rs"]
+mod aarch64_js_tests;
 
 fn word_at(this: &TemplateJit<'_>) -> u32 {
     u32::from_le_bytes(array::from_fn(|i| {
@@ -29,6 +34,10 @@ fn word_at(this: &TemplateJit<'_>) -> u32 {
 fn rd(word: u32) -> u8 {
     (word & 0x1f) as u8
 }
+fn ra(word: u32) -> u8 {
+    ((word >> 10) & 0x1f) as u8
+}
+
 fn rt2(word: u32) -> u8 {
     ((word >> 10) & 0x1f) as u8
 }
@@ -352,6 +361,162 @@ fn emit_condsel(ops: &mut Vec<StackOp>, word: u32, kind: u8) {
     }
     ops.push(StackOp::IfEnd);
     write_gpr(ops, rd(word), false);
+}
+
+fn emit_float_fma(ops: &mut Vec<StackOp>, word: u32, subtract: bool, negate: bool) {
+    let width = if word & (1 << 22) == 0 {
+        FloatWidth::F32
+    } else {
+        FloatWidth::F64
+    };
+    // StackOp deliberately rounds after multiply and add. This is a defined
+    // non-fused policy for the initial JIT/interpreter implementation.
+    read_fp(ops, rn(word));
+    read_fp(ops, ((word >> 16) & 0x1f) as u8);
+    ops.push(StackOp::FloatBinary {
+        width,
+        op: FloatBinOp::Mul,
+    });
+    if subtract {
+        ops.push(StackOp::FloatUnary {
+            width,
+            op: FloatUnaryOp::Neg,
+        });
+    }
+    read_fp(ops, ra(word));
+    ops.push(StackOp::FloatBinary {
+        width,
+        op: FloatBinOp::Add,
+    });
+    if negate {
+        ops.push(StackOp::FloatUnary {
+            width,
+            op: FloatUnaryOp::Neg,
+        });
+    }
+    write_fp(ops, rd(word), width);
+}
+
+fn emit_float_imm(ops: &mut Vec<StackOp>, word: u32) {
+    let imm8 = (word >> 13) & 0xff;
+    let width = if word & (1 << 22) == 0 {
+        FloatWidth::F32
+    } else {
+        FloatWidth::F64
+    };
+    let sign = imm8 >> 7;
+    let b6 = (imm8 >> 6) & 1;
+    let e_lo = (imm8 >> 4) & 3;
+    let frac = imm8 & 0xf;
+    let bits = match width {
+        FloatWidth::F32 => {
+            let exponent = ((!b6 & 1) << 7) | (b6 * 0x7c) | e_lo;
+            ((sign << 31) | (exponent << 23) | (frac << 19)) as u64
+        }
+        FloatWidth::F64 => {
+            let exponent = ((!b6 & 1) << 10) | (b6 * 0x3fc) | e_lo;
+            ((sign as u64) << 63) | ((exponent as u64) << 52) | ((frac as u64) << 48)
+        }
+    };
+    ops.push(StackOp::PushImm(bits));
+    write_fp(ops, rd(word), width);
+}
+
+fn emit_float2int(ops: &mut Vec<StackOp>, word: u32, kind: u8) {
+    let width = if word & (1 << 22) == 0 {
+        FloatWidth::F32
+    } else {
+        FloatWidth::F64
+    };
+    let int_width = if word >> 31 != 0 { 64 } else { 32 };
+    match kind {
+        0 => {
+            read_gpr(ops, rn(word), false);
+            if width == FloatWidth::F32 {
+                ops.push(StackOp::Trunc32);
+            }
+            write_fp(ops, rd(word), width);
+        }
+        1 => {
+            read_fp(ops, rn(word));
+            if width == FloatWidth::F32 {
+                ops.push(StackOp::Trunc32);
+            }
+            write_gpr(ops, rd(word), false);
+        }
+        2 | 3 => {
+            read_gpr(ops, rn(word), false);
+            ops.push(StackOp::IntToFloat {
+                width,
+                signed: kind == 2,
+                int_width,
+            });
+            write_fp(ops, rd(word), width);
+        }
+        4 | 5 => {
+            read_fp(ops, rn(word));
+            ops.push(StackOp::FloatToInt {
+                width,
+                signed: kind == 4,
+                int_width,
+            });
+            if int_width == 32 {
+                ops.push(StackOp::Trunc32);
+            }
+            write_gpr(ops, rd(word), false);
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn emit_float_compare(ops: &mut Vec<StackOp>, word: u32, compare_zero: bool) {
+    let width = if word & (1 << 22) == 0 {
+        FloatWidth::F32
+    } else {
+        FloatWidth::F64
+    };
+    let load_pair = |ops: &mut Vec<StackOp>| {
+        read_fp(ops, rn(word));
+        if compare_zero {
+            ops.push(StackOp::PushImm(0));
+        } else {
+            read_fp(ops, ((word >> 16) & 0x1f) as u8);
+        }
+    };
+    // ARM: N=less, Z=equal, V=unordered, C=greater-or-equal or unordered.
+    load_pair(ops);
+    ops.push(StackOp::FloatLt { width });
+    ops.push(StackOp::StoreState(state::nzcv('n')));
+    load_pair(ops);
+    ops.push(StackOp::FloatEq { width });
+    ops.push(StackOp::StoreState(state::nzcv('z')));
+    load_pair(ops);
+    ops.push(StackOp::FloatUnordered { width });
+    ops.push(StackOp::StoreState(state::nzcv('v')));
+    load_pair(ops);
+    ops.push(StackOp::FloatLt { width });
+    ops.push(StackOp::PushImm(0));
+    ops.push(StackOp::Eq64);
+    ops.push(StackOp::StoreState(state::nzcv('c')));
+}
+
+fn emit_float_select(ops: &mut Vec<StackOp>, word: u32) -> bool {
+    let width = if word & (1 << 22) == 0 {
+        FloatWidth::F32
+    } else {
+        FloatWidth::F64
+    };
+    if !condition_test(ops, ((word >> 12) & 0xf) as u8) {
+        return false;
+    }
+    ops.push(StackOp::IfBegin);
+    read_fp(ops, rn(word));
+    write_fp(ops, rd(word), width);
+    ops.push(StackOp::IfElse);
+    read_fp(ops, ((word >> 16) & 0x1f) as u8);
+    write_fp(ops, rd(word), width);
+    ops.push(StackOp::IfEnd);
+    true
 }
 
 fn emit_float_dp2(ops: &mut Vec<StackOp>, word: u32, op: FloatBinOp) {
@@ -788,6 +953,67 @@ fn a64_body(
             }
             emit_to(&mut ops, this, next, labels, depth);
         }
+        Operation::FLOATDP3(inner) => {
+            let (word, subtract, negate) = match inner {
+                FLOATDP3::FMADD_Fd_Fn_Fm_Fa(v) => (v.0, false, false),
+                FLOATDP3::FMADD_Fd_S_S_Fn_S_S_Fm_S_S_Fa_S_S(v) => (v.0, false, false),
+                FLOATDP3::FMSUB_Fd_Fn_Fm_Fa(v) => (v.0, true, false),
+                FLOATDP3::FMSUB_Fd_S_S_Fn_S_S_Fm_S_S_Fa_S_S(v) => (v.0, true, false),
+                FLOATDP3::FNMADD_Fd_Fn_Fm_Fa(v) => (v.0, false, true),
+                FLOATDP3::FNMADD_Fd_S_S_Fn_S_S_Fm_S_S_Fa_S_S(v) => (v.0, false, true),
+                FLOATDP3::FNMSUB_Fd_Fn_Fm_Fa(v) => (v.0, true, true),
+                FLOATDP3::FNMSUB_Fd_S_S_Fn_S_S_Fm_S_S_Fa_S_S(v) => (v.0, true, true),
+            };
+            emit_float_fma(&mut ops, word, subtract, negate);
+            emit_to(&mut ops, this, next, labels, depth);
+        }
+        Operation::FLOATIMM(inner) => {
+            let word = match inner {
+                FLOATIMM::FMOV_Fd_FPIMM(v) => v.0,
+                FLOATIMM::FMOV_Fd_S_S_FPIMM(v) => v.0,
+            };
+            emit_float_imm(&mut ops, word);
+            emit_to(&mut ops, this, next, labels, depth);
+        }
+        Operation::FLOAT2INT(inner) => {
+            let (word, kind) = match inner {
+                FLOAT2INT::FMOV_Fd_Rn(v) => (v.0, 0),
+                FLOAT2INT::FMOV_Fd_S_S_Rn_W(v) => (v.0, 0),
+                FLOAT2INT::FMOV_Rd_Fn(v) => (v.0, 1),
+                FLOAT2INT::FMOV_Rd_W_Fn_S_S(v) => (v.0, 1),
+                FLOAT2INT::SCVTF_Fd_S_D_Rn_W(v) => (v.0, 2),
+                FLOAT2INT::UCVTF_Fd_S_D_Rn_W(v) => (v.0, 3),
+                FLOAT2INT::FCVTZS_Rd_W_Fn_S_D(v) => (v.0, 4),
+                FLOAT2INT::FCVTZU_Rd_W_Fn_S_D(v) => (v.0, 5),
+                _ => return unsupported(&mut ops, word, "FLOAT2INT"),
+            };
+            emit_float2int(&mut ops, word, kind);
+            emit_to(&mut ops, this, next, labels, depth);
+        }
+        Operation::FLOATCMP(inner) => {
+            let (word, zero) = match inner {
+                FLOATCMP::FCMP_Fn_Fm(v) => (v.0, false),
+                FLOATCMP::FCMPE_Fn_Fm(v) => (v.0, false),
+                FLOATCMP::FCMP_Fn_S_S_Fm_S_S(v) => (v.0, false),
+                FLOATCMP::FCMPE_Fn_S_S_Fm_S_S(v) => (v.0, false),
+                FLOATCMP::FCMP_Fn_FPIMM0(v) => (v.0, true),
+                FLOATCMP::FCMPE_Fn_FPIMM0(v) => (v.0, true),
+                FLOATCMP::FCMP_Fn_S_S_FPIMM0(v) => (v.0, true),
+                FLOATCMP::FCMPE_Fn_S_S_FPIMM0(v) => (v.0, true),
+            };
+            emit_float_compare(&mut ops, word, zero);
+            emit_to(&mut ops, this, next, labels, depth);
+        }
+        Operation::FLOATSEL(inner) => {
+            let word = match inner {
+                FLOATSEL::FCSEL_Fd_Fn_Fm_COND(v) => v.0,
+                FLOATSEL::FCSEL_Fd_S_S_Fn_S_S_Fm_S_S_COND(v) => v.0,
+            };
+            if !emit_float_select(&mut ops, word) {
+                return unsupported(&mut ops, word, "FLOATSEL");
+            }
+            emit_to(&mut ops, this, next, labels, depth);
+        }
         Operation::FLOATDP1(inner) => {
             let word = match inner {
                 FLOATDP1::FABS_Fd_Fn(v) => {
@@ -832,6 +1058,22 @@ fn a64_body(
                     };
                     read_fp(&mut ops, rn(v.0));
                     write_fp(&mut ops, rd(v.0), width);
+                    v.0
+                }
+                FLOATDP1::FCVT_Fd_Fn(v) => {
+                    let from = if v.0 & (1 << 22) == 0 {
+                        FloatWidth::F32
+                    } else {
+                        FloatWidth::F64
+                    };
+                    let to = if (v.0 >> 15) & 3 == 0 {
+                        FloatWidth::F32
+                    } else {
+                        FloatWidth::F64
+                    };
+                    read_fp(&mut ops, rn(v.0));
+                    ops.push(StackOp::FloatConvert { from, to });
+                    write_fp(&mut ops, rd(v.0), to);
                     v.0
                 }
                 _ => return unsupported(&mut ops, word, "FLOATDP1"),
@@ -1229,6 +1471,101 @@ mod tests {
             host.state.get(&state::v(8)),
             Some(&(3.0f32.to_bits() as u64))
         );
+    }
+
+    #[test]
+    fn scalar_fp_compare_select_fma_immediate_and_conversions_execute() {
+        // fcmp d0,d1; fcsel d2,d3,d4,eq; fmadd d5,d6,d7,d8; fmov s9,#1;
+        // fmov x10,d11; fmov d12,x13; scvtf d14,x15; fcvtzs x16,d17; br x30.
+        let words = [
+            0x1e61_2000u32,
+            0x1e64_0c62,
+            0x1f47_20c5,
+            0x1e2e_1009,
+            0x9e66_016a,
+            0x9e67_01ac,
+            0x9e62_01ee,
+            0x9e78_0230,
+            0xd61f_03c0,
+        ];
+        let mut code = Mem::default();
+        for (offset, word) in words.into_iter().enumerate() {
+            for (i, byte) in word.to_le_bytes().into_iter().enumerate() {
+                code.write_byte((offset * 4 + i) as u64, byte);
+            }
+        }
+        let code = Box::leak(Box::new(code));
+        let jit = TemplateJit {
+            params: vane_arch::template::Params {
+                react: code,
+                trial: &|_| Heat::New,
+                #[cfg(feature = "target-js")]
+                flate: &vane_arch::DebugFlate {},
+                root: 0,
+                flags: vane_arch::template::Flags::default(),
+            },
+            pc: 0,
+            labels: Default::default(),
+            depth: 0,
+        };
+        struct Host {
+            state: BTreeMap<StateSlot, u64>,
+            code: BTreeMap<u64, u8>,
+        }
+        impl StackHost for Host {
+            fn load_reg(&mut self, _: u8) -> u64 {
+                0
+            }
+            fn store_reg(&mut self, _: u8, _: u64) {}
+            fn load_state(&mut self, slot: &StateSlot) -> u64 {
+                self.state.get(slot).copied().unwrap_or(0)
+            }
+            fn store_state(&mut self, slot: &StateSlot, value: u64) {
+                self.state.insert(slot.clone(), value);
+            }
+            fn load_mem(&mut self, _: u64, _: vane_arch::MemWidth, _: bool) -> u64 {
+                0
+            }
+            fn store_mem(&mut self, _: u64, _: vane_arch::MemWidth, _: u64) {}
+            fn byte(&mut self, addr: u64) -> u8 {
+                self.code.get(&addr).copied().unwrap_or(0)
+            }
+            fn ecall(&mut self) -> bool {
+                false
+            }
+        }
+        let mut host = Host {
+            state: BTreeMap::new(),
+            code: BTreeMap::new(),
+        };
+        for (offset, word) in words.into_iter().enumerate() {
+            for (i, byte) in word.to_le_bytes().into_iter().enumerate() {
+                host.code.insert((offset * 4 + i) as u64, byte);
+            }
+        }
+        host.state.insert(state::v(0), 4.0f64.to_bits());
+        host.state.insert(state::v(1), 4.0f64.to_bits());
+        host.state.insert(state::v(3), 7.0f64.to_bits());
+        host.state.insert(state::v(4), 9.0f64.to_bits());
+        host.state.insert(state::v(6), 2.0f64.to_bits());
+        host.state.insert(state::v(7), 3.0f64.to_bits());
+        host.state.insert(state::v(8), 5.0f64.to_bits());
+        host.state.insert(state::v(11), 0x1122_3344_5566_7788);
+        host.state.insert(state::x(13), 0x8877_6655_4433_2211);
+        host.state.insert(state::x(15), (-12i64) as u64);
+        host.state.insert(state::v(17), 42.75f64.to_bits());
+        host.state.insert(state::x(30), 0xfeed);
+        assert!(matches!(
+            interpret(&a64_emit(&jit), &mut host),
+            Exit::TailCall(0xfeed)
+        ));
+        assert_eq!(host.state[&state::v(2)], 7.0f64.to_bits());
+        assert_eq!(host.state[&state::v(5)], 11.0f64.to_bits());
+        assert_eq!(host.state[&state::v(9)], 1.0f32.to_bits() as u64);
+        assert_eq!(host.state[&state::x(10)], 0x1122_3344_5566_7788);
+        assert_eq!(host.state[&state::v(12)], 0x8877_6655_4433_2211);
+        assert_eq!(host.state[&state::v(14)], (-12.0f64).to_bits());
+        assert_eq!(host.state[&state::x(16)], 42);
     }
 
     #[test]

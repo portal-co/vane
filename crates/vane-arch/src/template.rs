@@ -608,6 +608,56 @@ pub fn render_stack_to_js_with_names<N: HostMethodNames<VaneHostMethod>>(
                 };
                 push!(alloc::format!("fp_eq({width},{a},{b})?1n:0n"));
             }
+            StackOp::FloatUnordered { width } => {
+                let (a, b) = pop2!();
+                let width = match width {
+                    FloatWidth::F32 => "32",
+                    FloatWidth::F64 => "64",
+                };
+                push!(alloc::format!("fp_unordered({width},{a},{b})?1n:0n"));
+            }
+            StackOp::IntToFloat {
+                width,
+                signed: is_signed,
+                int_width,
+            } => {
+                let value = pop!();
+                let width = match width {
+                    FloatWidth::F32 => "32",
+                    FloatWidth::F64 => "64",
+                };
+                let signed = if is_signed { "true" } else { "false" };
+                push!(alloc::format!(
+                    "fp_from_int({width},{signed},{int_width},{value})"
+                ));
+            }
+            StackOp::FloatToInt {
+                width,
+                signed: is_signed,
+                int_width,
+            } => {
+                let value = pop!();
+                let width = match width {
+                    FloatWidth::F32 => "32",
+                    FloatWidth::F64 => "64",
+                };
+                let signed = if is_signed { "true" } else { "false" };
+                push!(alloc::format!(
+                    "fp_to_int({width},{signed},{int_width},{value})"
+                ));
+            }
+            StackOp::FloatConvert { from, to } => {
+                let value = pop!();
+                let from = match from {
+                    FloatWidth::F32 => "32",
+                    FloatWidth::F64 => "64",
+                };
+                let to = match to {
+                    FloatWidth::F32 => "32",
+                    FloatWidth::F64 => "64",
+                };
+                push!(alloc::format!("fp_convert({from},{to},{value})"));
+            }
 
             // ── Memory ────────────────────────────────────────────────────
             StackOp::LoadMem {
@@ -1001,6 +1051,10 @@ pub fn render_stack_to_wasm<'a>(
                 | StackOp::FloatBinary { .. }
                 | StackOp::FloatLt { .. }
                 | StackOp::FloatEq { .. }
+                | StackOp::FloatUnordered { .. }
+                | StackOp::IntToFloat { .. }
+                | StackOp::FloatToInt { .. }
+                | StackOp::FloatConvert { .. }
                 | StackOp::LoadMem { .. }
                 | StackOp::StoreMem { .. }
                 | StackOp::Ecall
@@ -1121,7 +1175,7 @@ impl<'a> Display for CoreJS<'a> {
 
         write!(
             fmt,
-            "return async function(){{let {max64}=$.f,{max32}=0xffff_ffffn,{signed}=(a=>BigInt.asIntN(64,a)),{unsigned}=(a=>BigInt.asUintN(64,a)),fp_buf=new ArrayBuffer(8),fp_dv=new DataView(fp_buf),fp_unary=((w,o,a)=>{{if(w===32){{fp_dv.setUint32(0,Number(a&0xffffffffn),true);let v=fp_dv.getFloat32(0,true);v=o===\"abs\"?Math.abs(v):o===\"neg\"?-v:Math.sqrt(v);fp_dv.setFloat32(0,v,true);return BigInt(fp_dv.getUint32(0,true));}}fp_dv.setBigUint64(0,a,true);let v=fp_dv.getFloat64(0,true);v=o===\"abs\"?Math.abs(v):o===\"neg\"?-v:Math.sqrt(v);fp_dv.setFloat64(0,v,true);return fp_dv.getBigUint64(0,true);}}),fp_binary=((w,o,a,b)=>{{let cv=(x=>{{if(w===32){{fp_dv.setUint32(0,Number(x&0xffffffffn),true);return fp_dv.getFloat32(0,true);}}fp_dv.setBigUint64(0,x,true);return fp_dv.getFloat64(0,true);}}),av=cv(a),bv=cv(b),v=o===\"add\"?av+bv:o===\"sub\"?av-bv:o===\"mul\"?av*bv:o===\"div\"?av/bv:o===\"min\"?Math.min(av,bv):Math.max(av,bv);if(w===32){{fp_dv.setFloat32(0,v,true);return BigInt(fp_dv.getUint32(0,true));}}fp_dv.setFloat64(0,v,true);return fp_dv.getBigUint64(0,true);}}),fp_lt=((w,a,b)=>{{if(w===32){{fp_dv.setUint32(0,Number(a&0xffffffffn),true);let av=fp_dv.getFloat32(0,true);fp_dv.setUint32(0,Number(b&0xffffffffn),true);return av<fp_dv.getFloat32(0,true);}}fp_dv.setBigUint64(0,a,true);let av=fp_dv.getFloat64(0,true);fp_dv.setBigUint64(0,b,true);return av<fp_dv.getFloat64(0,true);}}),fp_eq=((w,a,b)=>{{if(w===32){{fp_dv.setUint32(0,Number(a&0xffffffffn),true);let av=fp_dv.getFloat32(0,true);fp_dv.setUint32(0,Number(b&0xffffffffn),true);return av===fp_dv.getFloat32(0,true);}}fp_dv.setBigUint64(0,a,true);let av=fp_dv.getFloat64(0,true);fp_dv.setBigUint64(0,b,true);return av===fp_dv.getFloat64(0,true);}}),",
+            "return async function(){{let {max64}=$.f,{max32}=0xffff_ffffn,{signed}=(a=>BigInt.asIntN(64,a)),{unsigned}=(a=>BigInt.asUintN(64,a)),fp_buf=new ArrayBuffer(8),fp_dv=new DataView(fp_buf),fp_unary=((w,o,a)=>{{if(w===32){{fp_dv.setUint32(0,Number(a&0xffffffffn),true);let v=fp_dv.getFloat32(0,true);v=o===\"abs\"?Math.abs(v):o===\"neg\"?-v:Math.sqrt(v);fp_dv.setFloat32(0,v,true);return BigInt(fp_dv.getUint32(0,true));}}fp_dv.setBigUint64(0,a,true);let v=fp_dv.getFloat64(0,true);v=o===\"abs\"?Math.abs(v):o===\"neg\"?-v:Math.sqrt(v);fp_dv.setFloat64(0,v,true);return fp_dv.getBigUint64(0,true);}}),fp_binary=((w,o,a,b)=>{{let cv=(x=>{{if(w===32){{fp_dv.setUint32(0,Number(x&0xffffffffn),true);return fp_dv.getFloat32(0,true);}}fp_dv.setBigUint64(0,x,true);return fp_dv.getFloat64(0,true);}}),av=cv(a),bv=cv(b),v=o===\"add\"?av+bv:o===\"sub\"?av-bv:o===\"mul\"?av*bv:o===\"div\"?av/bv:o===\"min\"?Math.min(av,bv):Math.max(av,bv);if(w===32){{fp_dv.setFloat32(0,v,true);return BigInt(fp_dv.getUint32(0,true));}}fp_dv.setFloat64(0,v,true);return fp_dv.getBigUint64(0,true);}}),fp_lt=((w,a,b)=>{{if(w===32){{fp_dv.setUint32(0,Number(a&0xffffffffn),true);let av=fp_dv.getFloat32(0,true);fp_dv.setUint32(0,Number(b&0xffffffffn),true);return av<fp_dv.getFloat32(0,true);}}fp_dv.setBigUint64(0,a,true);let av=fp_dv.getFloat64(0,true);fp_dv.setBigUint64(0,b,true);return av<fp_dv.getFloat64(0,true);}}),fp_eq=((w,a,b)=>{{if(w===32){{fp_dv.setUint32(0,Number(a&0xffffffffn),true);let av=fp_dv.getFloat32(0,true);fp_dv.setUint32(0,Number(b&0xffffffffn),true);return av===fp_dv.getFloat32(0,true);}}fp_dv.setBigUint64(0,a,true);let av=fp_dv.getFloat64(0,true);fp_dv.setBigUint64(0,b,true);return av===fp_dv.getFloat64(0,true);}}),fp_from_int=((w,s,b,x)=>{{let n=s?(b===32?Number(BigInt.asIntN(32,x)):Number(BigInt.asIntN(64,x))):(b===32?Number(BigInt.asUintN(32,x)):Number(BigInt.asUintN(64,x)));if(w===32){{fp_dv.setFloat32(0,n,true);return BigInt(fp_dv.getUint32(0,true));}}fp_dv.setFloat64(0,n,true);return fp_dv.getBigUint64(0,true);}}),fp_to_int=((w,s,b,x)=>{{let n;if(w===32){{fp_dv.setUint32(0,Number(x&0xffffffffn),true);n=fp_dv.getFloat32(0,true);}}else{{fp_dv.setBigUint64(0,x,true);n=fp_dv.getFloat64(0,true);}}return BigInt.asUintN(b,BigInt(Math.trunc(n)));}}),fp_convert=((a,b,x)=>{{if(a===b)return x;if(a===32){{fp_dv.setUint32(0,Number(x&0xffffffffn),true);fp_dv.setFloat64(0,fp_dv.getFloat32(0,true),true);return fp_dv.getBigUint64(0,true);}}fp_dv.setBigUint64(0,x,true);fp_dv.setFloat32(0,fp_dv.getFloat64(0,true),true);return BigInt(fp_dv.getUint32(0,true));}}),fp_unordered=((w,a,b)=>{{if(w===32){{fp_dv.setUint32(0,Number(a&0xffffffffn),true);let av=fp_dv.getFloat32(0,true);fp_dv.setUint32(0,Number(b&0xffffffffn),true);return Number.isNaN(av)||Number.isNaN(fp_dv.getFloat32(0,true));}}fp_dv.setBigUint64(0,a,true);let av=fp_dv.getFloat64(0,true);fp_dv.setBigUint64(0,b,true);return Number.isNaN(av)||Number.isNaN(fp_dv.getFloat64(0,true));}}),",
         )?;
 
         self.write_data_function(fmt, &data)?;
