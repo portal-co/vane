@@ -10,8 +10,8 @@ use alloc::{boxed::Box, vec::Vec};
 use core::{array, fmt::Formatter};
 
 use disarm64::decoder_full::{
-    ADDSUB_IMM, ADDSUB_SHIFT, BRANCH_IMM, BRANCH_REG, COMPBRANCH, CONDBRANCH, LDST_POS, LOG_SHIFT,
-    MOVEWIDE, Operation, PCRELADDR,
+    ADDSUB_IMM, ADDSUB_SHIFT, BRANCH_IMM, BRANCH_REG, COMPBRANCH, CONDBRANCH, CONDSEL, IC_SYSTEM,
+    LDST_POS, LOG_SHIFT, MOVEWIDE, Operation, PCRELADDR,
 };
 use vane_arch::template::TemplateJit;
 use vane_arch::{Heat, StackOp};
@@ -282,6 +282,73 @@ fn emit_addsub(
     }
 }
 
+fn emit_mrs_nzcv(ops: &mut Vec<StackOp>, word: u32) {
+    for (flag, shift) in [('n', 31), ('z', 30), ('c', 29), ('v', 28)] {
+        ops.push(StackOp::LoadState(state::nzcv(flag)));
+        ops.push(StackOp::PushImm(shift));
+        ops.push(StackOp::Shl64);
+        if shift != 31 {
+            ops.push(StackOp::Or64);
+        }
+    }
+    write_gpr(ops, rd(word), false);
+}
+
+fn emit_msr_nzcv(ops: &mut Vec<StackOp>, word: u32) {
+    for (flag, shift) in [('n', 31), ('z', 30), ('c', 29), ('v', 28)] {
+        read_gpr(ops, rd(word), false);
+        ops.push(StackOp::PushImm(shift));
+        ops.push(StackOp::ShrU64);
+        ops.push(StackOp::PushImm(1));
+        ops.push(StackOp::And64);
+        ops.push(StackOp::StoreState(state::nzcv(flag)));
+    }
+}
+
+fn emit_condsel(ops: &mut Vec<StackOp>, word: u32, kind: u8) {
+    let is_32bit = word >> 31 == 0;
+    let cond = ((word >> 12) & 0xf) as u8;
+    // StackOp's IfBegin only evaluates one branch, exactly matching CSEL's
+    // conditionally selected operand behavior.
+    condition_test(ops, cond);
+    ops.push(StackOp::IfBegin);
+    read_gpr(ops, rn(word), false);
+    if is_32bit {
+        ops.push(StackOp::Trunc32);
+    }
+    ops.push(StackOp::IfElse);
+    read_gpr(ops, ((word >> 16) & 0x1f) as u8, false);
+    if is_32bit {
+        ops.push(StackOp::Trunc32);
+    }
+    match kind {
+        1 => {
+            ops.push(StackOp::PushImm(1));
+            ops.push(StackOp::Add64);
+        }
+        2 => {
+            ops.push(StackOp::PushImm(if is_32bit {
+                0xffff_ffff
+            } else {
+                u64::MAX
+            }));
+            ops.push(StackOp::Xor64);
+        }
+        3 => {
+            ops.push(StackOp::StoreState(state::scratch('b')));
+            ops.push(StackOp::PushImm(0));
+            ops.push(StackOp::LoadState(state::scratch('b')));
+            ops.push(StackOp::Sub64);
+        }
+        _ => {}
+    }
+    if is_32bit {
+        ops.push(StackOp::Trunc32);
+    }
+    ops.push(StackOp::IfEnd);
+    write_gpr(ops, rd(word), false);
+}
+
 fn emit_pcreladdr(ops: &mut Vec<StackOp>, this: &TemplateJit<'_>, word: u32, page: bool) {
     let immhi = ((word >> 5) & 0x7ffff) << 2;
     let immlo = (word >> 29) & 3;
@@ -475,6 +542,31 @@ fn a64_body(
                 _ => return unsupported(&mut ops, word, "ADDSUB_IMM"),
             };
             emit_addsub_imm(&mut ops, word, is_sub, true, set_flags);
+            emit_to(&mut ops, this, next, labels, depth);
+        }
+        Operation::IC_SYSTEM(inner) => {
+            // Only the architectural NZCV system register belongs to the
+            // integer execution state currently modeled by Vane.
+            const NZCV: u32 = 0x5a10;
+            match inner {
+                IC_SYSTEM::MRS_Rt_SYSREG(v) if ((v.0 >> 5) & 0xffff) == NZCV => {
+                    emit_mrs_nzcv(&mut ops, v.0);
+                }
+                IC_SYSTEM::MSR_SYSREG_Rt(v) if ((v.0 >> 5) & 0xffff) == NZCV => {
+                    emit_msr_nzcv(&mut ops, v.0);
+                }
+                _ => return unsupported(&mut ops, word, "IC_SYSTEM"),
+            }
+            emit_to(&mut ops, this, next, labels, depth);
+        }
+        Operation::CONDSEL(inner) => {
+            let (word, kind) = match inner {
+                CONDSEL::CSEL_Rd_Rn_Rm_COND(v) => (v.0, 0),
+                CONDSEL::CSINC_Rd_Rn_Rm_COND(v) => (v.0, 1),
+                CONDSEL::CSINV_Rd_Rn_Rm_COND(v) => (v.0, 2),
+                CONDSEL::CSNEG_Rd_Rn_Rm_COND(v) => (v.0, 3),
+            };
+            emit_condsel(&mut ops, word, kind);
             emit_to(&mut ops, this, next, labels, depth);
         }
         Operation::PCRELADDR(inner) => {
