@@ -76,13 +76,16 @@ AArch64 supports the matching initial `FLOATDP1`/`FLOATDP2` scalar subset
 operations round through the F32 representation after each operation.
 
 AArch64 remains an opt-in library frontend, not a replacement for the current
-WASM-bindgen RV64 reactor. Its scalar FP support also includes the documented
-non-fused `FMADD` family policy, immediate moves, compares/selects, and the
-basic `FMOV`/`SCVTF`/`UCVTF`/`FCVTZS`/`FCVTZU` integer boundary forms. Native
+WASM-bindgen RV64 reactor. It covers extended-register add/subtract, logical
+immediates and flags, divide, variable shifts/rotate, MADD/MSUB, long
+multiply-add/subtract, SMULH/UMULH, and BRK in addition to the earlier integer
+subset. Its scalar FP support also includes the documented non-fused `FMADD`
+family policy, immediate moves, compares/selects, and the basic
+`FMOV`/`SCVTF`/`UCVTF`/`FCVTZS`/`FCVTZU` integer boundary forms. Native
 execution is covered by raw-word tests and the generated JavaScript is checked
 with Node's `Function` parser; a browser execution corpus is still pending.
-It still traps rounding-mode variants and scalar FP memory; Vane's WASM JIT
-remains out of scope.
+It still traps rounding-mode FP variants and scalar FP memory; Vane's WASM
+JIT remains out of scope.
 
 ## Testing
 
@@ -124,7 +127,7 @@ See [`JIT_HOST_METHOD_NAMES.md`](JIT_HOST_METHOD_NAMES.md).
 - Interpreter: implemented and tested for RV64IM
 - JS JIT: implemented and tested for RV64IM
 - WASM JIT: stub only, not functional
-- Floating-point: scalar raw-bit F32/F64 runtime plus the initial RV64 and AArch64 trace subsets; conversions, fused operations, and most AArch64 FP families remain unsupported
+- Floating-point: scalar raw-bit F32/F64 runtime plus documented RV64/AArch64 trace subsets; rounding-mode variants and scalar AArch64 FP memory remain unsupported
 - Atomics: not implemented
 - System/privilege modes: not implemented; `ecall` handling is minimal (only syscall 93 is meaningful)
 

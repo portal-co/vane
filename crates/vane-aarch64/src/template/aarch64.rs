@@ -10,10 +10,10 @@ use alloc::{boxed::Box, vec::Vec};
 use core::{array, fmt::Formatter};
 
 use disarm64::decoder_full::{
-    ADDSUB_IMM, ADDSUB_SHIFT, BRANCH_IMM, BRANCH_REG, COMPBRANCH, CONDBRANCH, CONDSEL, FLOAT2INT,
-    FLOATCMP, FLOATDP1, FLOATDP2, FLOATDP3, FLOATIMM, FLOATSEL, IC_SYSTEM, LDST_IMM9, LDST_POS,
-    LDST_REGOFF, LDST_UNSCALED, LDSTPAIR_INDEXED, LDSTPAIR_OFF, LOG_SHIFT, MOVEWIDE, Operation,
-    PCRELADDR,
+    ADDSUB_EXT, ADDSUB_IMM, ADDSUB_SHIFT, BITFIELD, BRANCH_IMM, BRANCH_REG, COMPBRANCH, CONDBRANCH,
+    CONDSEL, DP_2SRC, DP_3SRC, EXCEPTION, FLOAT2INT, FLOATCMP, FLOATDP1, FLOATDP2, FLOATDP3,
+    FLOATIMM, FLOATSEL, IC_SYSTEM, LDST_IMM9, LDST_POS, LDST_REGOFF, LDST_UNSCALED,
+    LDSTPAIR_INDEXED, LDSTPAIR_OFF, LOG_IMM, LOG_SHIFT, MOVEWIDE, Operation, PCRELADDR,
 };
 use vane_arch::template::TemplateJit;
 use vane_arch::{FloatBinOp, FloatUnaryOp, FloatWidth, Heat, StackOp};
@@ -197,6 +197,354 @@ fn emit_shifted_gpr(ops: &mut Vec<StackOp>, reg: u8, shift_type: u8, shift: u8, 
     if is_32bit {
         ops.push(StackOp::Trunc32);
     }
+}
+
+fn logical_imm(word: u32) -> u64 {
+    let n = (word >> 22) & 1;
+    let immr = (word >> 16) & 0x3f;
+    let imms = (word >> 10) & 0x3f;
+    let ni = (n << 6) | ((!imms) & 0x3f);
+    let len = 31 - ni.leading_zeros();
+    let esize = 1u32 << len;
+    let levels = esize - 1;
+    let s = imms & levels;
+    let r = immr & levels;
+    let ones = if s == 63 {
+        u64::MAX
+    } else {
+        (1u64 << (s + 1)) - 1
+    };
+    let element = if esize == 64 {
+        ones.rotate_right(r)
+    } else if r == 0 {
+        ones
+    } else {
+        let mask = (1u64 << esize) - 1;
+        ((ones >> r) | (ones << (esize - r))) & mask
+    };
+    let mut result = 0;
+    let mut shift = 0;
+    while shift < 64 {
+        result |= element << shift;
+        shift += esize;
+    }
+    result
+}
+
+fn emit_logical_flags(ops: &mut Vec<StackOp>, dst: u8, is_32bit: bool) {
+    ops.push(StackOp::StoreState(state::scratch('r')));
+    load_scratch_signed(ops, 'r', is_32bit);
+    ops.push(StackOp::PushImm(0));
+    ops.push(StackOp::LtS64);
+    ops.push(StackOp::StoreState(state::nzcv('n')));
+    load_scratch(ops, 'r', is_32bit);
+    ops.push(StackOp::PushImm(0));
+    ops.push(StackOp::Eq64);
+    ops.push(StackOp::StoreState(state::nzcv('z')));
+    for flag in ['c', 'v'] {
+        ops.push(StackOp::PushImm(0));
+        ops.push(StackOp::StoreState(state::nzcv(flag)));
+    }
+    load_scratch(ops, 'r', is_32bit);
+    write_gpr(ops, dst, false);
+}
+
+fn emit_logical_imm(ops: &mut Vec<StackOp>, word: u32, kind: u8, set_flags: bool) {
+    let is_32bit = word >> 31 == 0;
+    read_gpr(ops, rn(word), false);
+    ops.push(StackOp::PushImm(logical_imm(word)));
+    ops.push(match kind {
+        0 => StackOp::And64,
+        1 => StackOp::Or64,
+        2 => StackOp::Xor64,
+        _ => unreachable!(),
+    });
+    if is_32bit {
+        ops.push(StackOp::Trunc32);
+    }
+    if set_flags {
+        emit_logical_flags(ops, rd(word), is_32bit);
+    } else {
+        write_gpr(ops, rd(word), false);
+    }
+}
+
+fn replicate_bits(element: u64, width: u32) -> u64 {
+    let mut result = 0;
+    let mut shift = 0;
+    while shift < 64 {
+        result |= element << shift;
+        shift += width;
+    }
+    result
+}
+
+fn bitfield_masks(word: u32) -> (u64, u64) {
+    let n = (word >> 22) & 1;
+    let immr = (word >> 16) & 0x3f;
+    let imms = (word >> 10) & 0x3f;
+    let ni = (n << 6) | ((!imms) & 0x3f);
+    let len = 31 - ni.leading_zeros();
+    let esize = 1u32 << len;
+    let levels = esize - 1;
+    let s = imms & levels;
+    let r = immr & levels;
+    let diff = s.wrapping_sub(r) & levels;
+    let ones = if s == 63 {
+        u64::MAX
+    } else {
+        (1u64 << (s + 1)) - 1
+    };
+    let top = if diff == 63 {
+        u64::MAX
+    } else {
+        (1u64 << (diff + 1)) - 1
+    };
+    let rotated = if esize == 64 {
+        ones.rotate_right(r)
+    } else if r == 0 {
+        ones
+    } else {
+        let mask = (1u64 << esize) - 1;
+        ((ones >> r) | (ones << (esize - r))) & mask
+    };
+    (replicate_bits(rotated, esize), replicate_bits(top, esize))
+}
+
+fn emit_bitfield(ops: &mut Vec<StackOp>, word: u32, kind: u8) {
+    let is_32bit = word >> 31 == 0;
+    let width = if is_32bit { 32 } else { 64 };
+    let immr = ((word >> 16) & if is_32bit { 31 } else { 63 }) as u64;
+    let (wmask, tmask) = bitfield_masks(word);
+    // bot = ROR(Rn, immr) & wmask. ROR #0 is intentionally a no-op.
+    read_gpr(ops, rn(word), false);
+    if is_32bit {
+        ops.push(StackOp::Trunc32);
+    }
+    ops.push(StackOp::StoreState(state::scratch('a')));
+    load_scratch(ops, 'a', is_32bit);
+    if immr != 0 {
+        ops.push(StackOp::PushImm(immr));
+        ops.push(StackOp::ShrU64);
+        load_scratch(ops, 'a', is_32bit);
+        ops.push(StackOp::PushImm(width - immr));
+        ops.push(StackOp::Shl64);
+        ops.push(StackOp::Or64);
+    }
+    ops.push(StackOp::PushImm(wmask));
+    ops.push(StackOp::And64);
+    ops.push(StackOp::PushImm(tmask));
+    ops.push(StackOp::And64);
+    if kind == 2 {
+        // BFM: preserve destination bits outside tmask.
+        ops.push(StackOp::StoreState(state::scratch('b')));
+        read_gpr(ops, rd(word), false);
+        if is_32bit {
+            ops.push(StackOp::Trunc32);
+        }
+        ops.push(StackOp::PushImm(!tmask));
+        ops.push(StackOp::And64);
+        load_scratch(ops, 'b', is_32bit);
+        ops.push(StackOp::Or64);
+    } else if kind == 1 {
+        // SBFM: fill the high part selected by ~tmask.
+        ops.push(StackOp::StoreState(state::scratch('b')));
+        read_gpr(ops, rn(word), false);
+        if is_32bit {
+            ops.push(StackOp::Trunc32);
+        }
+        let imms = ((word >> 10) & if is_32bit { 31 } else { 63 }) as u64;
+        ops.push(StackOp::PushImm(imms));
+        ops.push(StackOp::ShrU64);
+        ops.push(StackOp::PushImm(1));
+        ops.push(StackOp::And64);
+        ops.push(StackOp::IfBegin);
+        ops.push(StackOp::PushImm(!tmask));
+        ops.push(StackOp::IfElse);
+        ops.push(StackOp::PushImm(0));
+        ops.push(StackOp::IfEnd);
+        load_scratch(ops, 'b', is_32bit);
+        ops.push(StackOp::Or64);
+    }
+    if is_32bit {
+        ops.push(StackOp::Trunc32);
+    }
+    write_gpr(ops, rd(word), false);
+}
+
+fn emit_extended_gpr(ops: &mut Vec<StackOp>, word: u32, is_32bit: bool) {
+    let option = ((word >> 13) & 7) as u8;
+    let shift = ((word >> 10) & 7) as u8;
+    read_gpr(ops, ((word >> 16) & 0x1f) as u8, false);
+    match option {
+        0 => {
+            ops.push(StackOp::PushImm(0xff));
+            ops.push(StackOp::And64);
+        }
+        1 => {
+            ops.push(StackOp::PushImm(0xffff));
+            ops.push(StackOp::And64);
+        }
+        2 => ops.push(StackOp::Trunc32),
+        4 => {
+            ops.push(StackOp::PushImm(56));
+            ops.push(StackOp::Shl64);
+            ops.push(StackOp::PushImm(56));
+            ops.push(StackOp::ShrS64);
+        }
+        5 => {
+            ops.push(StackOp::PushImm(48));
+            ops.push(StackOp::Shl64);
+            ops.push(StackOp::PushImm(48));
+            ops.push(StackOp::ShrS64);
+        }
+        6 => ops.push(StackOp::SignExt32),
+        3 | 7 => {}
+        _ => unreachable!(),
+    }
+    if shift != 0 {
+        ops.push(StackOp::PushImm(shift as u64));
+        ops.push(StackOp::Shl64);
+    }
+    if is_32bit {
+        ops.push(StackOp::Trunc32);
+    }
+}
+
+fn emit_addsub_ext(ops: &mut Vec<StackOp>, word: u32, is_sub: bool, set_flags: bool) {
+    let is_32bit = word >> 31 == 0;
+    read_gpr(ops, rn(word), true);
+    if is_32bit {
+        ops.push(StackOp::Trunc32);
+    }
+    if set_flags {
+        ops.push(StackOp::StoreState(state::scratch('a')));
+        load_scratch(ops, 'a', is_32bit);
+    }
+    emit_extended_gpr(ops, word, is_32bit);
+    if set_flags {
+        ops.push(StackOp::StoreState(state::scratch('b')));
+        load_scratch(ops, 'b', is_32bit);
+    }
+    ops.push(if is_sub {
+        StackOp::Sub64
+    } else {
+        StackOp::Add64
+    });
+    if set_flags {
+        emit_result_and_flags(ops, rd(word), false, is_32bit, is_sub);
+    } else {
+        if is_32bit {
+            ops.push(StackOp::Trunc32);
+        }
+        write_gpr(ops, rd(word), true);
+    }
+}
+
+fn emit_dp2(ops: &mut Vec<StackOp>, word: u32, kind: u8) {
+    let is_32bit = word >> 31 == 0;
+    read_gpr(ops, rn(word), false);
+    if is_32bit {
+        ops.push(StackOp::Trunc32);
+    }
+    if kind == 1 || kind == 4 {
+        // signed divide/arithmetic shift
+        if is_32bit {
+            ops.push(StackOp::SignExt32);
+        }
+    }
+    if kind == 5 {
+        // RORV: a >> r | a << (width-r)
+        ops.push(StackOp::StoreState(state::scratch('a')));
+        read_gpr(ops, ((word >> 16) & 0x1f) as u8, false);
+        ops.push(StackOp::PushImm(if is_32bit { 31 } else { 63 }));
+        ops.push(StackOp::And64);
+        ops.push(StackOp::StoreState(state::scratch('b')));
+        load_scratch(ops, 'a', is_32bit);
+        load_scratch(ops, 'b', false);
+        ops.push(StackOp::ShrU64);
+        load_scratch(ops, 'a', is_32bit);
+        ops.push(StackOp::PushImm(if is_32bit { 32 } else { 64 }));
+        load_scratch(ops, 'b', false);
+        ops.push(StackOp::Sub64);
+        ops.push(StackOp::Shl64);
+        ops.push(StackOp::Or64);
+    } else {
+        read_gpr(ops, ((word >> 16) & 0x1f) as u8, false);
+        if is_32bit {
+            ops.push(StackOp::Trunc32);
+        }
+        ops.push(match kind {
+            0 => StackOp::DivU64,
+            1 => StackOp::DivS64,
+            2 => StackOp::Shl64,
+            3 => StackOp::ShrU64,
+            4 => StackOp::ShrS64,
+            _ => unreachable!(),
+        });
+    }
+    if is_32bit {
+        ops.push(StackOp::Trunc32);
+    }
+    write_gpr(ops, rd(word), false);
+}
+
+fn emit_dp3(ops: &mut Vec<StackOp>, word: u32, kind: u8) {
+    let is_32bit = word >> 31 == 0;
+    let read_widened = |ops: &mut Vec<StackOp>, reg: u8, signed: bool| {
+        read_gpr(ops, reg, false);
+        if signed {
+            ops.push(StackOp::SignExt32);
+        } else {
+            ops.push(StackOp::Trunc32);
+        }
+    };
+    match kind {
+        0 | 1 => {
+            // MADD/MSUB
+            read_gpr(ops, ra(word), false);
+            read_gpr(ops, rn(word), false);
+            read_gpr(ops, ((word >> 16) & 0x1f) as u8, false);
+            if is_32bit {
+                ops.push(StackOp::Trunc32);
+                ops.push(StackOp::StoreState(state::scratch('b')));
+                ops.push(StackOp::Trunc32);
+                load_scratch(ops, 'b', true);
+            }
+            ops.push(StackOp::Mul64);
+            ops.push(if kind == 0 {
+                StackOp::Add64
+            } else {
+                StackOp::Sub64
+            });
+            if is_32bit {
+                ops.push(StackOp::Trunc32);
+            }
+        }
+        2 | 3 | 4 | 5 => {
+            // signed/unsigned long MADD/MSUB
+            read_gpr(ops, ra(word), false);
+            read_widened(ops, rn(word), kind == 2 || kind == 3);
+            read_widened(ops, ((word >> 16) & 0x1f) as u8, kind == 2 || kind == 3);
+            ops.push(StackOp::Mul64);
+            ops.push(if kind == 2 || kind == 4 {
+                StackOp::Add64
+            } else {
+                StackOp::Sub64
+            });
+        }
+        6 | 7 => {
+            read_gpr(ops, rn(word), false);
+            read_gpr(ops, ((word >> 16) & 0x1f) as u8, false);
+            ops.push(if kind == 6 {
+                StackOp::MulHS64
+            } else {
+                StackOp::MulHU64
+            });
+        }
+        _ => unreachable!(),
+    }
+    write_gpr(ops, rd(word), false);
 }
 
 fn emit_result_and_flags(
@@ -1259,6 +1607,68 @@ fn a64_body(
             emit_pos_mem(&mut ops, word, load, width, signed, scale);
             emit_to(&mut ops, this, next, labels, depth);
         }
+        Operation::BITFIELD(inner) => {
+            let (word, kind) = match inner {
+                BITFIELD::UBFM_Rd_Rn_IMMR_IMMS(v) => (v.0, 0),
+                BITFIELD::SBFM_Rd_Rn_IMMR_IMMS(v) => (v.0, 1),
+                BITFIELD::BFM_Rd_Rn_IMMR_IMMS(v) => (v.0, 2),
+            };
+            emit_bitfield(&mut ops, word, kind);
+            emit_to(&mut ops, this, next, labels, depth);
+        }
+        Operation::LOG_IMM(inner) => {
+            let (word, kind, set_flags) = match inner {
+                LOG_IMM::AND_Rd_SP_Rn_LIMM(v) => (v.0, 0, false),
+                LOG_IMM::ANDS_Rd_Rn_LIMM(v) => (v.0, 0, true),
+                LOG_IMM::ORR_Rd_SP_Rn_LIMM(v) => (v.0, 1, false),
+                LOG_IMM::EOR_Rd_SP_Rn_LIMM(v) => (v.0, 2, false),
+            };
+            emit_logical_imm(&mut ops, word, kind, set_flags);
+            emit_to(&mut ops, this, next, labels, depth);
+        }
+        Operation::EXCEPTION(EXCEPTION::BRK_EXCEPTION(v)) => {
+            ops.push(StackOp::Trap(alloc::format!(
+                "aarch64: brk #{:x}",
+                (v.0 >> 5) & 0xffff
+            )));
+        }
+        Operation::ADDSUB_EXT(inner) => {
+            let (is_sub, set_flags, word) = match inner {
+                ADDSUB_EXT::ADD_Rd_SP_Rn_SP_Rm_EXT(v) => (false, false, v.0),
+                ADDSUB_EXT::ADDS_Rd_Rn_SP_Rm_EXT(v) => (false, true, v.0),
+                ADDSUB_EXT::SUB_Rd_SP_Rn_SP_Rm_EXT(v) => (true, false, v.0),
+                ADDSUB_EXT::SUBS_Rd_Rn_SP_Rm_EXT(v) => (true, true, v.0),
+            };
+            emit_addsub_ext(&mut ops, word, is_sub, set_flags);
+            emit_to(&mut ops, this, next, labels, depth);
+        }
+        Operation::DP_2SRC(inner) => {
+            let (word, kind) = match inner {
+                DP_2SRC::UDIV_Rd_Rn_Rm(v) => (v.0, 0),
+                DP_2SRC::SDIV_Rd_Rn_Rm(v) => (v.0, 1),
+                DP_2SRC::LSLV_Rd_Rn_Rm(v) => (v.0, 2),
+                DP_2SRC::LSRV_Rd_Rn_Rm(v) => (v.0, 3),
+                DP_2SRC::ASRV_Rd_Rn_Rm(v) => (v.0, 4),
+                DP_2SRC::RORV_Rd_Rn_Rm(v) => (v.0, 5),
+                _ => return unsupported(&mut ops, word, "DP_2SRC"),
+            };
+            emit_dp2(&mut ops, word, kind);
+            emit_to(&mut ops, this, next, labels, depth);
+        }
+        Operation::DP_3SRC(inner) => {
+            let (word, kind) = match inner {
+                DP_3SRC::MADD_Rd_Rn_Rm_Ra(v) => (v.0, 0),
+                DP_3SRC::MSUB_Rd_Rn_Rm_Ra(v) => (v.0, 1),
+                DP_3SRC::SMADDL_Rd_Rn_Rm_Ra(v) => (v.0, 2),
+                DP_3SRC::SMSUBL_Rd_Rn_Rm_Ra(v) => (v.0, 3),
+                DP_3SRC::UMADDL_Rd_Rn_Rm_Ra(v) => (v.0, 4),
+                DP_3SRC::UMSUBL_Rd_Rn_Rm_Ra(v) => (v.0, 5),
+                DP_3SRC::SMULH_Rd_Rn_Rm(v) => (v.0, 6),
+                DP_3SRC::UMULH_Rd_Rn_Rm(v) => (v.0, 7),
+            };
+            emit_dp3(&mut ops, word, kind);
+            emit_to(&mut ops, this, next, labels, depth);
+        }
         Operation::ADDSUB_SHIFT(inner) => {
             let (is_sub, set_flags, word) = match inner {
                 ADDSUB_SHIFT::ADD_Rd_Rn_Rm_SFT(v) => (false, false, v.0),
@@ -1383,6 +1793,251 @@ mod tests {
         for word in [0xd280_0020, 0x9100_0801, 0x1400_0000] {
             assert!(disarm64::decoder::decode(word).is_some(), "{word:08x}");
         }
+    }
+
+    #[test]
+    fn bitfield_extract_sign_extend_and_insert_execute() {
+        // ubfm x2,x0,#8,#15; sbfm x4,x3,#0,#7; bfm x6,x5,#8,#15; br x30.
+        let words = [0xd348_3c02u32, 0x9340_1c64, 0xb348_3ca6, 0xd61f_03c0];
+        let mut code = Mem::default();
+        for (offset, word) in words.into_iter().enumerate() {
+            for (i, byte) in word.to_le_bytes().into_iter().enumerate() {
+                code.write_byte((offset * 4 + i) as u64, byte);
+            }
+        }
+        let code = Box::leak(Box::new(code));
+        let jit = TemplateJit {
+            params: vane_arch::template::Params {
+                react: code,
+                trial: &|_| Heat::New,
+                #[cfg(feature = "target-js")]
+                flate: &vane_arch::DebugFlate {},
+                root: 0,
+                flags: vane_arch::template::Flags::default(),
+            },
+            pc: 0,
+            labels: Default::default(),
+            depth: 0,
+        };
+        struct Host {
+            state: BTreeMap<StateSlot, u64>,
+            code: BTreeMap<u64, u8>,
+        }
+        impl StackHost for Host {
+            fn load_reg(&mut self, _: u8) -> u64 {
+                0
+            }
+            fn store_reg(&mut self, _: u8, _: u64) {}
+            fn load_state(&mut self, slot: &StateSlot) -> u64 {
+                self.state.get(slot).copied().unwrap_or(0)
+            }
+            fn store_state(&mut self, slot: &StateSlot, value: u64) {
+                self.state.insert(slot.clone(), value);
+            }
+            fn load_mem(&mut self, _: u64, _: vane_arch::MemWidth, _: bool) -> u64 {
+                0
+            }
+            fn store_mem(&mut self, _: u64, _: vane_arch::MemWidth, _: u64) {}
+            fn byte(&mut self, addr: u64) -> u8 {
+                self.code.get(&addr).copied().unwrap_or(0)
+            }
+            fn ecall(&mut self) -> bool {
+                false
+            }
+        }
+        let mut host = Host {
+            state: BTreeMap::new(),
+            code: BTreeMap::new(),
+        };
+        for (offset, word) in words.into_iter().enumerate() {
+            for (i, byte) in word.to_le_bytes().into_iter().enumerate() {
+                host.code.insert((offset * 4 + i) as u64, byte);
+            }
+        }
+        host.state.insert(state::x(0), 0x1234);
+        host.state.insert(state::x(3), 0x80);
+        host.state.insert(state::x(5), 0xabcd);
+        host.state.insert(state::x(6), 0xffff_0000);
+        host.state.insert(state::x(30), 0xfeed);
+        assert!(matches!(
+            interpret(&a64_emit(&jit), &mut host),
+            Exit::TailCall(0xfeed)
+        ));
+        assert_eq!(host.state[&state::x(2)], 0x12);
+        assert_eq!(host.state[&state::x(4)], u64::MAX - 127);
+        assert_eq!(host.state[&state::x(6)], 0xffff_00ab);
+    }
+
+    #[test]
+    fn logical_immediate_and_brk_execute() {
+        // and x2,x0,#0xff; ands w4,w3,#0xf; brk #0x1234.
+        let words = [0x9240_1c02u32, 0x7200_0c64, 0xd422_4680];
+        let mut code = Mem::default();
+        for (offset, word) in words.into_iter().enumerate() {
+            for (i, byte) in word.to_le_bytes().into_iter().enumerate() {
+                code.write_byte((offset * 4 + i) as u64, byte);
+            }
+        }
+        let code = Box::leak(Box::new(code));
+        let jit = TemplateJit {
+            params: vane_arch::template::Params {
+                react: code,
+                trial: &|_| Heat::New,
+                #[cfg(feature = "target-js")]
+                flate: &vane_arch::DebugFlate {},
+                root: 0,
+                flags: vane_arch::template::Flags::default(),
+            },
+            pc: 0,
+            labels: Default::default(),
+            depth: 0,
+        };
+        struct Host {
+            state: BTreeMap<StateSlot, u64>,
+            code: BTreeMap<u64, u8>,
+        }
+        impl StackHost for Host {
+            fn load_reg(&mut self, _: u8) -> u64 {
+                0
+            }
+            fn store_reg(&mut self, _: u8, _: u64) {}
+            fn load_state(&mut self, slot: &StateSlot) -> u64 {
+                self.state.get(slot).copied().unwrap_or(0)
+            }
+            fn store_state(&mut self, slot: &StateSlot, value: u64) {
+                self.state.insert(slot.clone(), value);
+            }
+            fn load_mem(&mut self, _: u64, _: vane_arch::MemWidth, _: bool) -> u64 {
+                0
+            }
+            fn store_mem(&mut self, _: u64, _: vane_arch::MemWidth, _: u64) {}
+            fn byte(&mut self, addr: u64) -> u8 {
+                self.code.get(&addr).copied().unwrap_or(0)
+            }
+            fn ecall(&mut self) -> bool {
+                false
+            }
+        }
+        let mut host = Host {
+            state: BTreeMap::new(),
+            code: BTreeMap::new(),
+        };
+        for (offset, word) in words.into_iter().enumerate() {
+            for (i, byte) in word.to_le_bytes().into_iter().enumerate() {
+                host.code.insert((offset * 4 + i) as u64, byte);
+            }
+        }
+        host.state.insert(state::x(0), 0x1234);
+        host.state.insert(state::x(3), 0x1f);
+        assert!(
+            matches!(interpret(&a64_emit(&jit), &mut host), Exit::Trap(message) if message == "aarch64: brk #1234")
+        );
+        assert_eq!(host.state[&state::x(2)], 0x34);
+        assert_eq!(host.state[&state::x(4)], 0xf);
+        assert_eq!(host.state[&state::nzcv('n')], 0);
+        assert_eq!(host.state[&state::nzcv('z')], 0);
+    }
+
+    #[test]
+    fn extended_add_multiply_divide_shift_and_high_multiply_execute() {
+        // add x2,x0,w1,uxtw #2; sdiv x5,x3,x4; lslv x8,x6,x7;
+        // rorv x11,x9,x10; madd x15,x12,x13,x14; smaddl x19,w16,w17,x18;
+        // umulh x22,x20,x21; br x30.
+        let words = [
+            0x8b21_4802u32,
+            0x9ac4_0c65,
+            0x9ac7_20c8,
+            0x9aca_2d2b,
+            0x9b0d_398f,
+            0x9b31_4a13,
+            0x9bd5_7e96,
+            0xd61f_03c0,
+        ];
+        let mut code = Mem::default();
+        let mut host_code = BTreeMap::new();
+        for (offset, word) in words.into_iter().enumerate() {
+            for (i, byte) in word.to_le_bytes().into_iter().enumerate() {
+                let addr = (offset * 4 + i) as u64;
+                code.write_byte(addr, byte);
+                host_code.insert(addr, byte);
+            }
+        }
+        let code = Box::leak(Box::new(code));
+        let jit = TemplateJit {
+            params: vane_arch::template::Params {
+                react: code,
+                trial: &|_| Heat::New,
+                #[cfg(feature = "target-js")]
+                flate: &vane_arch::DebugFlate {},
+                root: 0,
+                flags: vane_arch::template::Flags::default(),
+            },
+            pc: 0,
+            labels: Default::default(),
+            depth: 0,
+        };
+        struct Host {
+            state: BTreeMap<StateSlot, u64>,
+            code: BTreeMap<u64, u8>,
+        }
+        impl StackHost for Host {
+            fn load_reg(&mut self, _: u8) -> u64 {
+                0
+            }
+            fn store_reg(&mut self, _: u8, _: u64) {}
+            fn load_state(&mut self, slot: &StateSlot) -> u64 {
+                self.state.get(slot).copied().unwrap_or(0)
+            }
+            fn store_state(&mut self, slot: &StateSlot, value: u64) {
+                self.state.insert(slot.clone(), value);
+            }
+            fn load_mem(&mut self, _: u64, _: vane_arch::MemWidth, _: bool) -> u64 {
+                0
+            }
+            fn store_mem(&mut self, _: u64, _: vane_arch::MemWidth, _: u64) {}
+            fn byte(&mut self, addr: u64) -> u8 {
+                self.code.get(&addr).copied().unwrap_or(0)
+            }
+            fn ecall(&mut self) -> bool {
+                false
+            }
+        }
+        let mut host = Host {
+            state: BTreeMap::new(),
+            code: host_code,
+        };
+        for (reg, value) in [
+            (0, 10),
+            (1, 3),
+            (3, (-21i64) as u64),
+            (4, 4),
+            (6, 3),
+            (7, 5),
+            (9, 0x8000_0000_0000_0001),
+            (10, 1),
+            (12, 2),
+            (13, 4),
+            (14, 3),
+            (16, (-2i64) as u64),
+            (17, 3),
+            (18, 20),
+            (20, u64::MAX),
+            (21, 2),
+            (30, 0xfeed),
+        ] {
+            host.state.insert(state::x(reg), value);
+        }
+        assert!(matches!(
+            interpret(&a64_emit(&jit), &mut host),
+            Exit::TailCall(0xfeed)
+        ));
+        assert_eq!(host.state[&state::x(2)], 22);
+        assert_eq!(host.state[&state::x(5)], (-5i64) as u64);
+        assert_eq!(host.state[&state::x(8)], 96);
+        assert_eq!(host.state[&state::x(11)], 0xc000_0000_0000_0000);
+        assert_eq!(host.state[&state::x(15)], 11);
+        assert_eq!(host.state[&state::x(19)], 14);
+        assert_eq!(host.state[&state::x(22)], 1);
     }
 
     #[test]
