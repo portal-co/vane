@@ -9,6 +9,7 @@ pub use vane_riscv::Mem;
 use vane_riscv::ReleaseFlate;
 use vane_riscv::Riscv;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::JsFuture;
 
 #[cfg(test)]
 #[path = "../_tests/rv_corpus.rs"]
@@ -25,18 +26,13 @@ fn start() {
 }
 
 #[wasm_bindgen(inline_js = r#"
-            export function log_success(){
-        console.log('success: exit');
-        return {__success: true};
-    }
     export function has_success(err){
-    return '__success' in err;
+        return err?.kind === 'exit';
     }
     export function log_test_hint(pc, hint_value){
         console.log(`[HINT] PC=0x${pc.toString(16)}: Test case ${hint_value}`);
     }"#)]
 extern "C" {
-    fn log_success() -> JsValue;
     fn has_success(a: JsValue) -> bool;
     fn log_test_hint(pc: u64, hint_value: i64);
 }
@@ -52,6 +48,7 @@ impl Reactor {
                 mem,
                 state: OnceCell::new(),
                 regs: OnceCell::new(),
+                host_api: OnceCell::new(),
                 test_mode: false,
             })),
         }
@@ -424,7 +421,10 @@ impl Reactor {
                 //Ecall
                 Inst::Ecall => {
                     self.restore_regs(&regs);
-                    self._ecall().await?;
+                    let outcome = self._ecall().await?;
+                    if is_exit(&outcome) {
+                        return Ok(outcome);
+                    }
                     regs = self.save_regs();
                 }
                 _ => {
@@ -451,9 +451,151 @@ impl Reactor {
     // }
     #[wasm_bindgen(js_name = "ecall")]
     pub async fn _ecall(&self) -> Result<JsValue, JsValue> {
-        if self.save_regs()[Reg::A7.0 as usize] == 93 {
-            return Err(log_success());
+        let host_api = self
+            .core
+            .lock()
+            .host_api
+            .get()
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("vane requires a configured host API"))?;
+        let mut ctx = ReactorCtx {
+            reactor: self.clone(),
+        };
+        let mut host = BrowserHost { host_api };
+        match os_unix_emulation::dispatch_async(
+            os_unix_emulation::Abi::LinuxRv64,
+            &mut ctx,
+            &mut host,
+        )
+        .await
+        {
+            os_unix_emulation::Outcome::Return(_) => Ok(JsValue::undefined()),
+            os_unix_emulation::Outcome::Exit(code) => exit_outcome(code),
         }
-        Ok(JsValue::undefined())
     }
+}
+
+struct ReactorCtx {
+    reactor: Reactor,
+}
+
+impl os_async::AsyncCtx for ReactorCtx {
+    async fn read(&mut self, addr: u64, cell: &mut (dyn os_ctx::ArgCell + '_)) {
+        let reactor = self.reactor.clone();
+        let mut offset = 0u64;
+        cell.fill(&mut core::iter::from_fn(|| {
+            let value = reactor.core.lock().mem.read_byte(addr.wrapping_add(offset));
+            offset = offset.wrapping_add(1);
+            Some(value)
+        }));
+    }
+
+    async fn write(&mut self, addr: u64, cell: &mut (dyn os_ctx::Arg + '_)) {
+        let value = cell.as_addr().map_or(0, core::num::NonZeroU64::get);
+        for offset in 0..cell.len() {
+            self.reactor
+                .core
+                .lock()
+                .mem
+                .write_byte(addr.wrapping_add(offset), (value >> (offset * 8)) as u8);
+        }
+    }
+
+    async fn reg(&mut self, idx: u8, cell: &mut (dyn os_ctx::ArgCell + '_)) {
+        cell.fill(&mut self.reactor.clone().reg(idx).to_le_bytes().iter().copied());
+    }
+
+    async fn set_reg(&mut self, idx: u8, cell: &mut (dyn os_ctx::Arg + '_)) {
+        self.reactor
+            .clone()
+            .set_reg(idx, cell.as_addr().map_or(0, core::num::NonZeroU64::get));
+    }
+}
+
+struct BrowserHost {
+    host_api: JsValue,
+}
+
+impl BrowserHost {
+    async fn call(&self, name: &str, args: &[JsValue]) -> i64 {
+        let Ok(method) = js_sys::Reflect::get(&self.host_api, &JsValue::from_str(name)) else {
+            return -os_unix_emulation::ENOSYS;
+        };
+        let Ok(method) = method.dyn_into::<js_sys::Function>() else {
+            return -os_unix_emulation::ENOSYS;
+        };
+        let call = match args {
+            [] => method.call0(&self.host_api),
+            [a] => method.call1(&self.host_api, a),
+            [a, b] => method.call2(&self.host_api, a, b),
+            _ => return -os_unix_emulation::ENOSYS,
+        };
+        let Ok(value) = call else {
+            return -os_unix_emulation::ENOSYS;
+        };
+        let Ok(value) = JsFuture::from(js_sys::Promise::resolve(&value)).await else {
+            return -os_unix_emulation::ENOSYS;
+        };
+        value
+            .as_f64()
+            .map(|value| value as i64)
+            .unwrap_or(-os_unix_emulation::ENOSYS)
+    }
+}
+
+impl os_unix_emulation::AsyncUnixHost for BrowserHost {
+    async fn read(&mut self, fd: u32, bytes: &mut [u8]) -> i64 {
+        let view = js_sys::Uint8Array::new_with_length(bytes.len() as u32);
+        let result = self
+            .call(
+                "read",
+                &[JsValue::from_f64(fd as f64), JsValue::from(view.clone())],
+            )
+            .await;
+        if result > 0 {
+            view.copy_to(bytes);
+        }
+        result
+    }
+
+    async fn write(&mut self, fd: u32, bytes: &[u8]) -> i64 {
+        let view = js_sys::Uint8Array::new_with_length(bytes.len() as u32);
+        view.copy_from(bytes);
+        self.call(
+            "write",
+            &[JsValue::from_f64(fd as f64), JsValue::from(view)],
+        )
+        .await
+    }
+
+    async fn close(&mut self, fd: u32) -> i64 {
+        self.call("close", &[JsValue::from_f64(fd as f64)]).await
+    }
+
+    async fn exit(&mut self, code: u32) -> i64 {
+        self.call("exit", &[JsValue::from_f64(code as f64)]).await
+    }
+}
+
+fn exit_outcome(code: u32) -> Result<JsValue, JsValue> {
+    let outcome = js_sys::Object::new();
+    js_sys::Reflect::set(
+        &outcome,
+        &JsValue::from_str("kind"),
+        &JsValue::from_str("exit"),
+    )?;
+    js_sys::Reflect::set(
+        &outcome,
+        &JsValue::from_str("code"),
+        &JsValue::from_f64(code as f64),
+    )?;
+    Ok(outcome.into())
+}
+
+fn is_exit(value: &JsValue) -> bool {
+    js_sys::Reflect::get(value, &JsValue::from_str("kind"))
+        .ok()
+        .and_then(|kind| kind.as_string())
+        .as_deref()
+        == Some("exit")
 }

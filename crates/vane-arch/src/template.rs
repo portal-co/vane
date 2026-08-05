@@ -737,7 +737,10 @@ pub fn render_stack_to_js_with_names<N: HostMethodNames<VaneHostMethod>>(
 
             // ── Side effects ──────────────────────────────────────────────
             StackOp::Ecall => {
-                write!(f, "await {ecall}();")?;
+                write!(
+                    f,
+                    "let _ecall=await {ecall}();if(_ecall?.kind==='exit')return _ecall;"
+                )?;
             }
             StackOp::Trap(msg) => {
                 write!(f, "throw new TypeError(`{msg}`);")?;

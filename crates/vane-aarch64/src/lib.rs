@@ -9,7 +9,7 @@ pub use vane_target_core::{StackOp, StateSlot};
 
 pub mod reactor;
 pub mod template;
-pub use reactor::Aarch64Reactor;
+pub use reactor::{Aarch64Ctx, Aarch64Reactor, NativeExit};
 
 vane_arch::renders!(Aarch64);
 

@@ -4,15 +4,28 @@ name = "vane-wsdom"
 edition = "2024"
 version.workspace = true
 license.workspace = true
-description = "Server-side execution of vane's JIT-compiled RISC-V blocks in a real, wsdom-connected browser"
+description = "Server-side execution of Vane JIT blocks in a real, wsdom-connected browser"
+
+[features]
+browser-e2e = []
+
+[[test]]
+name = "browser_e2e"
+path = "tests/browser_e2e.rs"
+required-features = ["browser-e2e"]
 
 [dependencies]
 vane-riscv = { path = "../vane-riscv", default-features = false, features = ["target-js"] }
+vane-aarch64 = { path = "../vane-aarch64", default-features = false, features = ["target-js"] }
 wsdom = { workspace = true }
 wsdom-core = { workspace = true }
 wsdom-axum = { workspace = true }
 axum = { workspace = true, features = ["ws", "tokio", "http1"] }
 tokio = { workspace = true, features = ["rt", "net"] }
+futures-util = "0.3"
+serde_json = "1"
+os-host-api = { git = "https://github.com/portal-co/os-emulation.git" }
+os-unix-emulation = { git = "https://github.com/portal-co/os-emulation.git" }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }

@@ -30,9 +30,11 @@ rv-asm.workspace = true
 
 paste = "1.0.15"
 wasm-bindgen-futures = "0.4.50"
+os-async = { git = "https://github.com/portal-co/os-emulation.git" }
+os-ctx = { git = "https://github.com/portal-co/os-emulation.git" }
+os-unix-emulation = { git = "https://github.com/portal-co/os-emulation.git" }
 
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.34"
 elf = "0.8.0"
-

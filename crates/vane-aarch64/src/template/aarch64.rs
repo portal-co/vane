@@ -1636,6 +1636,13 @@ fn a64_body(
                 (v.0 >> 5) & 0xffff
             )));
         }
+        Operation::EXCEPTION(EXCEPTION::SVC_EXCEPTION(_)) => {
+            // The embedding chooses the ABI (Linux `x8` or Darwin `x16`)
+            // when it dispatches this boundary. `svc` itself always falls
+            // through after a non-terminal syscall.
+            ops.push(StackOp::Ecall);
+            emit_to(&mut ops, this, next, labels, depth);
+        }
         Operation::ADDSUB_EXT(inner) => {
             let (is_sub, set_flags, word) = match inner {
                 ADDSUB_EXT::ADD_Rd_SP_Rn_SP_Rm_EXT(v) => (false, false, v.0),

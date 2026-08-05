@@ -14,6 +14,9 @@ target-wasm = ["vane-arch/target-wasm"]
 vane-arch = { path = "../vane-arch", default-features = false }
 vane-target-core = { path = "../vane-target-core" }
 disarm64.workspace = true
+os-ctx = { git = "https://github.com/portal-co/os-emulation.git" }
+os-host-api = { git = "https://github.com/portal-co/os-emulation.git" }
+os-unix-emulation = { git = "https://github.com/portal-co/os-emulation.git" }
 
 [dev-dependencies]
 wasm-bindgen.workspace = true

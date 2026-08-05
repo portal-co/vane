@@ -29,6 +29,7 @@ macro_rules! vane_meta {
             mem: $crate::vane_arch::Mem,
             state: $crate::core::cell::OnceCell<$crate::wasm_bindgen::prelude::JsValue>,
             regs: $crate::core::cell::OnceCell<$crate::wasm_bindgen::prelude::JsValue>,
+            host_api: $crate::core::cell::OnceCell<$crate::wasm_bindgen::prelude::JsValue>,
             test_mode: bool,
         }
 
@@ -139,6 +140,14 @@ macro_rules! vane_meta {
                 #[wasm_bindgen(setter, js_name = "test_mode",wasm_bindgen = $crate::wasm_bindgen)]
                 pub fn set_test_mode(&self, value: bool) {
                     self.core.lock().test_mode = value;
+                }
+
+                /// Configure the mandatory explicit host API used for Unix
+                /// syscalls. The object may implement async `read`, `write`,
+                /// `close`, and `exit` methods; absent methods return ENOSYS.
+                #[wasm_bindgen(js_name = "set_host_api",wasm_bindgen = $crate::wasm_bindgen)]
+                pub fn set_host_api(&self, host: $crate::wasm_bindgen::prelude::JsValue) -> Result<(), $crate::wasm_bindgen::prelude::JsValue> {
+                    self.core.lock().host_api.set(host).map_err(|_| $crate::wasm_bindgen::prelude::JsValue::from_str("vane host API is already configured"))
                 }
 
                 #[wasm_bindgen(js_name = "get_paging_mode",wasm_bindgen = $crate::wasm_bindgen)]

@@ -42,18 +42,26 @@ async fn handler(ws: WebSocketUpgrade) -> Response {
             ENTRY_PC,
             Flags::default(),
             vane_wsdom::DEFAULT_MEM_SIZE,
+            vane_wsdom::GuestAbi::LinuxRv64,
+            os_host_api::default_host_api(),
             move |_next_pc| counter.fetch_add(1, Ordering::Relaxed) >= MAX_BLOCKS,
         )
         .await;
         match outcome {
-            wsdom_axum::Output::Done(Ok(final_pc)) => {
+            wsdom_axum::Output::Done(Ok(vane_wsdom::RunExit::NextPc(final_pc))) => {
                 println!(
                     "connection finished after {} block(s), final pc=0x{final_pc:x}",
                     blocks.load(Ordering::Relaxed)
                 );
             }
+            wsdom_axum::Output::Done(Ok(vane_wsdom::RunExit::Exit(code))) => {
+                println!("guest exited with code {code}");
+            }
             wsdom_axum::Output::Done(Err(e)) => {
-                println!("connection finished with error after {} block(s): {e}", blocks.load(Ordering::Relaxed));
+                println!(
+                    "connection finished with error after {} block(s): {e}",
+                    blocks.load(Ordering::Relaxed)
+                );
             }
             wsdom_axum::Output::ConnectionClosed => println!("connection closed by peer"),
             wsdom_axum::Output::AxumError(e) => println!("axum error: {e}"),
