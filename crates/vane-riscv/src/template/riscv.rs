@@ -724,10 +724,10 @@ vane_arch::cfg_target_wasm! {
     impl<'b> RiscvWasmJit for TemplateJit<'b> {
         fn Riscv<'a>(
             &'a self,
-            _ctx: &'a (dyn WasmJitCtx + 'a),
+            ctx: &'a (dyn WasmJitCtx + 'a),
         ) -> impl Iterator<Item = JitOpcode<'a>> + 'a {
             let ops = rv_emit(self);
-            render_stack_to_wasm(ops.into_iter())
+            render_stack_to_wasm(ops.into_iter(), ctx.wasm_abi())
         }
     }
 }

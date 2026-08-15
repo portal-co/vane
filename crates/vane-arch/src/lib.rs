@@ -32,7 +32,7 @@ pub use vane_target_wasm as target_wasm;
 #[cfg(feature = "target-js")]
 pub use vane_target_js::flate::{DebugFlate, Flate, ReleaseFlate};
 #[cfg(feature = "target-wasm")]
-pub use vane_target_wasm::{JitOpcode, WasmJit, WasmJitCtx};
+pub use vane_target_wasm::{JitOpcode, WasmAbiConfig, WasmJit, WasmJitCtx};
 
 pub mod arch;
 pub mod interp;

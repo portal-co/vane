@@ -1771,10 +1771,10 @@ vane_arch::cfg_target_wasm! {
     impl crate::Aarch64WasmJit for TemplateJit<'_> {
         fn Aarch64<'a>(
             &'a self,
-            _ctx: &'a (dyn vane_arch::WasmJitCtx + 'a),
+            ctx: &'a (dyn vane_arch::WasmJitCtx + 'a),
         ) -> impl Iterator<Item = vane_arch::JitOpcode<'a>> + 'a {
             use vane_arch::template::render_stack_to_wasm;
-            render_stack_to_wasm(a64_emit(self).into_iter())
+            render_stack_to_wasm(a64_emit(self).into_iter(), ctx.wasm_abi())
         }
     }
 }

@@ -27,3 +27,7 @@ either = { workspace = true, optional = true }
 wasmparser = { workspace = true, optional = true }
 portal-jit-host-names = { path = "../../../codegen-utils/crates/host-method-names" }
 libm.workspace = true
+
+[dev-dependencies]
+wasm-encoder.workspace = true
+wasmi = "1"
