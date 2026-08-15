@@ -2,7 +2,7 @@ use core::array;
 use core::fmt::Formatter;
 
 use alloc::boxed::Box;
-use rv_asm::{Inst, IsCompressed, Xlen};
+use rv_asm::{Inst, IsCompressed, Reg, Xlen};
 use vane_arch::{FloatBinOp, FloatUnaryOp, FloatWidth, Heat, MemWidth, StackOp};
 
 use crate::{RiscvDisplay, hint, state};
@@ -105,6 +105,37 @@ fn rv_float_ops(word: u32) -> Option<alloc::vec::Vec<StackOp>> {
     Some(ops)
 }
 
+/// `rv-asm` 0.2.1's `decode_compressed` doesn't implement the RV64C-only
+/// C.ADDW/C.SUBW encodings: its quadrant-1 "arith" family (funct3=0b100,
+/// funct2@[11:10]=0b11) only handles the bit12=0 case (C.SUB/C.XOR/C.OR/
+/// C.AND) and unconditionally rejects bit12=1 as a decode error, even
+/// though the RISC-V spec defines that exact bit pattern for the RV64C-
+/// only C.SUBW/C.ADDW (funct6=100111 vs 100011). Hand-decode just these
+/// two forms before falling through to the real decoder, mirroring
+/// `rv_float_ops`'s "intercept, then fall through" shape.
+fn rv_compressed_w_alu(word: u16) -> Option<Inst> {
+    if word & 0b11 != 0b01 {
+        return None; // not quadrant C1
+    }
+    if (word >> 13) & 0b111 != 0b100 {
+        return None; // not the "arith" funct3
+    }
+    if (word >> 12) & 1 != 1 {
+        return None; // bit12=0 is the existing (non-W) C.SUB/XOR/OR/AND family
+    }
+    if (word >> 10) & 0b11 != 0b11 {
+        return None;
+    }
+    let short = |bits: u16| Reg((bits + 8) as u8);
+    let rd_rs1 = short((word >> 7) & 0b111);
+    let rs2 = short((word >> 2) & 0b111);
+    match (word >> 5) & 0b11 {
+        0b00 => Some(Inst::SubW { dest: rd_rs1, src1: rd_rs1, src2: rs2 }),
+        0b01 => Some(Inst::AddW { dest: rd_rs1, src1: rd_rs1, src2: rs2 }),
+        _ => None, // reserved encodings
+    }
+}
+
 fn rv_emit(this: &TemplateJit<'_>) -> alloc::vec::Vec<StackOp> {
     // If this PC is already compiled, jump straight to the cached block.
     if (this.params.trial)(this.pc) == Heat::Cached {
@@ -174,12 +205,16 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
         emit_to(&mut ops, this.params, this.pc + 4, labels, nd);
         return ops;
     }
-    let (inst, compressed) = match Inst::decode(inst_code, Xlen::Rv64) {
-        Err(e) => {
-            ops.push(StackOp::Trap(alloc::format!("decoding: {e}")));
-            return ops;
+    let (inst, compressed) = if let Some(inst) = rv_compressed_w_alu(inst_code as u16) {
+        (inst, IsCompressed::Yes)
+    } else {
+        match Inst::decode(inst_code, Xlen::Rv64) {
+            Err(e) => {
+                ops.push(StackOp::Trap(alloc::format!("decoding: {e}")));
+                return ops;
+            }
+            Ok(v) => v,
         }
-        Ok(v) => v,
     };
 
     let next_pc = this.pc
@@ -264,12 +299,18 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
             emit_to(&mut ops, this.params, target, labels, nd);
         }
         Inst::Jalr { offset, base, dest } => {
-            // Save return address, compute target, exit block.
-            ops.push(StackOp::PushImm(next_pc));
-            ops.push(StackOp::StoreReg(dest.0));
+            // Compute the jump target from `base`'s value *before* writing
+            // the return address into `dest` -- per the RISC-V spec, JALR
+            // must use rs1's original value even when rd == rs1 (e.g. the
+            // common `jalr ra, 0(ra)` idiom for an indirect call through a
+            // register already holding the callee's address). Storing
+            // `next_pc` into `dest` first, as this used to, clobbers `base`
+            // before it's read whenever they're the same register.
             ops.push(StackOp::PushImm((offset.as_i64() * 2) as u64));
             ops.push(StackOp::LoadReg(base.0));
             ops.push(StackOp::Add64);
+            ops.push(StackOp::PushImm(next_pc));
+            ops.push(StackOp::StoreReg(dest.0));
             ops.push(StackOp::TailCall);
         }
 
