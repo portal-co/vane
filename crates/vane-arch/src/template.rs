@@ -806,11 +806,13 @@ pub fn render_stack_to_js(
 /// blocks (loops + if-blocks). The renderer tracks open if-blocks and adjusts
 /// accordingly.
 ///
-/// `Float*` ops and `LoadState`/`StoreState` remain `unreachable` — deferred,
-/// not part of this pass's scope (the first JIT-targeted corpus slice is
-/// integer-only). `MulHU64`/`MulHSU64`/`MulHS64` (64x64->128 high multiplies)
-/// likewise remain `unreachable`, needing local-variable-heavy lowering not
-/// attempted here.
+/// `LoadState`/`StoreState` (named architectural state — e.g. AArch64's
+/// GPRs/NZCV/V-registers) lower via `abi.state_slots`; a name absent from
+/// that table still lowers to `Unreachable`. `Float*` ops remain
+/// `unreachable` — deferred, not part of this pass's scope (the first
+/// JIT-targeted corpus slice is integer-only). `MulHU64`/`MulHSU64`/`MulHS64`
+/// (64x64->128 high multiplies) likewise remain `unreachable`, needing
+/// local-variable-heavy lowering not attempted here.
 #[cfg(feature = "target-wasm")]
 pub fn render_stack_to_wasm<'a>(
     ops: impl Iterator<Item = StackOp> + 'a,
@@ -961,16 +963,31 @@ pub fn render_stack_to_wasm<'a>(
                         op!(Operator::LocalSet { local_index: abi.reg_base + r as u32 });
                     }
                 }
-                // Named state has no global-index convention in the stub WASM
-                // target. Keep the target explicitly unsupported rather than
-                // accidentally giving AArch64 its RISC-V register semantics.
                 StackOp::Drop => {
                     yield JitOpcode::Operator { op: Operator::Drop };
                 }
-                StackOp::LoadState(_) | StackOp::StoreState(_) => {
-                    yield JitOpcode::Operator {
-                        op: Operator::Unreachable,
-                    };
+                // Named state (AArch64's GPRs/NZCV/V-registers, addressed by
+                // name rather than an index like RISC-V's LoadReg/StoreReg)
+                // maps to a local via `abi.state_slots`, a small table built
+                // once per ISA crate at Rust compile time (see
+                // `WasmAbiConfig::state_slots`'s doc comment) — a linear
+                // scan, since the table is tiny and this avoids a
+                // sorted-invariant bug class. A name not in the table (an
+                // architecture that hasn't wired this slot yet) still lowers
+                // to `Unreachable`: an unmapped slot name is a genuine bug,
+                // not something to silently zero, so this preserves the
+                // original safety property for anything not yet mapped.
+                StackOp::LoadState(slot) => {
+                    match abi.state_slots.iter().find(|(name, _)| *name == slot.as_str()) {
+                        Some((_, local)) => op!(Operator::LocalGet { local_index: *local }),
+                        None => op!(Operator::Unreachable),
+                    }
+                }
+                StackOp::StoreState(slot) => {
+                    match abi.state_slots.iter().find(|(name, _)| *name == slot.as_str()) {
+                        Some((_, local)) => op!(Operator::LocalSet { local_index: *local }),
+                        None => op!(Operator::Unreachable),
+                    }
                 }
 
                 // ── 64-bit arithmetic ─────────────────────────────────────

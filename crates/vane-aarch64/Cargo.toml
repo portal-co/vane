@@ -24,3 +24,5 @@ wasm-bindgen.workspace = true
 wasm-bindgen-test = "0.3.34"
 wasm-bindgen-futures = "0.4.50"
 js-sys = "0.3.77"
+wasm-encoder.workspace = true
+wasmi = "1"

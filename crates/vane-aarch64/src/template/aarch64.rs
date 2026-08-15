@@ -28,6 +28,10 @@ mod aarch64_js_tests;
 #[path = "aarch64/aarch64_browser_tests.rs"]
 mod aarch64_browser_tests;
 
+#[cfg(all(test, feature = "target-wasm", not(target_arch = "wasm32")))]
+#[path = "aarch64_wasm_tests.rs"]
+mod aarch64_wasm_tests;
+
 fn word_at(this: &TemplateJit<'_>) -> u32 {
     u32::from_le_bytes(array::from_fn(|i| {
         this.params.react.byte(this.pc + i as u64)

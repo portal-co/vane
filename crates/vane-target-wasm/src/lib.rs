@@ -81,4 +81,32 @@ pub struct WasmAbiConfig {
     /// failed `CheckCode` both `return_call` into — i.e.
     /// `OobConfig::lookup_stub_func_idx` on the speet side.
     pub lookup_stub_func_idx: u32,
+    /// Named-state-slot → local-index table for
+    /// `StackOp::LoadState`/`StoreState` (architectural state an ISA
+    /// frontend addresses by name rather than by an indexed
+    /// `LoadReg`/`StoreReg` register — e.g. AArch64, which has no
+    /// `LoadReg`/`StoreReg` at all and represents its GPRs, NZCV flags, and
+    /// V-registers exclusively as named slots; see `vane-aarch64::state`).
+    ///
+    /// Entries' indices fall **within** `reg_base .. reg_base + num_regs` —
+    /// the same params/results range `LoadReg`/`StoreReg` index into, not
+    /// extra locals beyond it. This matters for correctness, not just
+    /// convention: params/results are what `TailCall`/`CheckCode`/the OOB
+    /// dispatch chain thread across `return_call`/`return_call_indirect`
+    /// boundaries (see `OobConfig`'s shared calling convention) — a plain
+    /// local beyond `scratch_b` would silently reset to zero on every call,
+    /// losing e.g. an AArch64 X0 across the very first dispatch. An
+    /// architecture may address the pool entirely by name (AArch64,
+    /// `num_regs` = its total named-slot count, no `LoadReg`/`StoreReg`
+    /// ever emitted) or entirely by index (RISC-V, `state_slots: &[]`); one
+    /// index must not be claimed by both a `state_slots` entry and a
+    /// `LoadReg`/`StoreReg` numeric register in the same embedding.
+    /// Looked up by linear scan of `StateSlot::as_str()` against the first
+    /// tuple element (the table is small and built once per ISA crate as a
+    /// `const`, so this needs no runtime hashing). An architecture with no
+    /// named state (RISC-V, whose GPRs are all `LoadReg`/`StoreReg`) passes
+    /// `&[]`; a name that isn't in the table lowers to `Unreachable`, same
+    /// as today's blanket behavior — an unmapped slot name is a genuine bug,
+    /// not something to silently zero.
+    pub state_slots: &'static [(&'static str, u32)],
 }

@@ -30,6 +30,7 @@ fn abi(mem_idx: u32, ecall_func_idx: u32, jit_invalidate_func_idx: u32, lookup_s
         ecall_func_idx,
         jit_invalidate_func_idx,
         lookup_stub_func_idx,
+        state_slots: &[],
     }
 }
 
