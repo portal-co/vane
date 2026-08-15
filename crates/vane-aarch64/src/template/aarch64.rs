@@ -1774,7 +1774,14 @@ vane_arch::cfg_target_wasm! {
             ctx: &'a (dyn vane_arch::WasmJitCtx + 'a),
         ) -> impl Iterator<Item = vane_arch::JitOpcode<'a>> + 'a {
             use vane_arch::template::render_stack_to_wasm;
+            // See vane-riscv's `RiscvWasmJit::Riscv` for why this trailing,
+            // unnested `unreachable` is needed: `a64_emit` wraps every trace
+            // in one outer `LoopBegin`/`LoopEnd`, terminating via a nested
+            // `TailCall`, and WASM doesn't propagate "unreachable" across a
+            // loop boundary, so the function's implicit final return would
+            // otherwise go unsatisfied despite being genuinely unreachable.
             render_stack_to_wasm(a64_emit(self).into_iter(), ctx.wasm_abi())
+                .chain(core::iter::once(vane_arch::JitOpcode::Operator { op: wasmparser::Operator::Unreachable }))
         }
     }
 }

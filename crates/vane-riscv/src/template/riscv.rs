@@ -727,7 +727,23 @@ vane_arch::cfg_target_wasm! {
             ctx: &'a (dyn WasmJitCtx + 'a),
         ) -> impl Iterator<Item = JitOpcode<'a>> + 'a {
             let ops = rv_emit(self);
+            // `rv_emit` always wraps a full trace in one outer
+            // `StackOp::LoopBegin`/`LoopEnd` (see its doc comment), and every
+            // finite RV64 trace terminates via a `StackOp::TailCall` nested
+            // inside that loop, never by falling off the end. WASM
+            // validation does not propagate "unreachable" across a
+            // block/loop boundary -- exiting a loop's `end` always resets
+            // reachability to whatever it was on entry, regardless of
+            // whether every path inside diverged -- so without this
+            // trailing, unnested `unreachable`, the function's own implicit
+            // final return goes unsatisfied even though it is genuinely
+            // never reached at runtime. Confirmed with a minimal
+            // `wat2wasm` repro: a bare `block` wrapping a single
+            // `return_call` fails validation the same way. Provably dead
+            // code in every real case, since `rv_emit`'s only exits are
+            // nested tail calls.
             render_stack_to_wasm(ops.into_iter(), ctx.wasm_abi())
+                .chain(core::iter::once(JitOpcode::Operator { op: wasmparser::Operator::Unreachable }))
         }
     }
 }

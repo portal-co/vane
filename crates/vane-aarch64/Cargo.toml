@@ -8,7 +8,7 @@ description = "AArch64 guest frontend for Vane's StackOp and JavaScript JIT back
 [features]
 default = ["target-js", "target-wasm"]
 target-js = ["vane-arch/target-js"]
-target-wasm = ["vane-arch/target-wasm"]
+target-wasm = ["vane-arch/target-wasm", "dep:wasmparser"]
 
 [dependencies]
 vane-arch = { path = "../vane-arch", default-features = false }
@@ -17,6 +17,7 @@ disarm64.workspace = true
 os-ctx = { git = "https://github.com/portal-co/os-emulation.git" }
 os-host-api = { git = "https://github.com/portal-co/os-emulation.git" }
 os-unix-emulation = { git = "https://github.com/portal-co/os-emulation.git" }
+wasmparser = { workspace = true, optional = true }
 
 [dev-dependencies]
 wasm-bindgen.workspace = true
