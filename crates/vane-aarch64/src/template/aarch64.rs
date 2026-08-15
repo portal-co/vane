@@ -643,7 +643,9 @@ fn emit_addsub(
         StackOp::Add64
     });
     if set_flags {
-        emit_result_and_flags(ops, rd(word), allow_sp, is_32bit, is_sub);
+        // See the matching comment in `emit_addsub_imm`: flag-setting
+        // ADDS/SUBS never write SP as Rd (31 there means XZR).
+        emit_result_and_flags(ops, rd(word), false, is_32bit, is_sub);
     } else {
         if is_32bit {
             ops.push(StackOp::Trunc32);
@@ -985,7 +987,12 @@ fn emit_addsub_imm(
         StackOp::Add64
     });
     if set_flags {
-        emit_result_and_flags(ops, rd(word), allow_sp, is_32bit, is_sub);
+        // The flag-setting forms (ADDS/SUBS, e.g. `cmp`/`cmn`) never allow SP
+        // as the destination -- Rd=31 there means XZR (discard), unlike the
+        // non-flag ADD/SUB immediate forms where Rd=31 legitimately means SP.
+        // Passing `allow_sp` through unconditionally here previously routed
+        // e.g. `cmp x9, #imm`'s discarded result into the SP state slot.
+        emit_result_and_flags(ops, rd(word), false, is_32bit, is_sub);
     } else {
         if is_32bit {
             ops.push(StackOp::Trunc32);
