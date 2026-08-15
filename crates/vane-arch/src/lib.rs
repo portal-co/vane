@@ -12,6 +12,7 @@ macro_rules! gen_block {
 }
 
 use alloc::{boxed::Box, collections::btree_map::BTreeMap};
+use os_page::GuestMemory as _;
 #[doc(hidden)]
 pub use core;
 use core::fmt::Display;
@@ -100,6 +101,20 @@ impl Default for PagingMode {
 pub struct Mem {
     /// Legacy paging: on-demand allocated pages
     pub pages: BTreeMap<u64, Box<[u8; 65536]>>,
+
+    /// Optional shared backing (Phase 4 of the aarch64-jit-parity/shared-
+    /// memory plan). When `Some`, [`read_byte`](Self::read_byte)/
+    /// [`write_byte`](Self::write_byte) — and therefore everything built on
+    /// them (`os_page::GuestMemory::read`/`write`, [`JitCtx`]'s `bytes`/
+    /// `byte`, and every `translate_shared*` helper) — delegate here
+    /// instead of `pages`, so this `Mem`'s holder shares one guest-memory
+    /// instance with any other consumer holding a clone of the same
+    /// [`os_page::backends::SharedLinearHost`] (e.g. a second `Mem` on the
+    /// JIT path, sharing memory with an AOT-compiled consumer on the same
+    /// underlying buffer) — see that type's doc comment for the sharing
+    /// model. `None` (the default) keeps every existing `Mem` exactly as it
+    /// was: its own private, per-instance `pages`-backed storage.
+    pub shared: Option<os_page::backends::SharedLinearHost>,
 
     /// Paging mode selection
     pub paging_mode: PagingMode,
@@ -353,8 +368,20 @@ impl Mem {
         phys_page_base + (vaddr & 0xFFFF)
     }
 
-    /// Safe interface to write a byte to memory
+    /// Safe interface to write a byte to memory.
+    ///
+    /// When `shared` is set, delegates to it and returns without touching
+    /// `pages` at all. A rejected write (e.g. `SharedLinearHost`'s
+    /// `text_hole`, or an out-of-bounds address) is silently dropped rather
+    /// than propagated — this method has always been infallible (matching
+    /// `read_byte`'s existing "out of bounds reads as zero" precedent
+    /// below), and `os_page::GuestMemory::write`'s own `Result` remains the
+    /// real fault-reporting path for callers that need it.
     pub fn write_byte(&mut self, addr: u64, value: u8) {
+        if let Some(shared) = &mut self.shared {
+            let _ = shared.write(addr, os_page::AccessWidth::W8, value as u64);
+            return;
+        }
         let page = self
             .pages
             .entry(addr >> 16)
@@ -362,8 +389,12 @@ impl Mem {
         page[(addr & 0xffff) as usize] = value;
     }
 
-    /// Safe interface to read a byte from memory
+    /// Safe interface to read a byte from memory. See `write_byte`'s doc
+    /// comment for `shared`'s delegation and "faults read as zero" behavior.
     pub fn read_byte(&self, addr: u64) -> u8 {
+        if let Some(shared) = &self.shared {
+            return shared.read(addr, os_page::AccessWidth::W8).unwrap_or(0) as u8;
+        }
         self.pages
             .get(&(addr >> 16))
             .map(|page| page[(addr & 0xffff) as usize])
@@ -392,10 +423,9 @@ pub trait JitCtx {
 
 impl JitCtx for Mem {
     fn bytes(&self, a: u64) -> Box<dyn Iterator<Item = u8> + '_> {
-        Box::new((a..).map(|a| match self.pages.get(&(a >> 16)) {
-            None => 0u8,
-            Some(i) => i[(a & 0xffff) as usize],
-        }))
+        // Delegates to `read_byte` (rather than indexing `pages` directly,
+        // as this used to) so a `shared`-backed `Mem` is picked up here too.
+        Box::new((a..).map(move |a| self.read_byte(a)))
     }
 
     fn byte(&self, a: u64) -> u8 {
