@@ -217,40 +217,50 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
             ops.push(StackOp::IfEnd);
         };
 
+    // `rv-asm`'s B-type/J-type immediate accessors (`imm_b`/`imm_j`, and
+    // their compressed counterparts feeding Beq/Bne/.../Jal below) already
+    // return the fully byte-scaled PC-relative offset -- their bit-field
+    // reconstruction places the low nonzero source bit at output position
+    // 1, so bit 0 of the result is always 0, exactly matching the RISC-V
+    // spec's "immediate encodes bit 0 implicitly as 0" convention. No
+    // further `* 2` is needed (or correct): doubling here silently sent
+    // every branch/jump with a nonzero offset to the wrong PC. This went
+    // uncaught because no corpus test exercised a real branch/jump with a
+    // nonzero offset until frame.c's `sink()` loop and its `jal` call site.
     match inst {
         // ── Branches ─────────────────────────────────────────────────────────
         Inst::Beq { src1, src2, offset } => {
-            let target = this.pc.wrapping_add_signed(offset.as_i64() * 2);
+            let target = this.pc.wrapping_add_signed(offset.as_i64());
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             branch(&mut ops, StackOp::Eq64, target, labels);
         }
         Inst::Bne { src1, src2, offset } => {
-            let target = this.pc.wrapping_add_signed(offset.as_i64() * 2);
+            let target = this.pc.wrapping_add_signed(offset.as_i64());
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             branch(&mut ops, StackOp::Ne64, target, labels);
         }
         Inst::Blt { src1, src2, offset } => {
-            let target = this.pc.wrapping_add_signed(offset.as_i64() * 2);
+            let target = this.pc.wrapping_add_signed(offset.as_i64());
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             branch(&mut ops, StackOp::LtS64, target, labels);
         }
         Inst::Bge { src1, src2, offset } => {
-            let target = this.pc.wrapping_add_signed(offset.as_i64() * 2);
+            let target = this.pc.wrapping_add_signed(offset.as_i64());
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             branch(&mut ops, StackOp::GeS64, target, labels);
         }
         Inst::Bltu { src1, src2, offset } => {
-            let target = this.pc.wrapping_add_signed(offset.as_i64() * 2);
+            let target = this.pc.wrapping_add_signed(offset.as_i64());
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             branch(&mut ops, StackOp::LtU64, target, labels);
         }
         Inst::Bgeu { src1, src2, offset } => {
-            let target = this.pc.wrapping_add_signed(offset.as_i64() * 2);
+            let target = this.pc.wrapping_add_signed(offset.as_i64());
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             branch(&mut ops, StackOp::GeU64, target, labels);
@@ -258,7 +268,7 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
 
         // ── Jumps ─────────────────────────────────────────────────────────────
         Inst::Jal { offset, dest } => {
-            let target = this.pc.wrapping_add_signed(offset.as_i64() * 2);
+            let target = this.pc.wrapping_add_signed(offset.as_i64());
             ops.push(StackOp::PushImm(next_pc));
             ops.push(StackOp::StoreReg(dest.0));
             emit_to(&mut ops, this.params, target, labels, nd);
@@ -271,7 +281,13 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
             // register already holding the callee's address). Storing
             // `next_pc` into `dest` first, as this used to, clobbers `base`
             // before it's read whenever they're the same register.
-            ops.push(StackOp::PushImm((offset.as_i64() * 2) as u64));
+            //
+            // Unlike the branches/Jal above, JALR's offset is a plain
+            // I-type immediate (`imm_i`, the same field shape as e.g.
+            // `addi`'s) -- never scaled by the RISC-V spec. This file used
+            // to `* 2` it here too (by analogy with the branches, wrongly);
+            // it needs to stay unscaled like the load/store offsets below.
+            ops.push(StackOp::PushImm(offset.as_i64() as u64));
             ops.push(StackOp::LoadReg(base.0));
             ops.push(StackOp::Add64);
             ops.push(StackOp::PushImm(next_pc));
