@@ -62,7 +62,7 @@ swc_ecma_quote = "^17"
 
 portal-solutions-swibb = "^0.2.6"
 
-rv-asm = "0.2.1"
+rv-asm = { version = "0.2.1", git = "https://github.com/portal-co/rv-utils.git" }
 disarm64 = "0.1.26"
 
 wasm-bindgen = "0.2.100"
