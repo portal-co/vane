@@ -1189,7 +1189,7 @@ fn emit_pos_mem(
     }
 }
 
-pub(crate) fn a64_emit(this: &TemplateJit<'_>) -> Vec<StackOp> {
+pub fn a64_emit(this: &TemplateJit<'_>) -> Vec<StackOp> {
     if (this.params.trial)(this.pc) == Heat::Cached {
         return alloc::vec![StackOp::PushImm(this.pc), StackOp::TailCall];
     }

@@ -10,6 +10,10 @@ description.workspace = true
 default = ["target-js", "target-wasm"]
 target-js = ["vane-arch/target-js"]
 target-wasm = ["vane-arch/target-wasm", "dep:wasmparser"]
+# Exposes `rv_emit` (the RV64 `StackOp` trace producer) publicly for the
+# differential fuzz harness (`crates/vane-cross-fuzz`). Never enabled by the
+# `wasm32` cdylib — the harness is host-only.
+fuzz-traces = []
 
 [dependencies]
 vane-arch = { path = "../vane-arch", default-features = false }

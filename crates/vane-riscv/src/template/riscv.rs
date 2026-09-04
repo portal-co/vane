@@ -105,7 +105,7 @@ fn rv_float_ops(word: u32) -> Option<alloc::vec::Vec<StackOp>> {
     Some(ops)
 }
 
-fn rv_emit(this: &TemplateJit<'_>) -> alloc::vec::Vec<StackOp> {
+pub fn rv_emit(this: &TemplateJit<'_>) -> alloc::vec::Vec<StackOp> {
     // If this PC is already compiled, jump straight to the cached block.
     if (this.params.trial)(this.pc) == Heat::Cached {
         return alloc::vec![StackOp::PushImm(this.pc), StackOp::TailCall];

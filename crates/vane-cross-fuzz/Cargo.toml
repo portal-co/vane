@@ -1,0 +1,32 @@
+[package]
+name = "vane-cross-fuzz"
+edition = "2024"
+version = "0.1.0"
+license = "MPL-2.0"
+description = "Differential fuzz harness: Vane's StackOp frontends vs Unicorn (host-only, dev)"
+
+# Standalone crate (excluded from the vane workspace): it links the native
+# Unicorn C library and pulls proptest/unicorn-engine, none of which can
+# build for wasm32-unknown-unknown. See CROSS_FUZZ_PLAN.md §3.
+
+[features]
+default = []
+rv64 = ["dep:vane-riscv", "vane-riscv/fuzz-traces"]
+aarch64 = ["dep:vane-aarch64", "vane-aarch64/fuzz-traces"]
+
+[dependencies]
+vane-arch = { path = "../vane-arch", default-features = false }
+vane-target-core = { path = "../vane-target-core" }
+vane-riscv = { path = "../vane-riscv", default-features = false, optional = true }
+vane-aarch64 = { path = "../vane-aarch64", default-features = false, optional = true }
+unicorn-engine = { version = "2.1.5", default-features = false, features = [
+    "arch_riscv",
+    "arch_aarch64",
+] }
+
+[dev-dependencies]
+proptest = "1.11"
+rv-asm = { version = "0.2.1", git = "https://github.com/portal-co/rv-utils.git" }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

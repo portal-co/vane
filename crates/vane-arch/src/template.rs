@@ -788,6 +788,7 @@ pub fn render_stack_to_js_with_names<N: HostMethodNames<VaneHostMethod>>(
 }
 
 /// Render with Vane's canonical, zero-sized host-name scheme.
+#[cfg(feature = "target-js")]
 pub fn render_stack_to_js(
     ops: impl Iterator<Item = StackOp>,
     f: &mut Formatter<'_>,

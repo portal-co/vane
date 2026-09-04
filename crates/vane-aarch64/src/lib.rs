@@ -11,6 +11,17 @@ pub mod reactor;
 pub mod template;
 pub use reactor::{Aarch64Ctx, Aarch64Reactor, NativeExit};
 
+#[cfg(feature = "fuzz-traces")]
+#[doc(hidden)]
+pub mod fuzz {
+    //! Test-oriented re-export of the AArch64 `StackOp` trace producer.
+    //!
+    //! Used by `crates/vane-cross-fuzz` to drive `a64_emit`'s traces against
+    //! Unicorn; see `CROSS_FUZZ_PLAN.md`. Gated behind `fuzz-traces` so it
+    //! never leaks into the `wasm32` cdylib.
+    pub use crate::template::aarch64::a64_emit;
+}
+
 vane_arch::renders!(Aarch64);
 
 /// AArch64 architectural state slots used by the first integer/control-flow

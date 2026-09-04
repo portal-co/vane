@@ -10,6 +10,12 @@ members = [
     "crates/vane-wsdom",
 ]
 
+# The differential fuzz harness is NOT a member: it links the native Unicorn
+# C library and pulls proptest/unicorn-engine, which cannot build for
+# wasm32-unknown-unknown. It is built standalone from its own directory —
+# see CROSS_FUZZ_PLAN.md §3.
+exclude = ["crates/vane-cross-fuzz"]
+
 resolver = "3"
 
 [workspace.package]
