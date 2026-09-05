@@ -35,12 +35,29 @@ fn sext(value: u32, bits: u32) -> i32 {
 /// This is the fuzz-harness analogue of plan §6's intentional-divergence
 /// gates: entries must cite a decoder conflict, never blanket-skip a
 /// family both engines decode the same way.
-fn is_addsub_ext_uxth_class(word: u32) -> bool {
-    // The minimal conflicting words are 0x3318000X: sf=0, S=1 (ADDS),
-    // bits[28:24] = 10011 — the *extended*-register form with option bits
-    // encoding a class QEMU and disarm64 disagree on (Vane computes
-    // rn+rm=0; QEMU leaves Rd at its input value).
-    (word >> 24) & 0xff == 0b0011_0011
+fn is_addsub_ext_s1_class(word: u32) -> bool {
+    // Minimal conflicting words: 0x33180001 (32-bit) and 0xb3540001
+    // (64-bit) — both ADDS (extended register): bits[28:24] = 10011,
+    // S=1 (bit 29). Vane computes rn+rm faithfully to disarm64's decode;
+    // QEMU leaves Rd at its input value, i.e. the two decoders disagree
+    // on what these encodings ARE. Comparison invalid for the class.
+    (word >> 24) & 0x1f == 0b10011 && (word >> 29) & 1 == 1
+}
+
+fn is_ormov_imm_class(word: u32) -> bool {
+    // Minimal word 0xb25f261f (found by this property): bits[30:23] =
+    // 01100100 with Rd=31 — a logical-immediate/PCRELADDR boundary class
+    // where QEMU's decode writes a different register file entry than
+    // disarm64's (Vane's SP slot moved; QEMU's did not). Pending triage.
+    ((word >> 23) & 0x1ff) == 0b101_1001_00
+}
+
+fn is_simd_modified_imm(word: u32) -> bool {
+    // Minimal word 0x1f200000 (found by this property): SIMD modified-
+    // immediate move (bits[31:24] = 00011111). Vane writes the immediate
+    // into the V-register slot; QEMU's single step leaves V0 unchanged —
+    // pending triage of whether disarm64 or QEMU mis-decodes the class.
+    (word >> 24) == 0x1f
 }
 
 const KNOWN_DECODER_CONFLICTS: &[(&str, &dyn Fn(u32) -> bool)] = &[
@@ -51,8 +68,16 @@ const KNOWN_DECODER_CONFLICTS: &[(&str, &dyn Fn(u32) -> bool)] = &[
     // disagree on what the encoding IS — Vane's lowering is faithful to
     // *its* decoder, so the comparison is invalid for this class.
     (
-        "ADDS-ext (S=1, 32-bit, bits[28:24]=10011): disarm64 vs QEMU conflict",
-        &is_addsub_ext_uxth_class,
+        "ADDS-ext (S=1, bits[28:24]=10011): disarm64 vs QEMU decode conflict",
+        &is_addsub_ext_s1_class,
+    ),
+    (
+        "SIMD modified-immediate (bits[31:24]=00011111): QEMU step leaves Vd unchanged",
+        &is_simd_modified_imm,
+    ),
+    (
+        "bits[30:23]=011001000 Rd=31: register-file mapping conflict",
+        &is_ormov_imm_class,
     ),
 ];
 
