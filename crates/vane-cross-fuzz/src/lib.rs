@@ -33,3 +33,71 @@ pub mod rv64;
 
 #[cfg(feature = "aarch64")]
 pub mod aarch64;
+
+/// Temporary probe helpers for locating hangs (not part of the public API
+/// contract; used by examples and removed once M1 stabilises).
+pub mod probe {
+    use alloc::vec::Vec;
+    use crate::runner::{CODE_BASE, Step};
+    use crate::rv64::{Rv64Runner, step_rv64};
+    use crate::skip::Skip;
+
+    pub fn run(word: u32, seed: u64) -> Step {
+        run_scoped(word, seed)
+    }
+
+    pub fn run_scoped(word: u32, seed: u64) -> Step {
+        let mut regs = [0u64; 32];
+        for (i, r) in regs.iter_mut().enumerate().skip(1) {
+            *r = seed
+                .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                .wrapping_add(i as u64)
+                .rotate_left((i as u32) % 64);
+        }
+        let data: [u8; 64] = core::array::from_fn(|i| (seed >> (i % 8)) as u8);
+        run_with(word, &regs, &data)
+    }
+
+    pub fn run_with(word: u32, regs: &[u64; 32], data: &[u8]) -> Step {
+        // Backward branch/jump targets recurse `rv_emit` into an
+        // already-open loop label, which `interpret` cycles in forever.
+        // Covers both 4-byte and compressed (c.beqz/c.bnez/c.j) forms
+        // because `Inst::decode` dispatches on the low bits.
+        let decode_word = if (word & 0b11) != 0b11 {
+            word & 0xffff // compressed: decode the low half only
+        } else {
+            word
+        };
+        if let Ok((inst, _)) = rv_asm::Inst::decode(decode_word, rv_asm::Xlen::Rv64) {
+            use rv_asm::Inst;
+            let backward = match inst {
+                Inst::Beq { offset, .. }
+                | Inst::Bne { offset, .. }
+                | Inst::Blt { offset, .. }
+                | Inst::Bge { offset, .. }
+                | Inst::Bltu { offset, .. }
+                | Inst::Bgeu { offset, .. }
+                | Inst::Jal { offset, .. } => offset.as_i64() <= 0,
+                _ => false,
+            };
+            if backward {
+                return Step::Skipped(Skip::Unsupported);
+            }
+        }
+        let compressed = (word & 0b11) != 0b11;
+        let mut vane_code = Vec::new();
+        let mut unicorn_code = Vec::new();
+        if compressed {
+            vane_code.extend_from_slice(&word.to_le_bytes()[..2]);
+            vane_code.extend_from_slice(&0x9002u16.to_le_bytes());
+            unicorn_code.extend_from_slice(&word.to_le_bytes()[..2]);
+        } else {
+            vane_code.extend_from_slice(&word.to_le_bytes());
+            vane_code.extend_from_slice(&0x0010_0073u32.to_le_bytes());
+            unicorn_code.extend_from_slice(&word.to_le_bytes());
+        }
+        let mut runner = Rv64Runner::new();
+        runner.setup_raw(&vane_code, &unicorn_code, regs, data);
+        step_rv64(&mut runner, CODE_BASE)
+    }
+}

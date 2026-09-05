@@ -129,6 +129,34 @@ impl<P: ArchProfile> CrossRunner<P> {
     /// Install `words` as the code image, `regs` as the register image, and
     /// `data` (up to one page) as the scratch data image, into **both**
     /// engines identically.
+    /// Byte-level variant of [`CrossRunner::setup`]: the caller composes
+    /// the Vane code image itself (e.g. a compressed instruction followed
+    /// by a 2-byte `c.ebreak` pad that fits in the same word slot).
+    /// `unicorn_code` is written to Unicorn only (usually == `vane_code`
+    /// minus the pad); `vane_code` is written to the harness `Mem`.
+    pub fn setup_raw(
+        &mut self,
+        vane_code: &[u8],
+        unicorn_code: &[u8],
+        regs: &[u64; 32],
+        data: &[u8],
+    ) {
+        for (i, b) in vane_code.iter().enumerate() {
+            self.mem.write_byte(CODE_BASE + i as u64, *b);
+        }
+        for (i, b) in data.iter().take(PAGE as usize).enumerate() {
+            self.mem.write_byte(DATA_BASE + i as u64, *b);
+        }
+        self.uc.mem_write(CODE_BASE, unicorn_code).expect("uc code write");
+        if !data.is_empty() {
+            self.uc
+                .mem_write(DATA_BASE, &data[..data.len().min(PAGE as usize)])
+                .expect("uc data write");
+        }
+        P::unicorn_write_regs(&mut self.uc, regs);
+        self.regs = *regs;
+    }
+
     pub fn setup(&mut self, words: &[u32], regs: &[u64; 32], data: &[u8]) {
         let mut code = Vec::with_capacity(words.len() * 4 + 4);
         for w in words {
