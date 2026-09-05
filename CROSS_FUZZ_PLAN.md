@@ -1,6 +1,6 @@
 # Cross-Testing Vane Against Unicorn: Fuzzing Plan
 
-**Status:** Draft
+**Status:** Implemented (M0–M3; M4/M5/M6 pending — see §10 notes)
 **Goal:** Gain high confidence that Vane's architecture frontends (RV64 and
 AArch64) are behaviorally correct by differentially testing them against
 [Unicorn](https://www.unicorn-engine.org/) with random instruction streams,
@@ -256,21 +256,34 @@ issue and directly replayable with a unit test (each failure class gets a
 
 ## 10. Milestones
 
-1. **M0 — Visibility + harness skeleton.** `fuzz-traces` features on
+1. **M0 — Visibility + harness skeleton. DONE.** `fuzz-traces` features on
    `vane-riscv`/`vane-aarch64`; `vane-cross-fuzz` crate with the `StackHost`
    over `Mem`, Unicorn state sync, and the skip classifier (with prefix unit
    tests). No fuzzing yet; `cargo test -p vane-cross-fuzz` green on host.
-2. **M1 — RV64 single-instruction proptest.** Uniform words + skip
+2. **M1 — RV64 single-instruction proptest. DONE** — and the mutation gate
+   was beaten by reality before any planted bug: the first random-word run
+   caught a real decoder bug (`c.andi` immediate sign extension in
+   `rv-asm`, fixed upstream with a regression test). Uniform words + skip
    classification (§5 rows 1–8). Expect mostly skips at first; the classifier
    counters prove the pipeline works end to end. Gate: a hand-planted
    semantics mutation in `rv_body` (e.g. flip `ADD`/`SUB` funct7 handling) is
    caught, and reverting makes it pass — proving the harness actually
    compares, not just skips.
-3. **M2 — RV64 encoder-driven generation.** Coverage of the implemented RV64
-   integer/M/F/D families; proptest regression file gains its first real
-   entries (or, better, zero entries — either is a meaningful result to
-   record).
-4. **M3 — AArch64 parity.** Same harness, `a64_emit` traces, ARM64 Unicorn,
+3. **M2 — RV64 encoder-driven generation. DONE** — and it caught a second
+   real bug, this time in Vane itself: `rem`-by-zero returned all-ones
+   across every backend (the JS renderer's quirk had been deliberately
+   mirrored into the interpreter and WASM renderer for "parity"), while the
+   RISC-V M extension defines remainder-by-zero as the *dividend*. Fixed in
+   all three renderers with ISA-table regression tests.
+4. **M3 — AArch64 parity. DONE.** Found in the process: (a) Unicorn's
+   ARM64 register enum is not contiguous X0..X30 (X29/X30 are aliased near
+   the top) — `X0 + n` arithmetic silently reads the wrong register; (b)
+   `a64_emit` panics (`unreachable!`) on some malformed encodings — counted
+   by the sweep's `frontend_panics` counter, fix pending; (c) a
+   disarm64-vs-QEMU decode conflict on the ADDS-ext `bits[28:24]=10011`
+   class, gated via `KNOWN_DECODER_CONFLICTS` in
+   `tests/aarch64_prop.rs` with citations (the plan's §6 analogue for the
+   fuzz harness). Same harness, `a64_emit` traces, ARM64 Unicorn,
    `StateSlot` comparison including NZCV. The known Vane gaps (rounding-mode
    FP, scalar FP memory) land as row-4/row-2 skips.
 5. **M4 — libfuzzer targets + CI.** `cargo-fuzz` workspace, nightly job with
