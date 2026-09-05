@@ -46,6 +46,9 @@ pub const PAGE: u64 = 0x10000;
 /// because its trap message is indistinguishable from the tested
 /// instruction's own decode failure at adjacent blocks.)
 pub const STOP_PAD: u32 = 0x0010_0073; // ebreak
+/// AArch64 end-of-scope pad word: BRK #0 (Vane lowers it to
+/// `aarch64: brk #0`, the pad-trap marker).
+pub const STOP_PAD_A64: u32 = 0xd420_0000;
 
 /// Which frontend/engine pair a runner drives.
 pub trait ArchProfile {
@@ -59,6 +62,18 @@ pub trait ArchProfile {
     fn unicorn_read_pc(uc: &mut Unicorn<()>) -> u64;
     /// Names for the 32 register-image slots (used in diffs/reports).
     fn reg_names() -> [&'static str; 32];
+    /// The trap message the end-of-scope pad produces when a trace falls
+    /// through into it (RV64: `op:ebreak` from the ebreak pad; AArch64:
+    /// `aarch64: brk #0` from the BRK pad). A Vane trap matching this
+    /// string means the instruction under test completed.
+    fn pad_trap_msg() -> &'static str;
+    /// The end-of-scope pad word for [`CrossRunner::setup`].
+    fn pad_word() -> u32;
+    /// Whether this ISA exposes a packed NZCV-style flags register the
+    /// comparator should pull from Unicorn (AArch64: yes).
+    fn packs_nzcv() -> bool {
+        false
+    }
     /// Whether slot 0 is an architectural hardwired-zero register.
     fn reg_zero_is_hardwired() -> bool {
         false
@@ -172,7 +187,7 @@ impl<P: ArchProfile> CrossRunner<P> {
         for w in words {
             vane_pad_only.extend_from_slice(&w.to_le_bytes());
         }
-        vane_pad_only.extend_from_slice(&STOP_PAD.to_le_bytes());
+        vane_pad_only.extend_from_slice(&P::pad_word().to_le_bytes());
         for (i, b) in vane_pad_only.iter().enumerate() {
             self.mem.write_byte(CODE_BASE + i as u64, *b);
         }
@@ -216,7 +231,7 @@ impl<P: ArchProfile> CrossRunner<P> {
                 // instruction under test completed and control fell through
                 // into the pad. Any other trap is the instruction's own.
                 // Two cases produce a trap here:
-                // 1. the pad (`msg == "op:ebreak"` — instruction completed),
+                // 1. the pad (`msg == P::pad_trap_msg()` — instruction completed),
                 // 2. the instruction itself trapped (any message).
                 // Non-ebreak traps classify immediately (rows 1–2). An
                 // `op:ebreak` is ambiguous (pad vs an ebreak *instruction*,
@@ -224,7 +239,7 @@ impl<P: ArchProfile> CrossRunner<P> {
                 // a guest ebreak makes Unicorn refuse, while the pad is
                 // never executed by Unicorn's count=1 step.
                 match crate::skip::classify_trap(msg) {
-                    Verdict::Skip(skip) if msg != "op:ebreak" => {
+                    Verdict::Skip(skip) if msg != P::pad_trap_msg() => {
                         #[cfg(feature = "cross-debug-traps")]
                         {
                             self.last_trap_msg = alloc::format!("msg={msg}");
@@ -268,6 +283,17 @@ impl<P: ArchProfile> CrossRunner<P> {
         let mut uc_state = MachineState::default();
         uc_state.regs = P::unicorn_read_regs(&mut self.uc);
         let _ = P::unicorn_read_pc(&mut self.uc);
+        // AArch64: pull Unicorn's packed NZCV into the comparison namespace
+        // (Vane's four 0/1 slots are packed by the comparator).
+        if P::packs_nzcv() {
+            let nzcv = self
+                .uc
+                .reg_read(unicorn_engine::RegisterARM64::NZCV)
+                .unwrap_or(0);
+            uc_state
+                .slots
+                .insert(alloc::string::String::from("a64:nzcv"), nzcv);
+        }
         let diffs = diff_states(&vane_state, &uc_state, &P::reg_names());
         if diffs.is_empty() {
             Step::Compared(StepOutcome::Match)

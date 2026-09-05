@@ -21,6 +21,17 @@ use vane_arch::{
 };
 use vane_target_core::StackOp;
 
+/// Map an AArch64 GPR state-slot name to its register-image index
+/// (`a64:x0..a64:x30` → 0..30, `a64:sp` → 31); `None` for anything else.
+fn a64_gpr_slot_index(name: &str) -> Option<usize> {
+    if name == "a64:sp" {
+        return Some(31);
+    }
+    let rest = name.strip_prefix("a64:x")?;
+    let n: usize = rest.parse().ok()?;
+    (n <= 30).then_some(n)
+}
+
 /// Architecture-agnostic snapshot of everything a step could have touched.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct MachineState {
@@ -83,10 +94,21 @@ impl StackHost for VaneCrossHost<'_> {
     }
 
     fn load_state(&mut self, slot: &StateSlot) -> u64 {
+        // GPR-shaped AArch64 slots (`a64:xN`, `a64:sp`) mirror into the
+        // unified register image so the differential comparator can compare
+        // one `[u64; 32]` against Unicorn's register file. Everything else
+        // (NZCV, FP slots, scratch) is stored by name.
+        if let Some(i) = a64_gpr_slot_index(slot.as_str()) {
+            return self.state.regs[i];
+        }
         self.state.slots.get(slot.as_str()).copied().unwrap_or(0)
     }
 
     fn store_state(&mut self, slot: &StateSlot, v: u64) {
+        if let Some(i) = a64_gpr_slot_index(slot.as_str()) {
+            self.state.regs[i] = v;
+            return;
+        }
         self.state
             .slots
             .insert(String::from(slot.as_str()), v);

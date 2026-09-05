@@ -2,7 +2,7 @@
 //! file. Field-by-field diffing so a failure report names exactly which
 //! registers diverged (CROSS_FUZZ_PLAN.md §9).
 
-use alloc::{string::String, vec::Vec};
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use core::fmt::Write as _;
 
 use crate::state::MachineState;
@@ -40,6 +40,26 @@ pub fn diff_states(
     diff_states_named(vane, unicorn)
 }
 
+/// Slots that are JIT lowering temporaries, not architectural state: they
+/// may hold garbage between engines without any semantic difference.
+fn is_internal_slot(name: &str) -> bool {
+    name.starts_with("a64:scratch:")
+}
+
+/// Pack Vane's individual `a64:nzcv:{n,z,c,v}` 0/1 slots into Unicorn's
+/// single NZCV register image (bits 31/30/29/28).
+fn pack_a64_nzcv(slots: &BTreeMap<String, u64>) -> u64 {
+    let bit = |name: &str| -> u64 {
+        if slots.get(name).copied().unwrap_or(0) != 0 {
+            1
+        } else {
+            0
+        }
+    };
+    (bit("a64:nzcv:n") << 3) | (bit("a64:nzcv:z") << 2)
+        | (bit("a64:nzcv:c") << 1) | bit("a64:nzcv:v")
+}
+
 /// Compare two machine states field by field with **indexed** register
 /// names (`x0`, `x1`, … / `x31` = SP label per profile's `reg_names`).
 ///
@@ -58,6 +78,23 @@ pub fn diff_states_named(vane: &MachineState, unicorn: &MachineState) -> Vec<Fie
             });
         }
     }
+    // AArch64 NZCV: compare packed — Unicorn exposes PSTATE (N at bit 31);
+    // Vane keeps four 0/1 slots, packed to a nibble here. Only meaningful
+    // when either side mentions NZCV (otherwise both default to 0 = an
+    // unflagged run, which is fine).
+    let vane_nzcv = pack_a64_nzcv(&vane.slots);
+    let uc_nzcv = (unicorn.slots.get("a64:nzcv").copied().unwrap_or(0) >> 28) & 0xf;
+    let vane_has_flags = vane.slots.keys().any(|k| k.starts_with("a64:nzcv:"));
+    let uc_has_flags = unicorn.slots.contains_key("a64:nzcv");
+    if vane_has_flags || uc_has_flags {
+        if vane_nzcv != uc_nzcv {
+            diffs.push(FieldDiff {
+                name: alloc::string::String::from("nzcv"),
+                vane: vane_nzcv,
+                unicorn: uc_nzcv,
+            });
+        }
+    }
     // Slots present in either image but unequal (or missing on the Unicorn
     // side, where a missing slot reads as 0 via `MachineState::slot`).
     let mut names: Vec<&String> = vane.slots.keys().collect();
@@ -66,6 +103,9 @@ pub fn diff_states_named(vane: &MachineState, unicorn: &MachineState) -> Vec<Fie
             names.push(k);
         }
     }
+    names.retain(|n| {
+        !is_internal_slot(n) && !n.starts_with("a64:nzcv:") && *n != "a64:nzcv"
+    });
     names.sort();
     for name in names {
         let a = vane.slot(name);

@@ -34,18 +34,24 @@ pub mod rv64;
 #[cfg(feature = "aarch64")]
 pub mod aarch64;
 
-/// Temporary probe helpers for locating hangs (not part of the public API
-/// contract; used by examples and removed once M1 stabilises).
+/// Scoped single-instruction runner helpers shared by the smoke and
+/// proptest targets (M1 layout: stop-pad composition + control-flow
+/// filter that keeps `interpret` terminating on random inputs).
+#[cfg(any(feature = "rv64", feature = "aarch64"))]
 pub mod probe {
     use alloc::vec::Vec;
     use crate::runner::{CODE_BASE, Step};
-    use crate::rv64::{Rv64Runner, step_rv64};
     use crate::skip::Skip;
+    #[cfg(feature = "rv64")]
+    use crate::rv64::{Rv64Runner, step_rv64};
+    
 
+    #[cfg(feature = "rv64")]
     pub fn run(word: u32, seed: u64) -> Step {
         run_scoped(word, seed)
     }
 
+    #[cfg(feature = "rv64")]
     pub fn run_scoped(word: u32, seed: u64) -> Step {
         let mut regs = [0u64; 32];
         for (i, r) in regs.iter_mut().enumerate().skip(1) {
@@ -58,6 +64,7 @@ pub mod probe {
         run_with(word, &regs, &data)
     }
 
+    #[cfg(feature = "rv64")]
     pub fn run_with(word: u32, regs: &[u64; 32], data: &[u8]) -> Step {
         // Backward branch/jump targets recurse `rv_emit` into an
         // already-open loop label, which `interpret` cycles in forever.
@@ -99,5 +106,37 @@ pub mod probe {
         let mut runner = Rv64Runner::new();
         runner.setup_raw(&vane_code, &unicorn_code, regs, data);
         step_rv64(&mut runner, CODE_BASE)
+    }
+
+    /// AArch64 variant of [`run_scoped`]: no compressed encodings, so the
+    /// stop-pad is a plain BRK #0 in the next word slot; the only
+    /// termination hazard (backward branches) is filtered by the caller.
+    pub fn run_a64(word: u32, seed: u64) -> Step {
+        let mut regs = [0u64; 32];
+        for (i, r) in regs.iter_mut().enumerate().skip(1) {
+            *r = seed
+                .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                .wrapping_add(i as u64)
+                .rotate_left((i as u32) % 64);
+        }
+        let data: [u8; 64] = core::array::from_fn(|i| (seed >> (i % 8)) as u8);
+        run_a64_with(word, &regs, &data, crate::runner::CODE_BASE)
+    }
+
+    pub fn run_a64_with(word: u32, regs: &[u64; 32], data: &[u8], pc: u64) -> Step {
+        #[cfg(feature = "aarch64")]
+        {
+            let mut vane_code = Vec::new();
+            vane_code.extend_from_slice(&word.to_le_bytes());
+            vane_code.extend_from_slice(&crate::runner::STOP_PAD_A64.to_le_bytes());
+            let mut runner = crate::aarch64::A64Runner::new();
+            runner.setup_raw(&vane_code, &word.to_le_bytes(), regs, data);
+            crate::aarch64::step_aarch64(&mut runner, pc)
+        }
+        #[cfg(not(feature = "aarch64"))]
+        {
+            let _ = (word, regs, data, pc);
+            unimplemented!("enable the aarch64 feature")
+        }
     }
 }

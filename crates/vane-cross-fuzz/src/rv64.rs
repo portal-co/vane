@@ -85,6 +85,14 @@ impl crate::runner::ArchProfile for Rv64Profile {
         })
     }
 
+    fn pad_trap_msg() -> &'static str {
+        "op:ebreak"
+    }
+
+    fn pad_word() -> u32 {
+        crate::runner::STOP_PAD
+    }
+
     fn reg_zero_is_hardwired() -> bool {
         true
     }
