@@ -64,6 +64,23 @@ impl Reactor {
 }
 #[wasm_bindgen]
 impl Reactor {
+    /// Construct a Reactor with empty guest memory. Load a guest image with
+    /// repeated `write_byte` calls (e.g. one per ELF PT_LOAD byte) before
+    /// calling `interp`/`jit_run`.
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self::new_with_mem(vane_riscv::Mem::default())
+    }
+
+    /// Write one byte of guest memory. The counterpart to the reads
+    /// `get_page` already exposes; there is no separately-exported `Mem`
+    /// type, since every consumer only ever needs byte-at-a-time image
+    /// loading before execution starts.
+    #[wasm_bindgen(js_name = "write_byte")]
+    pub fn write_byte_js(&self, addr: u64, value: u8) {
+        self.core.lock().mem.write_byte(addr, value);
+    }
+
     #[wasm_bindgen]
     pub async fn interp(&self, mut pc: u64) -> Result<JsValue, JsValue> {
         let test_mode = self.core.lock().test_mode;
