@@ -411,12 +411,13 @@ pub fn render_stack_to_js_with_names<N: HostMethodNames<VaneHostMethod>>(
             }
             StackOp::RemU64 => {
                 let (a, b) = pop2!();
-                push!(alloc::format!("{b}===0n?{unsigned}(-1n):({a}%{b})&{max64}"));
+                // RISC-V M extension: remainder-by-zero is the dividend.
+                push!(alloc::format!("{b}===0n?({a}):({a}%{b})&{max64}"));
             }
             StackOp::RemS64 => {
                 let (a, b) = pop2!();
                 push!(alloc::format!(
-                    "{b}===0n?{unsigned}(-1n):{unsigned}({signed}({a})%{signed}({b}))&{max64}"
+                    "{b}===0n?({a}):{unsigned}({signed}({a})%{signed}({b}))&{max64}"
                 ));
             }
             StackOp::And64 => {
@@ -492,13 +493,15 @@ pub fn render_stack_to_js_with_names<N: HostMethodNames<VaneHostMethod>>(
             StackOp::RemU32 => {
                 let (a, b) = pop2!();
                 push!(alloc::format!(
-                    "{b}===0n?{unsigned}(-1n):{unsigned}(BigInt.asIntN(32,({a}&{max32})%({b}&{max32})))"
+                    // RISC-V M extension: remainder-by-zero is the dividend.
+                    "{b}===0n?{unsigned}(BigInt.asIntN(32,({a}&{max32}))):{unsigned}(BigInt.asIntN(32,({a}&{max32})%({b}&{max32})))"
                 ));
             }
             StackOp::RemS32 => {
                 let (a, b) = pop2!();
                 push!(alloc::format!(
-                    "{b}===0n?{unsigned}(-1n):{unsigned}(BigInt.asIntN(32,{signed}({a}&{max32})%{signed}({b}&{max32})))"
+                    // RISC-V M extension: remainder-by-zero is the dividend.
+                    "{b}===0n?{unsigned}({signed}({a}&{max32})):{unsigned}(BigInt.asIntN(32,{signed}({a}&{max32})%{signed}({b}&{max32})))"
                 ));
             }
             StackOp::Shl32 => {
@@ -832,22 +835,23 @@ pub fn render_stack_to_wasm<'a>(
                 wasmparser::MemArg { align: 0, max_align: $max_align, offset: 0, memory: abi.mem_idx }
             };
         }
-        // Div/rem-by-zero: WASM's native div/rem instructions trap on a zero
-        // divisor; this renderer's sibling implementations (the JS renderer's
-        // `b===0n?{unsigned}(-1n):...` and the bytecode interpreter, see
-        // `interp::tests::div_and_rem_by_zero_match_js_renderer`) both yield
-        // all-ones for *both* div and rem on a zero divisor — not plain
-        // RISC-V ISA semantics (which defines remainder-by-zero as the
-        // dividend), but the deliberate, tested convention this codebase
-        // already committed to, so this mirrors it rather than the ISA.
+        // Div/rem-by-zero: WASM's native div/rem instructions trap on a
+        // zero divisor, so both renderers emit an explicit zero check. The
+        // zero-branch value follows the RISC-V M extension table: all-ones
+        // for *div*, the *dividend* for *rem* (the old all-ones-for-both
+        // convention mirrored a JS-renderer quirk; corrected against the
+        // ISA after the cross-fuzz differential flagged it — see
+        // CROSS_FUZZ_PLAN.md M2).
         macro_rules! yield_div_rem_64 {
-            ($wasm_op:expr) => {{
+            // `$zero_branch`: the WASM instruction producing the zero-
+            // divisor result (I64Const -1 for div; LocalGet a for rem).
+            ($wasm_op:expr, $zero_branch:expr) => {{
                 op!(Operator::LocalSet { local_index: abi.scratch_b }); // pop b
                 op!(Operator::LocalSet { local_index: abi.scratch_a }); // pop a
                 op!(Operator::LocalGet { local_index: abi.scratch_b });
                 op!(Operator::I64Eqz);
                 op!(Operator::If { blockty: wasmparser::BlockType::Type(wasmparser::ValType::I64) });
-                op!(Operator::I64Const { value: -1 });
+                $zero_branch;
                 op!(Operator::Else);
                 op!(Operator::LocalGet { local_index: abi.scratch_a });
                 op!(Operator::LocalGet { local_index: abi.scratch_b });
@@ -859,14 +863,14 @@ pub fn render_stack_to_wasm<'a>(
         // itself both act on the operands' low 32 bits (RISC-V `*W`
         // instructions operate on a 32-bit view regardless of upper bits).
         macro_rules! yield_div_rem_32 {
-            ($wasm_op:expr) => {{
+            ($wasm_op:expr, $zero_branch:expr) => {{
                 op!(Operator::LocalSet { local_index: abi.scratch_b }); // pop b:i64
                 op!(Operator::LocalSet { local_index: abi.scratch_a }); // pop a:i64
                 op!(Operator::LocalGet { local_index: abi.scratch_b });
                 op!(Operator::I32WrapI64);
                 op!(Operator::I32Eqz);
                 op!(Operator::If { blockty: wasmparser::BlockType::Type(wasmparser::ValType::I64) });
-                op!(Operator::I64Const { value: -1 });
+                $zero_branch;
                 op!(Operator::Else);
                 op!(Operator::LocalGet { local_index: abi.scratch_a });
                 op!(Operator::I32WrapI64);
@@ -1013,16 +1017,29 @@ pub fn render_stack_to_wasm<'a>(
                 // all-ones, remainder = the dividend unchanged) — matching
                 // `emit_div_rem_by_zero_checked` below.
                 StackOp::DivU64 => {
-                    yield_div_rem_64!(Operator::I64DivU);
+                    yield_div_rem_64!(
+                        Operator::I64DivU,
+                        op!(Operator::I64Const { value: -1 })
+                    );
                 }
                 StackOp::DivS64 => {
-                    yield_div_rem_64!(Operator::I64DivS);
+                    yield_div_rem_64!(
+                        Operator::I64DivS,
+                        op!(Operator::I64Const { value: -1 })
+                    );
                 }
                 StackOp::RemU64 => {
-                    yield_div_rem_64!(Operator::I64RemU);
+                    // Remainder-by-zero: the dividend (scratch_a).
+                    yield_div_rem_64!(
+                        Operator::I64RemU,
+                        op!(Operator::LocalGet { local_index: abi.scratch_a })
+                    );
                 }
                 StackOp::RemS64 => {
-                    yield_div_rem_64!(Operator::I64RemS);
+                    yield_div_rem_64!(
+                        Operator::I64RemS,
+                        op!(Operator::LocalGet { local_index: abi.scratch_a })
+                    );
                 }
                 StackOp::And64 => {
                     yield JitOpcode::Operator {
@@ -1137,10 +1154,32 @@ pub fn render_stack_to_wasm<'a>(
                 StackOp::Shl32 => yield_binop32!(Operator::I32Shl),
                 StackOp::ShrU32 => yield_binop32!(Operator::I32ShrU),
                 StackOp::ShrS32 => yield_binop32!(Operator::I32ShrS),
-                StackOp::DivU32 => yield_div_rem_32!(Operator::I32DivU),
-                StackOp::DivS32 => yield_div_rem_32!(Operator::I32DivS),
-                StackOp::RemU32 => yield_div_rem_32!(Operator::I32RemU),
-                StackOp::RemS32 => yield_div_rem_32!(Operator::I32RemS),
+                StackOp::DivU32 => {
+                    yield_div_rem_32!(
+                        Operator::I32DivU,
+                        op!(Operator::I64Const { value: -1 })
+                    );
+                }
+                StackOp::DivS32 => {
+                    yield_div_rem_32!(
+                        Operator::I32DivS,
+                        op!(Operator::I64Const { value: -1 })
+                    );
+                }
+                StackOp::RemU32 => {
+                    // Remainder-by-zero: the dividend's low 32 bits,
+                    // sign-extended back to i64 (matching the Else branch).
+                    yield_div_rem_32!(
+                        Operator::I32RemU,
+                        op!(Operator::LocalGet { local_index: abi.scratch_a })
+                    );
+                }
+                StackOp::RemS32 => {
+                    yield_div_rem_32!(
+                        Operator::I32RemS,
+                        op!(Operator::LocalGet { local_index: abi.scratch_a })
+                    );
+                }
 
                 // ── Memory ──────────────────────────────────────────────────
                 StackOp::LoadMem { width, signed } => {

@@ -190,12 +190,11 @@ fn register_zero_is_always_zero_and_store_to_it_is_dropped() {
 }
 
 #[test]
-fn div32_and_rem32_by_zero_both_yield_all_ones() {
-    // Matches this codebase's established, tested convention (the JS
-    // renderer and the bytecode interpreter — see
-    // `interp::tests::div_and_rem_by_zero_match_js_renderer` — both yield
-    // all-ones for div *and* rem on a zero divisor), not raw RISC-V ISA
-    // semantics (which defines remainder-by-zero as the dividend).
+fn div32_by_zero_all_ones_and_rem32_by_zero_is_dividend() {
+    // RISC-V M extension: div-by-zero → all-ones; rem-by-zero → the
+    // dividend (42 here). This previously yielded all-ones for both —
+    // corrected against the ISA after the cross-fuzz Unicorn differential
+    // flagged it (CROSS_FUZZ_PLAN.md M2).
     let mut div_ops = vec![StackOp::PushImm(42), StackOp::PushImm(0), StackOp::DivU32, StackOp::StoreReg(1)];
     div_ops.extend(tail());
     let mut rem_ops = vec![StackOp::PushImm(42), StackOp::PushImm(0), StackOp::RemU32, StackOp::StoreReg(1)];
@@ -208,7 +207,7 @@ fn div32_and_rem32_by_zero_both_yield_all_ones() {
     assert_eq!(r1, -1, "DivU32 by zero must yield all-ones, not trap");
 
     let (_, r1, _) = call(&mut store, &instance, "rem", (0, 0, 0), 0);
-    assert_eq!(r1, -1, "RemU32 by zero must also yield all-ones, matching this codebase's convention");
+    assert_eq!(r1, 42, "RemU32 by zero must yield the dividend (42)");
 }
 
 #[test]

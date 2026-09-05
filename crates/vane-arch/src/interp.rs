@@ -332,15 +332,16 @@ pub fn interpret(ops: &[StackOp], host: &mut impl StackHost) -> Exit {
             }
             StackOp::RemU64 => {
                 let (a, b) = pop2!();
-                // Matches render_stack_to_js: b==0 yields all-ones here too
-                // (not the RISC-V-spec dividend), for cross-backend parity.
-                val.push(if b == 0 { u64::MAX } else { a % b });
+                // RISC-V M extension: remainder-by-zero is the *dividend*
+                // (matching every other backend now that all renderers
+                // implement the ISA table).
+                val.push(if b == 0 { a } else { a % b });
                 ip += 1;
             }
             StackOp::RemS64 => {
                 let (a, b) = pop2!();
                 val.push(if b == 0 {
-                    u64::MAX
+                    a // RISC-V: remainder-by-zero is the dividend
                 } else {
                     (a as i64).wrapping_rem(b as i64) as u64
                 });
@@ -427,14 +428,14 @@ pub fn interpret(ops: &[StackOp], host: &mut impl StackHost) -> Exit {
             StackOp::RemU32 => {
                 let (a, b) = pop2!();
                 let (a, b) = (a as u32, b as u32);
-                val.push(if b == 0 { u64::MAX } else { sext32(a % b) });
+                val.push(if b == 0 { sext32(a) } else { sext32(a % b) });
                 ip += 1;
             }
             StackOp::RemS32 => {
                 let (a, b) = pop2!();
                 let (a, b) = (a as u32 as i32, b as u32 as i32);
                 val.push(if b == 0 {
-                    u64::MAX
+                    sext32(a as u32)
                 } else {
                     sext32(a.wrapping_rem(b) as u32)
                 });
@@ -850,13 +851,14 @@ pub async fn interpret_async(ops: &[StackOp], host: &mut impl AsyncStackHost) ->
             }
             StackOp::RemU64 => {
                 let (a, b) = pop2!();
-                val.push(if b == 0 { u64::MAX } else { a % b });
+                // RISC-V M extension: remainder-by-zero is the *dividend*.
+                val.push(if b == 0 { a } else { a % b });
                 ip += 1;
             }
             StackOp::RemS64 => {
                 let (a, b) = pop2!();
                 val.push(if b == 0 {
-                    u64::MAX
+                    a // RISC-V: remainder-by-zero is the dividend
                 } else {
                     (a as i64).wrapping_rem(b as i64) as u64
                 });
@@ -941,14 +943,14 @@ pub async fn interpret_async(ops: &[StackOp], host: &mut impl AsyncStackHost) ->
             StackOp::RemU32 => {
                 let (a, b) = pop2!();
                 let (a, b) = (a as u32, b as u32);
-                val.push(if b == 0 { u64::MAX } else { sext32(a % b) });
+                val.push(if b == 0 { sext32(a) } else { sext32(a % b) });
                 ip += 1;
             }
             StackOp::RemS32 => {
                 let (a, b) = pop2!();
                 let (a, b) = (a as u32 as i32, b as u32 as i32);
                 val.push(if b == 0 {
-                    u64::MAX
+                    sext32(a as u32)
                 } else {
                     sext32(a.wrapping_rem(b) as u32)
                 });
@@ -1386,7 +1388,11 @@ mod tests {
     }
 
     #[test]
-    fn div_and_rem_by_zero_match_js_renderer() {
+    fn div_by_zero_all_ones_and_rem_by_zero_is_dividend() {
+        // RISC-V M extension table: div-by-zero → all-ones; rem-by-zero →
+        // the *dividend* (this used to return all-ones for both, mirroring
+        // an old JS-renderer quirk; corrected against the ISA — found by
+        // the cross-fuzz Unicorn differential, CROSS_FUZZ_PLAN.md M2).
         let ops = vec![
             StackOp::PushImm(5),
             StackOp::PushImm(0),
@@ -1402,7 +1408,7 @@ mod tests {
         let mut host = TestHost::new();
         interpret(&ops, &mut host);
         assert_eq!(host.regs[1], u64::MAX);
-        assert_eq!(host.regs[2], u64::MAX);
+        assert_eq!(host.regs[2], 5);
     }
 
     #[test]
