@@ -1,5 +1,9 @@
 #![no_std]
-#![feature(gen_blocks)]
+// gen blocks are used only by `jit_core` (gated on the `gen-blocks` cargo
+// feature below); keeping the feature gate off the default host build lets
+// stable toolchains compile the interpreter path (spday-exec), while the
+// wasm32 JIT build (nightly, default features) is unchanged.
+#![cfg_attr(feature = "gen-blocks", feature(gen_blocks))]
 
 #[doc(hidden)]
 #[macro_export]

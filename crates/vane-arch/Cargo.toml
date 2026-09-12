@@ -9,7 +9,9 @@ description.workspace = true
 [features]
 default = ["target-js", "target-wasm", "gen-blocks"]
 target-js = ["dep:vane-target-js", "dep:either"]
-target-wasm = ["dep:vane-target-wasm", "dep:either", "dep:wasmparser"]
+# target-wasm's renderer (template/render_wasm.rs) is written with `gen`
+# syntax, so it needs the gen-blocks language feature whenever it compiles.
+target-wasm = ["dep:vane-target-wasm", "dep:either", "dep:wasmparser", "gen-blocks"]
 gen-blocks = []
 # Adds `interp::AsyncStackHost`/`interp::interpret_async` for hosts whose
 # register/memory state may need to `.await` (e.g. a remote wsdom-backed
@@ -25,7 +27,7 @@ paste = "1.0.15"
 os-async = { git = "https://github.com/portal-co/os-emulation.git", optional = true }
 either = { workspace = true, optional = true }
 wasmparser = { workspace = true, optional = true }
-portal-jit-host-names = { path = "../../../codegen-utils/crates/host-method-names" }
+portal-jit-host-names = { git = "https://github.com/portal-co/codegen-utils.git" }
 libm.workspace = true
 
 [dev-dependencies]

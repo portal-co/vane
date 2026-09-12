@@ -208,6 +208,13 @@ fn float_convert(from: FloatWidth, to: FloatWidth, value: u64) -> u64 {
     }
 }
 
+/// Marker returned by [`interpret_fueled`] when the fuel budget is
+/// exhausted mid-trace: the host state is left at the exact StackOp step
+/// where fuel ran out (deterministic — same program, same fuel, same
+/// stopping point).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FuelExhausted;
+
 /// Interpret a fully materialized `StackOp` trace against `host`, returning
 /// why it stopped.
 ///
@@ -217,6 +224,24 @@ fn float_convert(from: FloatWidth, to: FloatWidth, value: u64) -> u64 {
 /// number of currently open loops). `rv_emit`'s output is always
 /// well-formed; this only fires on hand-built or otherwise-corrupt input.
 pub fn interpret(ops: &[StackOp], host: &mut impl StackHost) -> Exit {
+    match interpret_fueled(ops, host, None) {
+        Ok(exit) => exit,
+        Err(FuelExhausted) => unreachable!("no fuel budget was supplied"),
+    }
+}
+
+/// [`interpret`] with a deterministic step budget: when `fuel` is `Some`,
+/// every executed StackOp decrements it and exhaustion stops the run with
+/// `Err(FuelExhausted)` — including backward `Br` loops *inside* a trace,
+/// which otherwise never return control to the caller (a guest `jal x0, 0`
+/// compiles to exactly such a loop). Sandbox hosts (spday-exec's vane
+/// backend) need this: RL rollouts will adversarially discover infinite
+/// loops otherwise.
+pub fn interpret_fueled(
+    ops: &[StackOp],
+    host: &mut impl StackHost,
+    mut fuel: Option<&mut u64>,
+) -> Result<Exit, FuelExhausted> {
     let mut val: Vec<u64> = Vec::new();
     // Body-start index (one past `LoopBegin`) for each currently open loop,
     // innermost last. Used only to resolve `Br`'s jump target.
@@ -237,6 +262,12 @@ pub fn interpret(ops: &[StackOp], host: &mut impl StackHost) -> Exit {
     }
 
     loop {
+        if let Some(f) = fuel.as_deref_mut() {
+            match f.checked_sub(1) {
+                Some(next) => *f = next,
+                None => return Err(FuelExhausted),
+            }
+        }
         let op = &ops[ip];
         match op {
             // ── Control flow ─────────────────────────────────────────────
@@ -580,13 +611,13 @@ pub fn interpret(ops: &[StackOp], host: &mut impl StackHost) -> Exit {
                 if host.ecall() {
                     ip += 1;
                 } else {
-                    return Exit::Ecall;
+                    return Ok(Exit::Ecall);
                 }
             }
-            StackOp::Trap(msg) => return Exit::Trap(msg.clone()),
+            StackOp::Trap(msg) => return Ok(Exit::Trap(msg.clone())),
             StackOp::TailCall => {
                 let addr = pop!();
-                return Exit::TailCall(addr);
+                return Ok(Exit::TailCall(addr));
             }
             StackOp::Log(msg) => {
                 host.log(msg);
@@ -606,7 +637,7 @@ pub fn interpret(ops: &[StackOp], host: &mut impl StackHost) -> Exit {
                 if matches {
                     ip += 1;
                 } else {
-                    return Exit::TailCall(*addr);
+                    return Ok(Exit::TailCall(*addr));
                 }
             }
         }
