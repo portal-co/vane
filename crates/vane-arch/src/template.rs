@@ -130,6 +130,16 @@ pub struct Params<'a> {
 #[non_exhaustive]
 pub struct Flags {
     pub test_mode: bool,
+    /// End every basic block immediately after an `ecall` (`Ecall`, then
+    /// `PushImm(fallthrough)`, `TailCall`) instead of inlining the
+    /// fallthrough into the same block. For host-side interpreters whose
+    /// syscall effects (fork/exec/wait) must be applied at a *block
+    /// boundary* with full access to the emulator's process state: the
+    /// ecall handler records a request, the interpreter returns at the
+    /// TailCall, and the driver applies the effect before emitting the
+    /// next block. Default false: every existing consumer's traces are
+    /// unchanged.
+    pub ecall_boundary: bool,
     #[cfg(feature = "target-js")]
     pub paging_mode: Option<PagingMode>,
     #[cfg(feature = "target-js")]
@@ -181,6 +191,7 @@ impl Flags {
     ) -> Self {
         Self {
             test_mode,
+            ecall_boundary: false,
             paging_mode: Some(paging_mode),
             shared_page_table_vaddr,
             shared_security_directory_vaddr,

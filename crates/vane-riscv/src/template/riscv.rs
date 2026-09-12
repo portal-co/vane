@@ -729,7 +729,14 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
         }
         Inst::Ecall => {
             ops.push(StackOp::Ecall);
-            ft(&mut ops, labels);
+            if this.params.flags.ecall_boundary {
+                // Terminate the block at the syscall (see Flags::ecall_-
+                // boundary): the fallthrough becomes the next block.
+                ops.push(StackOp::PushImm(next_pc));
+                ops.push(StackOp::TailCall);
+            } else {
+                ft(&mut ops, labels);
+            }
         }
         // Ebreak and anything unrecognised → trap.
         inst => {
