@@ -534,29 +534,35 @@ struct BrowserHost {
 }
 
 impl BrowserHost {
+    /// Invoke a named async JavaScript host operation. A missing capability is
+    /// ENOSYS; an exception/rejection is EIO. Filesystem methods may return a
+    /// Uint8Array for an out buffer, so conversion to an errno/result is kept
+    /// at the typed Rust boundary below.
+    async fn call_value(&self, name: &str, args: &[JsValue]) -> Result<JsValue, i64> {
+        let method = js_sys::Reflect::get(&self.host_api, &JsValue::from_str(name))
+            .map_err(|_| -os_unix_emulation::ENOSYS)?
+            .dyn_into::<js_sys::Function>()
+            .map_err(|_| -os_unix_emulation::ENOSYS)?;
+        let array = js_sys::Array::new();
+        for arg in args { array.push(arg); }
+        let value = method.apply(&self.host_api, &array).map_err(|_| -os_unix_emulation::EIO)?;
+        JsFuture::from(js_sys::Promise::resolve(&value)).await.map_err(|_| -os_unix_emulation::EIO)
+    }
+
     async fn call(&self, name: &str, args: &[JsValue]) -> i64 {
-        let Ok(method) = js_sys::Reflect::get(&self.host_api, &JsValue::from_str(name)) else {
-            return -os_unix_emulation::ENOSYS;
-        };
-        let Ok(method) = method.dyn_into::<js_sys::Function>() else {
-            return -os_unix_emulation::ENOSYS;
-        };
-        let call = match args {
-            [] => method.call0(&self.host_api),
-            [a] => method.call1(&self.host_api, a),
-            [a, b] => method.call2(&self.host_api, a, b),
-            _ => return -os_unix_emulation::ENOSYS,
-        };
-        let Ok(value) = call else {
-            return -os_unix_emulation::ENOSYS;
-        };
-        let Ok(value) = JsFuture::from(js_sys::Promise::resolve(&value)).await else {
-            return -os_unix_emulation::ENOSYS;
-        };
-        value
-            .as_f64()
+        self.call_value(name, args).await.ok()
+            .and_then(|value| value.as_f64())
             .map(|value| value as i64)
             .unwrap_or(-os_unix_emulation::ENOSYS)
+    }
+
+    async fn stat_call(&self, name: &str, args: &[JsValue], stat: &mut os_unix_emulation::LinuxRv64Stat) -> i64 {
+        let value = match self.call_value(name, args).await { Ok(value) => value, Err(errno) => return errno };
+        if let Some(errno) = value.as_f64() { return errno as i64; }
+        let bytes = js_sys::Uint8Array::new(&value);
+        if bytes.length() != os_unix_emulation::LINUX_RV64_STAT_LEN as u32 { return -os_unix_emulation::EIO; }
+        bytes.copy_to(&mut stat.0);
+        0
     }
 }
 
@@ -591,6 +597,42 @@ impl os_unix_emulation::AsyncUnixHost for BrowserHost {
 
     async fn exit(&mut self, code: u32) -> i64 {
         self.call("exit", &[JsValue::from_f64(code as f64)]).await
+    }
+
+    async fn openat(&mut self, dirfd: i32, path: &[u8], flags: u32, mode: u32) -> i64 {
+        let Ok(path) = core::str::from_utf8(path) else { return -os_unix_emulation::EINVAL; };
+        self.call("openat", &[
+            JsValue::from_f64(dirfd as f64), JsValue::from_str(path),
+            JsValue::from_f64(flags as f64), JsValue::from_f64(mode as f64),
+        ]).await
+    }
+
+    async fn lseek(&mut self, fd: u32, offset: i64, whence: u32) -> i64 {
+        self.call("lseek", &[
+            JsValue::from_f64(fd as f64), js_sys::BigInt::from(offset).into(),
+            JsValue::from_f64(whence as f64),
+        ]).await
+    }
+
+    async fn fstat(&mut self, fd: u32, stat: &mut os_unix_emulation::LinuxRv64Stat) -> i64 {
+        self.stat_call("fstat", &[JsValue::from_f64(fd as f64)], stat).await
+    }
+
+    async fn fstatat(&mut self, dirfd: i32, path: &[u8], flags: u32, stat: &mut os_unix_emulation::LinuxRv64Stat) -> i64 {
+        let Ok(path) = core::str::from_utf8(path) else { return -os_unix_emulation::EINVAL; };
+        self.stat_call("fstatat", &[
+            JsValue::from_f64(dirfd as f64), JsValue::from_str(path), JsValue::from_f64(flags as f64),
+        ], stat).await
+    }
+
+    async fn getdents64(&mut self, fd: u32, bytes: &mut [u8]) -> i64 {
+        let view = js_sys::Uint8Array::new_with_length(bytes.len() as u32);
+        let result = self.call("getdents64", &[JsValue::from_f64(fd as f64), JsValue::from(view.clone())]).await;
+        if result > 0 {
+            let count = core::cmp::min(result as usize, bytes.len());
+            view.copy_to(&mut bytes[..count]);
+        }
+        result
     }
 }
 
