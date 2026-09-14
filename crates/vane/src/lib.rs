@@ -87,8 +87,12 @@ impl Reactor {
         let mut regs = self.save_regs();
         loop {
             regs[0] = 0;
+            // Unaligned-safe fetch: with compressed instructions pc can be
+            // 2 mod 4, and a raw aligned deref is both UB in Rust and broken
+            // on backends that honor the alignment hint (wasm2js lowers an
+            // align=4 load to HEAP32[addr >> 2], reading the wrong word).
             let code = self.get_page(pc) as *mut u32;
-            let code = unsafe { *code };
+            let code = unsafe { code.read_unaligned() };
             let i = Inst::decode(code, Xlen::Rv64);
             let (i, b) = match i {
                 Ok(a) => a,
@@ -326,7 +330,7 @@ impl Reactor {
                     let mem = reg!(base).wrapping_add_signed(offset.as_i64());
                     set_reg!(dest => match self.get_page(mem){
                         p => unsafe{
-                            *(p as *mut u16)
+                            (p as *mut u16).read_unaligned()
                         }
                     } as u64);
                 }
@@ -334,7 +338,7 @@ impl Reactor {
                     let mem = reg!(base).wrapping_add_signed(offset.as_i64());
                     set_reg!(dest => match self.get_page(mem){
                         p => unsafe{
-                            *(p as *mut i32)
+                            (p as *mut i32).read_unaligned()
                         }
                     } as i64 as u64);
                 }
@@ -342,7 +346,7 @@ impl Reactor {
                     let mem = reg!(base).wrapping_add_signed(offset.as_i64());
                     set_reg!(dest => match self.get_page(mem){
                         p => unsafe{
-                            *(p as *mut u32)
+                            (p as *mut u32).read_unaligned()
                         }
                     } as u64);
                 }
@@ -350,7 +354,7 @@ impl Reactor {
                     let mem = reg!(base).wrapping_add_signed(offset.as_i64());
                     set_reg!(dest => match self.get_page(mem){
                         p => unsafe{
-                            *(p as *mut u64)
+                            (p as *mut u64).read_unaligned()
                         }
                     });
                 }
@@ -366,21 +370,21 @@ impl Reactor {
                     let mem = reg!(base).wrapping_add_signed(offset.as_i64());
                     let ptr = self.get_page(mem);
                     unsafe {
-                        *(ptr as *mut u16) = (reg!(src) & 0xffff) as u16;
+                        (ptr as *mut u16).write_unaligned((reg!(src) & 0xffff) as u16);
                     }
                 }
                 Inst::Sw { offset, src, base } => {
                     let mem = reg!(base).wrapping_add_signed(offset.as_i64());
                     let ptr = self.get_page(mem);
                     unsafe {
-                        *(ptr as *mut u32) = (reg!(src) & 0xffff_ffff) as u32;
+                        (ptr as *mut u32).write_unaligned((reg!(src) & 0xffff_ffff) as u32);
                     }
                 }
                 Inst::Sd { offset, src, base } => {
                     let mem = reg!(base).wrapping_add_signed(offset.as_i64());
                     let ptr = self.get_page(mem);
                     unsafe {
-                        *(ptr as *mut u64) = reg!(src);
+                        (ptr as *mut u64).write_unaligned(reg!(src));
                     }
                 }
                 //Fence
