@@ -16,6 +16,27 @@ host-independent interpreter loop), bridging a minimal Linux syscall set
 (`write`, `read` EOF, `exit`/`exit_group`) to stdio. It builds natively and
 for `wasm32-wasip1` (`--no-default-features`).
 
+### M3 gate: privileged architecture
+
+```sh
+harness/run-priv-gate.sh
+```
+
+Builds and runs `harness/payload-priv` — a bare-metal payload that boots in
+M-mode, builds Sv39 page tables, drops to S-mode, exercises ecall delegation
+(M then S), translated loads/stores, and a delegated store page fault —
+under `vane-cli --hart` both natively and inside WASI (node:wasi). Exit code
+0 = pass (riscv-tests `tohost` convention).
+
+Unit coverage lives in `crates/vane/tests/privileged.rs` (trap delegation,
+CSR privilege rules, xRET, interrupts, Sv39 walk/faults) and
+`crates/vane/tests/regressions.rs`. Both run in either host configuration:
+
+```sh
+cargo test -p vane --test privileged --test regressions
+cargo test -p vane --no-default-features --test privileged --test regressions
+```
+
 ### M1 gate: no-JIT execution + engine parity
 
 ```sh

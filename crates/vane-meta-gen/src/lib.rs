@@ -27,7 +27,7 @@ pub use wasm_bindgen;
 
 #[macro_export]
 macro_rules! vane_meta {
-    ($t:ident, $c:ident, $y:expr, $flate:expr, $emit:expr) => {
+    ($t:ident, $c:ident, $y:expr, $flate:expr, $emit:expr, $hart:ty, $step:expr) => {
         #[cfg(feature = "js-host")]
         #[$crate::wasm_bindgen::prelude::wasm_bindgen(wasm_bindgen = $crate::wasm_bindgen)]
         #[derive(Clone)]
@@ -85,6 +85,11 @@ macro_rules! vane_meta {
             /// register file lives in the JS `r` object instead.
             #[cfg(not(feature = "js-host"))]
             regs: [u64; 32],
+            /// Privileged architecture state (M3, PLAN_LINUX_WASM.md §7.2):
+            /// CSRs, privilege mode, trap state, Sv39 TLB. The concrete
+            /// type is the arch's `$hart` parameter (e.g.
+            /// `vane_riscv::hart::HartState`).
+            hart: $hart,
         }
 
         const _: () = {
@@ -151,6 +156,7 @@ macro_rules! vane_meta {
                             let u32p = lock.mem.use_32bit_paging;
                             let mlp = lock.mem.use_multilevel_paging;
                             let cache_hit = lock.trace_cache.borrow().contains_key(&pc);
+                            let hart_enabled = lock.hart.enabled;
                             drop(lock);
                             let mut flags = $crate::vane_arch::template::Flags::with_paging(
                                 test_mode,
@@ -164,6 +170,10 @@ macro_rules! vane_meta {
                             // the deferred handler below runs at a block
                             // boundary (see LocalStackHost::ecall).
                             flags.ecall_boundary = true;
+                            // Under the privileged architecture (M3),
+                            // privileged instructions become trace
+                            // boundaries handled by the dispatch stepper.
+                            flags.privileged = hart_enabled;
                             let jit = $crate::vane_arch::template::TemplateJit {
                                 params: Params {
                                     react: self,
@@ -195,6 +205,13 @@ macro_rules! vane_meta {
                         match exit {
                             $crate::vane_arch::interp::Exit::TailCall(next) => {
                                 host.pc = next;
+                                // Privileged stepper hook (M3): when the
+                                // hart is enabled, execute translated or
+                                // privileged-class instructions via the
+                                // arch's step function instead of tracing.
+                                if let Some(np) = $step(self, host.pc)? {
+                                    host.pc = np;
+                                }
                                 if host.pending_ecall {
                                     host.pending_ecall = false;
                                     if on_ecall(&mut host).await {

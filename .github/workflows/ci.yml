@@ -53,6 +53,8 @@ jobs:
           node-version: 22
       - name: Run payload inside the WASI module
         run: harness/run-wasip1-hello.sh
+      - name: M3 privileged gate (native + WASI)
+        run: harness/run-priv-gate.sh
 
   # M1 exit gate: no-JIT execution + engine parity (PLAN_LINUX_WASM.md §10).
   nojit-gate:

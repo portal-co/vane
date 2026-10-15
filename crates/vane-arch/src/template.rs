@@ -130,6 +130,13 @@ pub struct Params<'a> {
 #[non_exhaustive]
 pub struct Flags {
     pub test_mode: bool,
+    /// The guest is running with the privileged architecture live
+    /// (PLAN_LINUX_WASM.md §7). Privileged instructions (CSR ops, xRET, WFI,
+    /// SFENCE.VMA, ECALL, EBREAK) are lowered to trace boundaries
+    /// (`PushImm(pc); TailCall`) so the host dispatch loop can execute them
+    /// with full trap/CSR semantics instead of lowering them inline.
+    /// Default false: legacy userspace-ABI behavior (ecall → host hook).
+    pub privileged: bool,
     /// End every basic block immediately after an `ecall` (`Ecall`, then
     /// `PushImm(fallthrough)`, `TailCall`) instead of inlining the
     /// fallthrough into the same block. For host-side interpreters whose
@@ -191,6 +198,7 @@ impl Flags {
     ) -> Self {
         Self {
             test_mode,
+            privileged: false,
             ecall_boundary: false,
             paging_mode: Some(paging_mode),
             shared_page_table_vaddr,

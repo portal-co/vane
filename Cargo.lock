@@ -1712,142 +1712,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 
 [[patch.unused]]
-name = "portal-pc-waffle"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-backend"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-copying"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-copying-passes"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-entity"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-frontend"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-fuzzing"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-hooking"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-ir"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-lowering"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-passes"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-passes-shared"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-solutions-sdk"
-version = "0.0.2"
-
-[[patch.unused]]
-name = "pit-lang-generic"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "pit-rust-generic"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-aarch64"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-arm"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-riscv32"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-writer"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-x86"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "pit-patch"
-version = "0.5.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-jsc-common"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-cfg"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-ll-common"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-ssa"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-tac"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-util"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "lazy-repo"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "lazy-repo-crypto"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "lazy-repo-std"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "lazy-repo"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "lazy-repo-crypto"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "lazy-repo-std"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "thin-mcp"
-version = "0.1.0"
-
-[[patch.unused]]
 name = "portal-solutions-blitz-aarch64"
 version = "0.1.0"
 
@@ -1882,62 +1746,6 @@ version = "0.1.0"
 [[patch.unused]]
 name = "portal-solutions-blitz-x86-64"
 version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-circuit-exec-core"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-llvm-constchain"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-llvm-import-core"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-llvm-jumpthread"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-llvm-pass-build"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-llvm-pass-support"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-circuit-exec-core"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-llvm-constchain"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-llvm-import-core"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-llvm-jumpthread"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-llvm-pass-build"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-llvm-pass-support"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-pc-asm-common"
-version = "0.1.1"
-
-[[patch.unused]]
-name = "pit-core"
-version = "0.5.0-alpha.1"
 
 [[patch.unused]]
 name = "vaffle"
@@ -1998,6 +1806,178 @@ version = "0.1.0"
 [[patch.unused]]
 name = "volar-wasm-circuit-import"
 version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-circuit-exec-core"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-llvm-constchain"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-llvm-import-core"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-llvm-jumpthread"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-llvm-pass-build"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-llvm-pass-support"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "thin-mcp"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-pc-waffle"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-backend"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-copying"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-copying-passes"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-entity"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-frontend"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-fuzzing"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-hooking"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-ir"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-lowering"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-passes"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-passes-shared"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "pit-lang-generic"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "pit-rust-generic"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-aarch64"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-arm"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-riscv32"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-writer"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-x86"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-sdk"
+version = "0.0.2"
+
+[[patch.unused]]
+name = "lazy-repo"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "lazy-repo-crypto"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "lazy-repo-std"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-circuit-exec-core"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-llvm-constchain"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-llvm-import-core"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-llvm-jumpthread"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-llvm-pass-build"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-llvm-pass-support"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "pit-patch"
+version = "0.5.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-jsc-common"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-cfg"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-ll-common"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-ssa"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-tac"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-util"
+version = "0.8.0-pre.11"
 
 [[patch.unused]]
 name = "os-abi-codegen"
@@ -2189,4 +2169,24 @@ version = "0.1.0"
 
 [[patch.unused]]
 name = "xtask"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-pc-asm-common"
+version = "0.1.1"
+
+[[patch.unused]]
+name = "pit-core"
+version = "0.5.0-alpha.1"
+
+[[patch.unused]]
+name = "lazy-repo"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "lazy-repo-crypto"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "lazy-repo-std"
 version = "0.1.0"

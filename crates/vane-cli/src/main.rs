@@ -32,12 +32,22 @@ struct Args {
     elf_path: String,
     entry: Option<u64>,
     max_insns: Option<u64>,
+    /// Enable the privileged architecture (M3): boot in M-mode with the
+    /// trap engine and Sv39 live. In this mode ecall does NOT reach the
+    /// syscall shim — the guest's own trap handlers run.
+    hart: bool,
+    /// riscv-tests convention: poll this guest address between fueled
+    /// interpreter rounds; a nonzero value with bit 0 set ends the run with
+    /// exit code `value >> 1`.
+    tohost: Option<u64>,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut elf_path = None;
     let mut entry = None;
     let mut max_insns = None;
+    let mut hart = false;
+    let mut tohost = None;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -51,6 +61,12 @@ fn parse_args() -> Result<Args, String> {
                 let v = it.next().ok_or("--max-insns needs a value")?;
                 max_insns = Some(v.parse().map_err(|e| format!("--max-insns: {e}"))?);
             }
+            "--hart" => hart = true,
+            "--tohost" => {
+                let v = it.next().ok_or("--tohost needs a value")?;
+                let v = v.strip_prefix("0x").unwrap_or(&v);
+                tohost = Some(u64::from_str_radix(v, 16).map_err(|e| format!("--tohost: {e}"))?);
+            }
             other => return Err(format!("unknown argument: {other}")),
         }
     }
@@ -58,6 +74,8 @@ fn parse_args() -> Result<Args, String> {
         elf_path: elf_path.ok_or("missing required --elf <path>")?,
         entry,
         max_insns,
+        hart,
+        tohost,
     })
 }
 
@@ -91,6 +109,43 @@ fn main() {
     let mut insns: u64 = 0;
     let mut regs = [0u64; 32];
     let mut pc = entry;
+
+    if args.hart {
+        // Privileged mode: ecall traps in-guest; the payload reports
+        // completion through `tohost` (riscv-tests convention).
+        reactor.set_hart_enabled(true);
+        const FUEL: u64 = 1_000_000;
+        let mut total: u64 = 0;
+        loop {
+            let mut noop = async |_: &mut [u64; 32]| -> bool { false };
+            let result = futures::executor::block_on(
+                reactor.interp_core_fueled(pc, &mut regs, &mut noop, Some(FUEL)),
+            );
+            match result {
+                Ok(next_pc) => pc = next_pc,
+                Err(e) => {
+                    eprintln!("vane-cli: interpreter error at pc={pc:#x}: {e}");
+                    std::process::exit(1);
+                }
+            }
+            total += FUEL;
+            if let Some(max) = args.max_insns {
+                if total >= max {
+                    eprintln!("vane-cli: instruction cap reached ({max})");
+                    std::process::exit(3);
+                }
+            }
+            if let Some(tohost) = args.tohost {
+                let mut v = 0u64;
+                for i in 0..8 {
+                    v |= (reactor.read_guest_byte(tohost + i) as u64) << (8 * i);
+                }
+                if v & 1 == 1 {
+                    std::process::exit((v >> 1) as u8 as i32);
+                }
+            }
+        }
+    }
 
     // The interpreter only yields at ecall boundaries, so the instruction
     // cap is enforced between ecall-separated runs. Good enough for M0's

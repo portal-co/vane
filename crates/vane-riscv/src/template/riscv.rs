@@ -189,15 +189,14 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
         };
 
     // ── Hint / test-mode logging ──────────────────────────────────────────────
-    if this.params.flags.test_mode {
-        if let Some(hint_value) = hint::detect_test_marker(&inst) {
+    if this.params.flags.test_mode
+        && let Some(hint_value) = hint::detect_test_marker(&inst) {
             ops.push(StackOp::Log(alloc::format!(
                 "[HINT] PC=0x{:x}: Test case {}",
                 this.pc,
                 hint_value
             )));
         }
-    }
 
     // ── Instruction → StackOp mapping ────────────────────────────────────────
 
@@ -728,6 +727,16 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
             ft(&mut ops, labels);
         }
         Inst::Ecall => {
+            if this.params.flags.privileged {
+                // Privileged mode (PLAN_LINUX_WASM.md §7): ecall raises an
+                // environment-call exception through the trap engine, so it
+                // never reaches `StackOp::Ecall` (the userspace syscall
+                // hook). End the trace *before* the ecall; the dispatch
+                // loop executes it via the privileged stepper.
+                ops.push(StackOp::PushImm(this.pc));
+                ops.push(StackOp::TailCall);
+                return ops;
+            }
             ops.push(StackOp::Ecall);
             if this.params.flags.ecall_boundary {
                 // Terminate the block at the syscall (see Flags::ecall_-
@@ -738,9 +747,35 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
                 ft(&mut ops, labels);
             }
         }
-        // Ebreak and anything unrecognised → trap.
+        // Privileged instructions: trace boundary in privileged mode so the
+        // dispatch loop's stepper applies full CSR/trap semantics; traps in
+        // legacy mode (unchanged behavior).
+        Inst::Csrrw { .. }
+        | Inst::Csrrs { .. }
+        | Inst::Csrrc { .. }
+        | Inst::Csrrwi { .. }
+        | Inst::Csrrsi { .. }
+        | Inst::Csrrci { .. }
+        | Inst::Mret
+        | Inst::Sret
+        | Inst::Wfi
+        | Inst::SfenceVma { .. }
+        | Inst::Ebreak
+            if this.params.flags.privileged =>
+        {
+            ops.push(StackOp::PushImm(this.pc));
+            ops.push(StackOp::TailCall);
+        }
+        // Ebreak and anything unrecognised → trap. In privileged mode,
+        // boundary instead so the stepper raises a proper in-guest
+        // illegal-instruction trap (D5: same semantics as step_one).
         inst => {
-            ops.push(StackOp::Trap(alloc::format!("op:{inst}")));
+            if this.params.flags.privileged {
+                ops.push(StackOp::PushImm(this.pc));
+                ops.push(StackOp::TailCall);
+            } else {
+                ops.push(StackOp::Trap(alloc::format!("op:{inst}")));
+            }
         }
     }
 

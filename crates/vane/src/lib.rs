@@ -7,6 +7,8 @@ use std::rc::Rc;
 pub use vane_riscv::hint;
 use vane_riscv::template::Params;
 pub use vane_riscv::Mem;
+/// Re-exported for host/test access to the privileged hart state.
+pub use vane_riscv;
 /// Engine selection for `run` (interpreter vs JS JIT); see PLAN_LINUX_WASM.md §4.
 pub use vane_arch::ExecEngine;
 use vane_riscv::ReleaseFlate;
@@ -21,7 +23,15 @@ use wasm_bindgen_futures::JsFuture;
 #[cfg(all(test, feature = "js-host"))]
 #[path = "../_tests/rv_corpus.rs"]
 mod _tests;
-vane_meta_gen::vane_meta!(Reactor, Core, Riscv, ReleaseFlate {}, vane_riscv::template::riscv::rv_emit);
+vane_meta_gen::vane_meta!(
+    Reactor,
+    Core,
+    Riscv,
+    ReleaseFlate {},
+    vane_riscv::template::riscv::rv_emit,
+    vane_riscv::hart::HartState,
+    Reactor::privileged_step
+);
 
 /// wasm-bindgen calls this once when the module is instantiated.
 /// Installs `console_error_panic_hook` so Rust panics surface as readable
@@ -69,6 +79,18 @@ impl core::fmt::Display for InterpError {
 
 impl std::error::Error for InterpError {}
 
+/// The result of executing one instruction via [`Reactor::step_one`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepOutcome {
+    /// Continue at this pc (normal fallthrough, taken branch/jump, or a
+    /// trap handler's vector when the privileged architecture is live).
+    Next(u64),
+    /// Legacy mode (`hart` disabled): the guest executed `ecall` at this
+    /// pc and the async host hook must run.
+    LegacyEcall(u64),
+}
+
+
 // Non-wasm impl block for Rust-only APIs
 impl Reactor {
     /// Bulk-write guest memory (e.g. loading an ELF segment). Chunks the
@@ -114,7 +136,687 @@ impl Reactor {
                 pc: 0,
                 #[cfg(not(feature = "js-host"))]
                 regs: [0; 32],
+                hart: Default::default(),
             })),
+        }
+    }
+
+    /// Enable or disable the privileged architecture (M3,
+    /// PLAN_LINUX_WASM.md §7.2). When enabled, the hart boots in M-mode,
+    /// `ecall` raises environment-call exceptions through the trap engine,
+    /// and CSR/Sv39 semantics are live. Default: disabled (legacy
+    /// userspace-ABI-only behavior).
+    pub fn set_hart_enabled(&self, enabled: bool) {
+        self.core.lock().hart.enabled = enabled;
+    }
+
+    /// Whether the privileged architecture is live.
+    pub fn hart_enabled(&self) -> bool {
+        self.core.lock().hart.enabled
+    }
+
+    /// Access the privileged hart state (CSRs, privilege mode, mip/mie,
+    /// satp) — used by device models, tests, and host drivers.
+    pub fn with_hart<R>(&self, f: impl FnOnce(&mut vane_riscv::hart::HartState) -> R) -> R {
+        f(&mut self.core.lock().hart)
+    }
+
+    /// Execute exactly one instruction at `pc` (synchronous).
+    ///
+    /// This is the single instruction-semantics implementation shared by
+    /// `interp_core` and the trace dispatch loop's privileged stepper (D5:
+    /// one code path for all engines). When the privileged architecture is
+    /// enabled it includes: pending-interrupt delivery, Sv39 fetch/load/
+    /// store translation, CSR instructions with privilege checks, trap
+    /// entry, and xRET.
+    pub fn step_one(&self, pc: u64, regs: &mut [u64; 32]) -> Result<StepOutcome, InterpError> {
+        use vane_riscv::hart::{
+            Access, CAUSE_BREAKPOINT, CAUSE_ECALL_M, CAUSE_ECALL_S, CAUSE_ECALL_U,
+            CAUSE_ILLEGAL, CsrOp, PrivMode, Trap,
+        };
+        let mut guard = self.core.lock();
+        #[cfg(feature = "js-host")]
+        let test_mode = guard.test_mode;
+        // Destructure into disjoint field borrows: the MMU walker takes
+        // &mut hart and &mut mem simultaneously.
+        let core = &mut *guard;
+        #[allow(unused_variables)]
+        let Core { mem, hart, .. } = core;
+        let hart_enabled = hart.enabled;
+        if hart_enabled {
+            // Pending interrupts are taken before the next instruction.
+            if let Some(cause) = hart.pending_interrupt() {
+                let npc = hart.raise(
+                    Trap {
+                        cause,
+                        tval: 0,
+                        interrupt: true,
+                    },
+                    pc,
+                );
+                return Ok(StepOutcome::Next(npc));
+            }
+            if hart.mcountinhibit & 1 == 0 {
+                hart.mcycle += 1;
+            }
+            if hart.mcountinhibit & 4 == 0 {
+                hart.minstret += 1;
+            }
+        }
+
+        regs[0] = 0;
+
+        // Fetch (translated when Sv39 is active).
+        let fetch_pa = if hart_enabled && hart.translation_active() {
+            match hart.translate(&mut *mem, pc, Access::Exec) {
+                Ok(p) => p,
+                Err(t) => return Ok(StepOutcome::Next(hart.raise(t, pc))),
+            }
+        } else {
+            pc
+        };
+        // Unaligned-safe fetch: with compressed instructions pc can be
+        // 2 mod 4, and a raw aligned deref is both UB in Rust and broken
+        // on backends that honor the alignment hint (wasm2js lowers an
+        // align=4 load to HEAP32[addr >> 2], reading the wrong word).
+        let code = unsafe { (mem.get_page(fetch_pa) as *mut u32).read_unaligned() };
+        let i = Inst::decode(code, Xlen::Rv64);
+        let (i, b) = match i {
+            Ok(a) => a,
+            Err(e) => {
+                if hart_enabled {
+                    // Illegal/unrecognized instruction → trap with the raw
+                    // encoding in xtval.
+                    let t = Trap::exception(CAUSE_ILLEGAL, code as u64);
+                    return Ok(StepOutcome::Next(hart.raise(t, pc)));
+                }
+                return Err(InterpError::Decode(format!("{e}")));
+            }
+        };
+
+        // Check for test marker HINTs when test_mode is enabled
+        #[cfg(feature = "js-host")]
+        if test_mode {
+            if let Some(hint_value) = hint::detect_test_marker(&i) {
+                log_test_hint(pc, hint_value);
+            }
+        }
+
+        let next = match b {
+            rv_asm::IsCompressed::Yes => 2,
+            rv_asm::IsCompressed::No => 4,
+        } + pc;
+
+        // Translate a guest virtual address for a data access.
+        macro_rules! xlate {
+            ($va:expr, $acc:expr) => {{
+                let va = $va;
+                if hart_enabled && hart.translation_active() {
+                    match hart.translate(&mut *mem, va, $acc) {
+                        Ok(p) => p,
+                        Err(t) => return Ok(StepOutcome::Next(hart.raise(t, pc))),
+                    }
+                } else {
+                    va
+                }
+            }};
+        }
+        // Raise an illegal-instruction trap (privileged mode) or fail
+        // interpretation (legacy mode).
+        macro_rules! illegal_or_unsupported {
+            ($what:expr) => {{
+                if hart_enabled {
+                    let t = Trap::exception(CAUSE_ILLEGAL, code as u64);
+                    return Ok(StepOutcome::Next(hart.raise(t, pc)));
+                }
+                return Err(InterpError::Unsupported(format!("iop:{}", $what)));
+            }};
+        }
+        // Zicsr operation with privilege checks.
+        macro_rules! csr_op {
+            ($op:expr, $csr:expr, $dest:expr, $val:expr, $write:expr) => {{
+                if !hart_enabled {
+                    illegal_or_unsupported!(i);
+                }
+                match hart.csr_op($op, ($csr).0, $val, $write) {
+                    Ok(old) => {
+                        set_reg!($dest => old);
+                    }
+                    Err(t) => {
+                        return Ok(StepOutcome::Next(hart.raise(t, pc)));
+                    }
+                }
+            }};
+        }
+
+        macro_rules! reg {
+            ($a:expr) => {
+                match $a {
+                    Reg(v) => regs[(v % 32) as usize],
+                }
+            };
+        }
+        macro_rules! reg32 {
+            ($a:expr) => {
+                match reg!($a) {
+                    v => (v & 0xffff_ffff) as u32,
+                }
+            };
+        }
+        macro_rules! set_reg {
+            ($a:expr => $b:expr) => {
+                match $a {
+                    Reg(r) => match $b {
+                        v => {
+                            regs[(r % 32) as usize] = v;
+                            v
+                        }
+                    },
+                }
+            };
+        }
+        macro_rules! set_reg32 {
+            ($a:expr => $b:expr) => {
+                set_reg!($a => match $b{
+                    val => (val as i32 as i64 as u64)
+                })
+            }
+        }
+        macro_rules! done {
+            () => {
+                return Ok(StepOutcome::Next(next))
+            };
+        }
+        match i {
+            Inst::Lui { uimm, dest } => {
+                set_reg!(dest => uimm.as_u64());
+            }
+            Inst::Auipc { uimm, dest } => {
+                set_reg!(dest => uimm.as_u64().wrapping_add(pc));
+            }
+            //Immediates
+            Inst::Addi { imm, dest, src1 } => {
+                set_reg!(dest => reg!(src1).wrapping_add(imm.as_u64()));
+            }
+            Inst::Slti { imm, dest, src1 } => {
+                set_reg!(dest => match (reg!(src1) as i64) < imm.as_i64() {
+                    true => 1,
+                    false => 0,
+                });
+            }
+            Inst::Sltiu { imm, dest, src1 } => {
+                set_reg!(dest => match (reg!(src1)) < imm.as_u64() {
+                    true => 1,
+                    false => 0,
+                });
+            }
+            Inst::Andi { imm, dest, src1 } => {
+                set_reg!(dest => reg!(src1) & imm.as_u64());
+            }
+            Inst::Ori { imm, dest, src1 } => {
+                set_reg!(dest => reg!(src1) | imm.as_u64());
+            }
+            Inst::Xori { imm, dest, src1 } => {
+                set_reg!(dest => reg!(src1) ^ imm.as_u64());
+            }
+            Inst::Slli { imm, dest, src1 } => {
+                set_reg!(dest => reg!(src1) << (imm.as_u32() % 64));
+            }
+            Inst::Srli { imm, dest, src1 } => {
+                set_reg!(dest => reg!(src1) >> (imm.as_u32() % 64));
+            }
+            Inst::Srai { imm, dest, src1 } => {
+                set_reg!(dest => ((reg!(src1) as i64) >> (imm.as_u32() % 64)) as u64);
+            }
+            //Regs
+            Inst::Add { src2, dest, src1 } => {
+                set_reg!(dest => reg!(src1).wrapping_add(reg!(src2)));
+            }
+            Inst::Slt { src2, dest, src1 } => {
+                set_reg!(dest => match (reg!(src1) as i64) < (reg!(src2) as i64) {
+                    true => 1,
+                    false => 0,
+                });
+            }
+            Inst::Sltu { src2, dest, src1 } => {
+                set_reg!(dest => match (reg!(src1)) < reg!(src2) {
+                    true => 1,
+                    false => 0,
+                });
+            }
+            Inst::And { src2, dest, src1 } => {
+                set_reg!(dest => reg!(src1) & reg!(src2));
+            }
+            Inst::Or { src2, dest, src1 } => {
+                set_reg!(dest => reg!(src1) | reg!(src2));
+            }
+            Inst::Xor { src2, dest, src1 } => {
+                set_reg!(dest => reg!(src1) ^ reg!(src2));
+            }
+            Inst::Sll { src2, dest, src1 } => {
+                set_reg!(dest => reg!(src1) << ((reg!(src2) & 0xffff_ffff) as u32 % 64));
+            }
+            Inst::Srl { src2, dest, src1 } => {
+                set_reg!(dest => reg!(src1) >> ((reg!(src2) & 0xffff_ffff) as u32 % 64));
+            }
+            Inst::Sra { src2, dest, src1 } => {
+                set_reg!(dest => ((reg!(src1) as i64) >> ((reg!(src2) & 0xffff_ffff) as u32 % 64)) as u64);
+            }
+            Inst::Sub { src2, dest, src1 } => {
+                set_reg!(dest => reg!(src1).wrapping_sub(reg!(src2)));
+            }
+            //Multipliaction
+            Inst::Mul { src2, dest, src1 } => {
+                set_reg!(dest => reg!(src1).wrapping_mul(reg!(src2)));
+            }
+            Inst::Mulh { src2, dest, src1 } => {
+                set_reg!(dest => (((reg!(src1) as i64 as i128) * (reg!(src2) as i64 as i128)) >> 64) as u64);
+            }
+            Inst::Mulhu { src2, dest, src1 } => {
+                set_reg!(dest => ((reg!(src1) as u128 * reg!(src2) as u128) >> 64) as u64);
+            }
+            Inst::Mulhsu { src2, dest, src1 } => {
+                set_reg!(dest => (((reg!(src1) as i64 as i128) * (reg!(src2) as u128 as i128)) >> 64) as u64);
+            }
+            Inst::Div { src2, dest, src1 } => {
+                let (a, b) = (reg!(src1) as i64, reg!(src2) as i64);
+                set_reg!(dest => if b == 0 { u64::MAX } else { a.wrapping_div(b) as u64 });
+            }
+            Inst::Divu { src2, dest, src1 } => {
+                let (a, b) = (reg!(src1), reg!(src2));
+                set_reg!(dest => if b == 0 { u64::MAX } else { a / b });
+            }
+            Inst::Rem { src2, dest, src1 } => {
+                let (a, b) = (reg!(src1) as i64, reg!(src2) as i64);
+                set_reg!(dest => if b == 0 { a as u64 } else { a.wrapping_rem(b) as u64 });
+            }
+            Inst::Remu { src2, dest, src1 } => {
+                let (a, b) = (reg!(src1), reg!(src2));
+                set_reg!(dest => if b == 0 { a } else { a % b });
+            }
+            //Jumps
+            Inst::Jal { offset, dest } => {
+                set_reg!(dest => next);
+                return Ok(StepOutcome::Next(
+                    pc.wrapping_add_signed(offset.as_i64()) & (!1),
+                ));
+            }
+            Inst::Jalr { offset, base, dest } => {
+                // Read the base BEFORE writing the link register: when
+                // rd == rs1 (e.g. `jalr ra, off(ra)`), the target must be
+                // computed from rs1's original value. The trace lowering
+                // (rv_emit) already handles this; the interpreter did not.
+                let target = reg!(base).wrapping_add_signed(offset.as_i64()) & (!1);
+                set_reg!(dest => next);
+                return Ok(StepOutcome::Next(target));
+            }
+            //Branches
+            Inst::Beq { offset, src1, src2 } => {
+                if reg!(src1) == reg!(src2) {
+                    return Ok(StepOutcome::Next(pc.wrapping_add_signed(offset.as_i64())));
+                }
+            }
+            Inst::Bne { offset, src1, src2 } => {
+                if reg!(src1) != reg!(src2) {
+                    return Ok(StepOutcome::Next(pc.wrapping_add_signed(offset.as_i64())));
+                }
+            }
+            Inst::Bltu { offset, src1, src2 } => {
+                if reg!(src1) < reg!(src2) {
+                    return Ok(StepOutcome::Next(pc.wrapping_add_signed(offset.as_i64())));
+                }
+            }
+            Inst::Bgeu { offset, src1, src2 } => {
+                if reg!(src1) >= reg!(src2) {
+                    return Ok(StepOutcome::Next(pc.wrapping_add_signed(offset.as_i64())));
+                }
+            }
+            Inst::Blt { offset, src1, src2 } => {
+                if (reg!(src1) as i64) < (reg!(src2) as i64) {
+                    return Ok(StepOutcome::Next(pc.wrapping_add_signed(offset.as_i64())));
+                }
+            }
+            Inst::Bge { offset, src1, src2 } => {
+                if (reg!(src1) as i64) >= (reg!(src2) as i64) {
+                    return Ok(StepOutcome::Next(pc.wrapping_add_signed(offset.as_i64())));
+                }
+            }
+            //Loads
+            Inst::Lb { offset, dest, base } => {
+                let va = reg!(base).wrapping_add_signed(offset.as_i64());
+                let pa = xlate!(va, Access::Load);
+                set_reg!(dest => match mem.get_page(pa){
+                    p => unsafe{
+                        *(p as *mut i8)
+                    }
+                } as i64 as u64);
+            }
+            Inst::Lbu { offset, dest, base } => {
+                let va = reg!(base).wrapping_add_signed(offset.as_i64());
+                let pa = xlate!(va, Access::Load);
+                set_reg!(dest => match mem.get_page(pa){
+                    p => unsafe{
+                        *(p as *mut u8)
+                    }
+                } as u64);
+            }
+            Inst::Lh { offset, dest, base } => {
+                let va = reg!(base).wrapping_add_signed(offset.as_i64());
+                let pa = xlate!(va, Access::Load);
+                set_reg!(dest => match mem.get_page(pa){
+                    p => unsafe{
+                        *(p as *mut i16)
+                    }
+                } as i64 as u64);
+            }
+            Inst::Lhu { offset, dest, base } => {
+                let va = reg!(base).wrapping_add_signed(offset.as_i64());
+                let pa = xlate!(va, Access::Load);
+                set_reg!(dest => match mem.get_page(pa){
+                    p => unsafe{
+                        (p as *mut u16).read_unaligned()
+                    }
+                } as u64);
+            }
+            Inst::Lw { offset, dest, base } => {
+                let va = reg!(base).wrapping_add_signed(offset.as_i64());
+                let pa = xlate!(va, Access::Load);
+                set_reg!(dest => match mem.get_page(pa){
+                    p => unsafe{
+                        (p as *mut i32).read_unaligned()
+                    }
+                } as i64 as u64);
+            }
+            Inst::Lwu { offset, dest, base } => {
+                let va = reg!(base).wrapping_add_signed(offset.as_i64());
+                let pa = xlate!(va, Access::Load);
+                set_reg!(dest => match mem.get_page(pa){
+                    p => unsafe{
+                        (p as *mut u32).read_unaligned()
+                    }
+                } as u64);
+            }
+            Inst::Ld { offset, dest, base } => {
+                let va = reg!(base).wrapping_add_signed(offset.as_i64());
+                let pa = xlate!(va, Access::Load);
+                set_reg!(dest => match mem.get_page(pa){
+                    p => unsafe{
+                        (p as *mut u64).read_unaligned()
+                    }
+                });
+            }
+            //Stores
+            Inst::Sb { offset, src, base } => {
+                let va = reg!(base).wrapping_add_signed(offset.as_i64());
+                let pa = xlate!(va, Access::Store);
+                let ptr = mem.get_page(pa);
+                unsafe {
+                    *(ptr as *mut u8) = (reg!(src) & 0xff) as u8;
+                }
+            }
+            Inst::Sh { offset, src, base } => {
+                let va = reg!(base).wrapping_add_signed(offset.as_i64());
+                let pa = xlate!(va, Access::Store);
+                let ptr = mem.get_page(pa);
+                unsafe {
+                    (ptr as *mut u16).write_unaligned((reg!(src) & 0xffff) as u16);
+                }
+            }
+            Inst::Sw { offset, src, base } => {
+                let va = reg!(base).wrapping_add_signed(offset.as_i64());
+                let pa = xlate!(va, Access::Store);
+                let ptr = mem.get_page(pa);
+                unsafe {
+                    (ptr as *mut u32).write_unaligned((reg!(src) & 0xffff_ffff) as u32);
+                }
+            }
+            Inst::Sd { offset, src, base } => {
+                let va = reg!(base).wrapping_add_signed(offset.as_i64());
+                let pa = xlate!(va, Access::Store);
+                let ptr = mem.get_page(pa);
+                unsafe {
+                    (ptr as *mut u64).write_unaligned(reg!(src));
+                }
+            }
+            //Fence
+            Inst::Fence { fence: _ } => {}
+            //Wide
+            //Immediates
+            Inst::AddiW { imm, dest, src1 } => {
+                set_reg32!(dest => reg32!(src1).wrapping_add(imm.as_u32()));
+            }
+            Inst::SlliW { imm, dest, src1 } => {
+                set_reg32!(dest => reg32!(src1) << (imm.as_u32() % 32));
+            }
+            Inst::SrliW { imm, dest, src1 } => {
+                set_reg32!(dest => reg32!(src1) >> (imm.as_u32() % 32));
+            }
+            Inst::SraiW { imm, dest, src1 } => {
+                set_reg32!(dest => ((reg32!(src1) as i64) >> (imm.as_u32() % 32)) as u32);
+            }
+            //Regs
+            Inst::AddW { src2, dest, src1 } => {
+                set_reg32!(dest => reg32!(src1).wrapping_add(reg32!(src2)));
+            }
+            Inst::SllW { src2, dest, src1 } => {
+                set_reg32!(dest => reg32!(src1) << ((reg32!(src2) & 0xffff_ffff) % 32));
+            }
+            Inst::SrlW { src2, dest, src1 } => {
+                set_reg32!(dest => reg32!(src1) >> ((reg32!(src2) & 0xffff_ffff) % 32));
+            }
+            Inst::SraW { src2, dest, src1 } => {
+                set_reg32!(dest => ((reg32!(src1) as i64) >> ((reg32!(src2) & 0xffff_ffff) % 32)) as u32);
+            }
+            Inst::SubW { src2, dest, src1 } => {
+                set_reg32!(dest => reg32!(src1).wrapping_sub(reg32!(src2)));
+            }
+            //Multipliaction
+            Inst::MulW { src2, dest, src1 } => {
+                set_reg32!(dest => reg32!(src1).wrapping_mul(reg32!(src2)));
+            }
+            Inst::DivW { src2, dest, src1 } => {
+                let (a, b) = (reg32!(src1) as i32, reg32!(src2) as i32);
+                set_reg32!(dest => if b == 0 { u32::MAX } else { a.wrapping_div(b) as u32 });
+            }
+            Inst::DivuW { src2, dest, src1 } => {
+                let (a, b) = (reg32!(src1), reg32!(src2));
+                set_reg32!(dest => if b == 0 { u32::MAX } else { a / b });
+            }
+            Inst::RemW { src2, dest, src1 } => {
+                let (a, b) = (reg32!(src1) as i32, reg32!(src2) as i32);
+                set_reg32!(dest => if b == 0 { a as u32 } else { a.wrapping_rem(b) as u32 });
+            }
+            Inst::RemuW { src2, dest, src1 } => {
+                let (a, b) = (reg32!(src1), reg32!(src2));
+                set_reg32!(dest => if b == 0 { a } else { a % b });
+            }
+            //Environment
+            Inst::Ecall => {
+                if hart_enabled {
+                    let cause = match hart.priv_mode {
+                        PrivMode::U => CAUSE_ECALL_U,
+                        PrivMode::S => CAUSE_ECALL_S,
+                        PrivMode::M => CAUSE_ECALL_M,
+                    };
+                    let npc = hart.raise(Trap::exception(cause, 0), pc);
+                    return Ok(StepOutcome::Next(npc));
+                }
+                return Ok(StepOutcome::LegacyEcall(pc));
+            }
+            Inst::Ebreak => {
+                if hart_enabled {
+                    let npc = hart.raise(Trap::exception(CAUSE_BREAKPOINT, pc), pc);
+                    return Ok(StepOutcome::Next(npc));
+                }
+                illegal_or_unsupported!(i);
+            }
+            //CSRs
+            Inst::Csrrw { csr, dest, src } => {
+                csr_op!(CsrOp::Write, csr, dest, reg!(src), true);
+            }
+            Inst::Csrrs { csr, dest, src } => {
+                csr_op!(CsrOp::Set, csr, dest, reg!(src), src.0 != 0);
+            }
+            Inst::Csrrc { csr, dest, src } => {
+                csr_op!(CsrOp::Clear, csr, dest, reg!(src), src.0 != 0);
+            }
+            Inst::Csrrwi { csr, dest, uimm } => {
+                csr_op!(CsrOp::Write, csr, dest, uimm.as_u64(), true);
+            }
+            Inst::Csrrsi { csr, dest, uimm } => {
+                csr_op!(CsrOp::Set, csr, dest, uimm.as_u64(), uimm.as_u64() != 0);
+            }
+            Inst::Csrrci { csr, dest, uimm } => {
+                csr_op!(CsrOp::Clear, csr, dest, uimm.as_u64(), uimm.as_u64() != 0);
+            }
+            //Trap return and fences
+            Inst::Mret => {
+                if !hart_enabled {
+                    illegal_or_unsupported!(i);
+                }
+                if hart.priv_mode != PrivMode::M {
+                    let t = Trap::exception(CAUSE_ILLEGAL, code as u64);
+                    return Ok(StepOutcome::Next(hart.raise(t, pc)));
+                }
+                let npc = hart.mret();
+                return Ok(StepOutcome::Next(npc));
+            }
+            Inst::Sret => {
+                if !hart_enabled {
+                    illegal_or_unsupported!(i);
+                }
+                let priv_mode = hart.priv_mode;
+                if priv_mode < PrivMode::S
+                    || (priv_mode == PrivMode::S
+                        && hart.mstatus & vane_riscv::hart::MSTATUS_TSR != 0)
+                {
+                    let t = Trap::exception(CAUSE_ILLEGAL, code as u64);
+                    return Ok(StepOutcome::Next(hart.raise(t, pc)));
+                }
+                let npc = hart.sret();
+                return Ok(StepOutcome::Next(npc));
+            }
+            Inst::Wfi => {
+                if !hart_enabled {
+                    illegal_or_unsupported!(i);
+                }
+                // Implemented as a NOP (the spec explicitly allows this);
+                // interrupts are checked at every step anyway.
+                if hart.priv_mode < PrivMode::M
+                    && hart.mstatus & vane_riscv::hart::MSTATUS_TW != 0
+                {
+                    let t = Trap::exception(CAUSE_ILLEGAL, code as u64);
+                    return Ok(StepOutcome::Next(hart.raise(t, pc)));
+                }
+            }
+            Inst::SfenceVma { addr, asid } => {
+                if !hart_enabled {
+                    illegal_or_unsupported!(i);
+                }
+                let priv_mode = hart.priv_mode;
+                if priv_mode < PrivMode::S
+                    || (priv_mode == PrivMode::S
+                        && hart.mstatus & vane_riscv::hart::MSTATUS_TVM != 0)
+                {
+                    let t = Trap::exception(CAUSE_ILLEGAL, code as u64);
+                    return Ok(StepOutcome::Next(hart.raise(t, pc)));
+                }
+                hart.sfence_vma(reg!(addr), reg!(asid));
+            }
+            _ => {
+                illegal_or_unsupported!(i);
+            }
+        }
+        done!()
+    }
+
+    /// Trace-dispatch hook for the privileged architecture (M3): when the
+    /// hart is enabled and either translation is active or the instruction
+    /// at `pc` is privileged-class, execute one instruction via
+    /// [`Reactor::step_one`] and return the new pc. Returns `Ok(None)` when
+    /// tracing `pc` is safe (hart disabled, or M/bare-mode ordinary code).
+    pub fn privileged_step(&self, pc: u64) -> Result<Option<u64>, String> {
+        use vane_arch::interp::LocalReactor;
+        {
+            let mut lock = self.core.lock();
+            if !lock.hart.enabled {
+                return Ok(None);
+            }
+            if !lock.hart.translation_active() {
+                // Peek at the instruction; only privileged-class instructions
+                // need the stepper — everything else traces normally.
+                let code = unsafe { (lock.mem.get_page(pc) as *mut u32).read_unaligned() };
+                let needs_step = match Inst::decode(code, Xlen::Rv64) {
+                    Ok((inst, _)) => matches!(
+                        inst,
+                        Inst::Csrrw { .. }
+                            | Inst::Csrrs { .. }
+                            | Inst::Csrrc { .. }
+                            | Inst::Csrrwi { .. }
+                            | Inst::Csrrsi { .. }
+                            | Inst::Csrrci { .. }
+                            | Inst::Mret
+                            | Inst::Sret
+                            | Inst::Wfi
+                            | Inst::SfenceVma { .. }
+                            | Inst::Ecall
+                            | Inst::Ebreak
+                    ),
+                    // Decode failure: let the stepper raise the trap.
+                    Err(_) => true,
+                };
+                if !needs_step {
+                    return Ok(None);
+                }
+            }
+        }
+        let mut regs = [0u64; 32];
+        for i in 1..32u8 {
+            regs[i as usize] = self.lr_load_reg(i);
+        }
+        match self.step_one(pc, &mut regs) {
+            Ok(StepOutcome::Next(np)) => {
+                for i in 1..32u8 {
+                    self.lr_store_reg(i, regs[i as usize]);
+                }
+                Ok(Some(np))
+            }
+            Ok(StepOutcome::LegacyEcall(_)) => {
+                Err("internal: legacy ecall reached with hart enabled".into())
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Fueled variant of [`Reactor::interp_core`]: when `fuel` is `Some`,
+    /// returns `Ok(pc)` once the budget is exhausted (the caller may then
+    /// service timers, poll `tohost`, etc. and resume).
+    pub async fn interp_core_fueled<F>(
+        &self,
+        mut pc: u64,
+        regs: &mut [u64; 32],
+        on_ecall: &mut F,
+        mut fuel: Option<u64>,
+    ) -> Result<u64, InterpError>
+    where
+        F: AsyncFnMut(&mut [u64; 32]) -> bool,
+    {
+        loop {
+            if let Some(f) = &mut fuel {
+                if *f == 0 {
+                    return Ok(pc);
+                }
+                *f -= 1;
+            }
+            match self.step_one(pc, regs)? {
+                StepOutcome::Next(next) => pc = next,
+                StepOutcome::LegacyEcall(ecall_pc) => {
+                    if on_ecall(regs).await {
+                        return Ok(ecall_pc);
+                    }
+                    pc = ecall_pc.wrapping_add(4);
+                }
+            }
         }
     }
 
@@ -127,390 +829,22 @@ impl Reactor {
     /// stop or an instruction fails.
     ///
     /// `on_ecall` receives the live register file whenever the guest
-    /// executes `ecall`. It may mutate registers (e.g. set `a0` to the
-    /// syscall result) and returns `true` to stop interpretation (the
-    /// returned pc then points at the `ecall`) or `false` to continue at
-    /// `pc + 4`.
-    ///
-    /// Note: this loop only terminates via `on_ecall` returning `true` or an
-    /// error, matching the historical behavior of the JS-facing `interp`.
+    /// executes `ecall` *with the privileged architecture disabled*. When
+    /// [`Reactor::set_hart_enabled`] is on, `ecall` raises exceptions
+    /// through the in-guest trap engine instead and the hook never fires.
+    /// The handler may mutate registers (e.g. set `a0` to the syscall
+    /// result) and returns `true` to stop interpretation (the returned pc
+    /// then points at the `ecall`) or `false` to continue at `pc + 4`.
     pub async fn interp_core<F>(
         &self,
-        mut pc: u64,
+        pc: u64,
         regs: &mut [u64; 32],
         on_ecall: &mut F,
     ) -> Result<u64, InterpError>
     where
         F: AsyncFnMut(&mut [u64; 32]) -> bool,
     {
-        #[cfg(feature = "js-host")]
-        let test_mode = self.core.lock().test_mode;
-        loop {
-            regs[0] = 0;
-            // Unaligned-safe fetch: with compressed instructions pc can be
-            // 2 mod 4, and a raw aligned deref is both UB in Rust and broken
-            // on backends that honor the alignment hint (wasm2js lowers an
-            // align=4 load to HEAP32[addr >> 2], reading the wrong word).
-            let code = self.get_page(pc) as *mut u32;
-            let code = unsafe { code.read_unaligned() };
-            let i = Inst::decode(code, Xlen::Rv64);
-            let (i, b) = match i {
-                Ok(a) => a,
-                Err(e) => {
-                    return Err(InterpError::Decode(format!("{e}")));
-                }
-            };
-
-            // Check for test marker HINTs when test_mode is enabled
-            #[cfg(feature = "js-host")]
-            if test_mode {
-                if let Some(hint_value) = hint::detect_test_marker(&i) {
-                    log_test_hint(pc, hint_value);
-                }
-            }
-
-            let next = match b {
-                rv_asm::IsCompressed::Yes => 2,
-                rv_asm::IsCompressed::No => 4,
-            } + pc;
-            macro_rules! reg {
-                ($a:expr) => {
-                    match $a {
-                        Reg(v) => regs[(v % 32) as usize],
-                    }
-                };
-            }
-            macro_rules! reg32 {
-                ($a:expr) => {
-                    match reg!($a) {
-                        v => (v & 0xffff_ffff) as u32,
-                    }
-                };
-            }
-            macro_rules! set_reg {
-                ($a:expr => $b:expr) => {
-                    match $a {
-                        Reg(r) => match $b {
-                            v => {
-                                regs[(r % 32) as usize] = v;
-                                v
-                            }
-                        },
-                    }
-                };
-            }
-            macro_rules! set_reg32 {
-                ($a:expr => $b:expr) => {
-                    set_reg!($a => match $b{
-                        val => (val as i32 as i64 as u64)
-                    })
-                }
-            }
-            match i {
-                Inst::Lui { uimm, dest } => {
-                    set_reg!(dest => uimm.as_u64());
-                }
-                Inst::Auipc { uimm, dest } => {
-                    set_reg!(dest => uimm.as_u64().wrapping_add(pc));
-                }
-                //Immediates
-                Inst::Addi { imm, dest, src1 } => {
-                    set_reg!(dest => reg!(src1).wrapping_add(imm.as_u64()));
-                }
-                Inst::Slti { imm, dest, src1 } => {
-                    set_reg!(dest => match (reg!(src1) as i64) < imm.as_i64() {
-                        true => 1,
-                        false => 0,
-                    });
-                }
-                Inst::Sltiu { imm, dest, src1 } => {
-                    set_reg!(dest => match (reg!(src1)) < imm.as_u64() {
-                        true => 1,
-                        false => 0,
-                    });
-                }
-                Inst::Andi { imm, dest, src1 } => {
-                    set_reg!(dest => reg!(src1) & imm.as_u64());
-                }
-                Inst::Ori { imm, dest, src1 } => {
-                    set_reg!(dest => reg!(src1) | imm.as_u64());
-                }
-                Inst::Xori { imm, dest, src1 } => {
-                    set_reg!(dest => reg!(src1) ^ imm.as_u64());
-                }
-                Inst::Slli { imm, dest, src1 } => {
-                    set_reg!(dest => reg!(src1) << (imm.as_u32() % 64));
-                }
-                Inst::Srli { imm, dest, src1 } => {
-                    set_reg!(dest => reg!(src1) >> (imm.as_u32() % 64));
-                }
-                Inst::Srai { imm, dest, src1 } => {
-                    set_reg!(dest => ((reg!(src1) as i64) >> (imm.as_u32() % 64)) as u64);
-                }
-                //Regs
-                Inst::Add { src2, dest, src1 } => {
-                    set_reg!(dest => reg!(src1).wrapping_add(reg!(src2)));
-                }
-                Inst::Slt { src2, dest, src1 } => {
-                    set_reg!(dest => match (reg!(src1) as i64) < (reg!(src2) as i64) {
-                        true => 1,
-                        false => 0,
-                    });
-                }
-                Inst::Sltu { src2, dest, src1 } => {
-                    set_reg!(dest => match (reg!(src1)) < reg!(src2) {
-                        true => 1,
-                        false => 0,
-                    });
-                }
-                Inst::And { src2, dest, src1 } => {
-                    set_reg!(dest => reg!(src1) & reg!(src2));
-                }
-                Inst::Or { src2, dest, src1 } => {
-                    set_reg!(dest => reg!(src1) | reg!(src2));
-                }
-                Inst::Xor { src2, dest, src1 } => {
-                    set_reg!(dest => reg!(src1) ^ reg!(src2));
-                }
-                Inst::Sll { src2, dest, src1 } => {
-                    set_reg!(dest => reg!(src1) << ((reg!(src2) & 0xffff_ffff) as u32 % 64));
-                }
-                Inst::Srl { src2, dest, src1 } => {
-                    set_reg!(dest => reg!(src1) >> ((reg!(src2) & 0xffff_ffff) as u32 % 64));
-                }
-                Inst::Sra { src2, dest, src1 } => {
-                    set_reg!(dest => ((reg!(src1) as i64) >> ((reg!(src2) & 0xffff_ffff) as u32 % 64)) as u64);
-                }
-                Inst::Sub { src2, dest, src1 } => {
-                    set_reg!(dest => reg!(src1).wrapping_sub(reg!(src2)));
-                }
-                //Multipliaction
-                Inst::Mul { src2, dest, src1 } => {
-                    set_reg!(dest => reg!(src1).wrapping_mul(reg!(src2)));
-                }
-                Inst::Mulh { src2, dest, src1 } => {
-                    set_reg!(dest => (((reg!(src1) as i64 as i128) * (reg!(src2) as i64 as i128)) >> 64) as u64);
-                }
-                Inst::Mulhu { src2, dest, src1 } => {
-                    set_reg!(dest => ((reg!(src1) as u128 * reg!(src2) as u128) >> 64) as u64);
-                }
-                Inst::Mulhsu { src2, dest, src1 } => {
-                    set_reg!(dest => (((reg!(src1) as i64 as i128) * (reg!(src2) as u128 as i128)) >> 64) as u64);
-                }
-                Inst::Div { src2, dest, src1 } => {
-                    let (a, b) = (reg!(src1) as i64, reg!(src2) as i64);
-                    set_reg!(dest => if b == 0 { u64::MAX } else { a.wrapping_div(b) as u64 });
-                }
-                Inst::Divu { src2, dest, src1 } => {
-                    let (a, b) = (reg!(src1), reg!(src2));
-                    set_reg!(dest => if b == 0 { u64::MAX } else { a / b });
-                }
-                Inst::Rem { src2, dest, src1 } => {
-                    let (a, b) = (reg!(src1) as i64, reg!(src2) as i64);
-                    set_reg!(dest => if b == 0 { a as u64 } else { a.wrapping_rem(b) as u64 });
-                }
-                Inst::Remu { src2, dest, src1 } => {
-                    let (a, b) = (reg!(src1), reg!(src2));
-                    set_reg!(dest => if b == 0 { a } else { a % b });
-                }
-                //Jumps
-                Inst::Jal { offset, dest } => {
-                    set_reg!(dest => next);
-                    pc = pc.wrapping_add_signed(offset.as_i64()) & (!1);
-                    continue;
-                }
-                Inst::Jalr { offset, base, dest } => {
-                    set_reg!(dest => next);
-                    pc = reg!(base).wrapping_add_signed(offset.as_i64()) & (!1);
-                    continue;
-                }
-                //Branches
-                Inst::Beq { offset, src1, src2 } => {
-                    if reg!(src1) == reg!(src2) {
-                        pc = pc.wrapping_add_signed(offset.as_i64());
-                        continue;
-                    }
-                }
-                Inst::Bne { offset, src1, src2 } => {
-                    if reg!(src1) != reg!(src2) {
-                        pc = pc.wrapping_add_signed(offset.as_i64());
-                        continue;
-                    }
-                }
-                Inst::Bltu { offset, src1, src2 } => {
-                    if reg!(src1) < reg!(src2) {
-                        pc = pc.wrapping_add_signed(offset.as_i64());
-                        continue;
-                    }
-                }
-                Inst::Bgeu { offset, src1, src2 } => {
-                    if reg!(src1) >= reg!(src2) {
-                        pc = pc.wrapping_add_signed(offset.as_i64());
-                        continue;
-                    }
-                }
-                Inst::Blt { offset, src1, src2 } => {
-                    if (reg!(src1) as i64) < (reg!(src2) as i64) {
-                        pc = pc.wrapping_add_signed(offset.as_i64());
-                        continue;
-                    }
-                }
-                Inst::Bge { offset, src1, src2 } => {
-                    if (reg!(src1) as i64) >= (reg!(src2) as i64) {
-                        pc = pc.wrapping_add_signed(offset.as_i64());
-                        continue;
-                    }
-                }
-                //Loads
-                Inst::Lb { offset, dest, base } => {
-                    let mem = reg!(base).wrapping_add_signed(offset.as_i64());
-                    set_reg!(dest => match self.get_page(mem){
-                        p => unsafe{
-                            *(p as *mut i8)
-                        }
-                    } as i64 as u64);
-                }
-                Inst::Lbu { offset, dest, base } => {
-                    let mem = reg!(base).wrapping_add_signed(offset.as_i64());
-                    set_reg!(dest => match self.get_page(mem){
-                        p => unsafe{
-                            *(p as *mut u8)
-                        }
-                    } as u64);
-                }
-                Inst::Lh { offset, dest, base } => {
-                    let mem = reg!(base).wrapping_add_signed(offset.as_i64());
-                    set_reg!(dest => match self.get_page(mem){
-                        p => unsafe{
-                            *(p as *mut i16)
-                        }
-                    } as i64 as u64);
-                }
-                Inst::Lhu { offset, dest, base } => {
-                    let mem = reg!(base).wrapping_add_signed(offset.as_i64());
-                    set_reg!(dest => match self.get_page(mem){
-                        p => unsafe{
-                            (p as *mut u16).read_unaligned()
-                        }
-                    } as u64);
-                }
-                Inst::Lw { offset, dest, base } => {
-                    let mem = reg!(base).wrapping_add_signed(offset.as_i64());
-                    set_reg!(dest => match self.get_page(mem){
-                        p => unsafe{
-                            (p as *mut i32).read_unaligned()
-                        }
-                    } as i64 as u64);
-                }
-                Inst::Lwu { offset, dest, base } => {
-                    let mem = reg!(base).wrapping_add_signed(offset.as_i64());
-                    set_reg!(dest => match self.get_page(mem){
-                        p => unsafe{
-                            (p as *mut u32).read_unaligned()
-                        }
-                    } as u64);
-                }
-                Inst::Ld { offset, dest, base } => {
-                    let mem = reg!(base).wrapping_add_signed(offset.as_i64());
-                    set_reg!(dest => match self.get_page(mem){
-                        p => unsafe{
-                            (p as *mut u64).read_unaligned()
-                        }
-                    });
-                }
-                //Stores
-                Inst::Sb { offset, src, base } => {
-                    let mem = reg!(base).wrapping_add_signed(offset.as_i64());
-                    let ptr = self.get_page(mem);
-                    unsafe {
-                        *(ptr as *mut u8) = (reg!(src) & 0xff) as u8;
-                    }
-                }
-                Inst::Sh { offset, src, base } => {
-                    let mem = reg!(base).wrapping_add_signed(offset.as_i64());
-                    let ptr = self.get_page(mem);
-                    unsafe {
-                        (ptr as *mut u16).write_unaligned((reg!(src) & 0xffff) as u16);
-                    }
-                }
-                Inst::Sw { offset, src, base } => {
-                    let mem = reg!(base).wrapping_add_signed(offset.as_i64());
-                    let ptr = self.get_page(mem);
-                    unsafe {
-                        (ptr as *mut u32).write_unaligned((reg!(src) & 0xffff_ffff) as u32);
-                    }
-                }
-                Inst::Sd { offset, src, base } => {
-                    let mem = reg!(base).wrapping_add_signed(offset.as_i64());
-                    let ptr = self.get_page(mem);
-                    unsafe {
-                        (ptr as *mut u64).write_unaligned(reg!(src));
-                    }
-                }
-                //Fence
-                Inst::Fence { fence: _ } => {}
-                //Wide
-                //Immediates
-                Inst::AddiW { imm, dest, src1 } => {
-                    set_reg32!(dest => reg32!(src1).wrapping_add(imm.as_u32()));
-                }
-                Inst::SlliW { imm, dest, src1 } => {
-                    set_reg32!(dest => reg32!(src1) << (imm.as_u32() % 32));
-                }
-                Inst::SrliW { imm, dest, src1 } => {
-                    set_reg32!(dest => reg32!(src1) >> (imm.as_u32() % 32));
-                }
-                Inst::SraiW { imm, dest, src1 } => {
-                    set_reg32!(dest => ((reg32!(src1) as i64) >> (imm.as_u32() % 32)) as u32);
-                }
-                //Regs
-                Inst::AddW { src2, dest, src1 } => {
-                    set_reg32!(dest => reg32!(src1).wrapping_add(reg32!(src2)));
-                }
-                Inst::SllW { src2, dest, src1 } => {
-                    set_reg32!(dest => reg32!(src1) << ((reg32!(src2) & 0xffff_ffff) % 32));
-                }
-                Inst::SrlW { src2, dest, src1 } => {
-                    set_reg32!(dest => reg32!(src1) >> ((reg32!(src2) & 0xffff_ffff) % 32));
-                }
-                Inst::SraW { src2, dest, src1 } => {
-                    set_reg32!(dest => ((reg32!(src1) as i64) >> ((reg32!(src2) & 0xffff_ffff) % 32)) as u32);
-                }
-                Inst::SubW { src2, dest, src1 } => {
-                    set_reg32!(dest => reg32!(src1).wrapping_sub(reg32!(src2)));
-                }
-                //Multipliaction
-                Inst::MulW { src2, dest, src1 } => {
-                    set_reg32!(dest => reg32!(src1).wrapping_mul(reg32!(src2)));
-                }
-                Inst::DivW { src2, dest, src1 } => {
-                    let (a, b) = (reg32!(src1) as i32, reg32!(src2) as i32);
-                    set_reg32!(dest => if b == 0 { u32::MAX } else { a.wrapping_div(b) as u32 });
-                }
-                Inst::DivuW { src2, dest, src1 } => {
-                    let (a, b) = (reg32!(src1), reg32!(src2));
-                    set_reg32!(dest => if b == 0 { u32::MAX } else { a / b });
-                }
-                Inst::RemW { src2, dest, src1 } => {
-                    let (a, b) = (reg32!(src1) as i32, reg32!(src2) as i32);
-                    set_reg32!(dest => if b == 0 { a as u32 } else { a.wrapping_rem(b) as u32 });
-                }
-                Inst::RemuW { src2, dest, src1 } => {
-                    let (a, b) = (reg32!(src1), reg32!(src2));
-                    set_reg32!(dest => if b == 0 { a } else { a % b });
-                }
-                //Ecall
-                Inst::Ecall => {
-                    if on_ecall(regs).await {
-                        return Ok(pc);
-                    }
-                }
-                _ => {
-                    return Err(InterpError::Unsupported(format!("iop:{i}")));
-                }
-            }
-            pc = next;
-        }
+        self.interp_core_fueled(pc, regs, on_ecall, None).await
     }
 }
 
