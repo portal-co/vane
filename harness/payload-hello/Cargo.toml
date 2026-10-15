@@ -1,0 +1,13 @@
+[package]
+name = "payload-hello"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Detached from the vane workspace: this crate builds for
+# riscv64gc-unknown-none-elf, not the host.
+[workspace]
+
+[profile.release]
+opt-level = "z"
+lto = true

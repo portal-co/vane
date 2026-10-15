@@ -1,6 +1,8 @@
 [workspace]
 members = [
     "crates/vane",
+    "crates/vane-cli",
+    "crates/vane-host",
     "crates/vane-meta-gen",
     "crates/vane-target-js",
     "crates/vane-target-wasm",

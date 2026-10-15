@@ -12,27 +12,39 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["console_error_panic_hook"]
+default = ["js-host", "console_error_panic_hook"]
+# The wasm-bindgen/JS surface (D1 in PLAN_LINUX_WASM.md). Disable for
+# `wasm32-wasip1`, WASIX, and native hosts; the plain-Rust twin API is
+# always available.
+js-host = [
+    "dep:wasm-bindgen",
+    "dep:js-sys",
+    "dep:wasm-bindgen-futures",
+    "dep:os-async",
+    "dep:os-ctx",
+    "dep:os-unix-emulation",
+    "vane-meta-gen/js-host",
+]
 
 [dependencies]
-wasm-bindgen.workspace = true
+wasm-bindgen = { workspace = true, optional = true }
 spin.workspace = true
 vane-riscv = {path="../vane-riscv",version = "^0.1.0"}
-vane-meta-gen = {path = "../vane-meta-gen",version = "^0.1.0"}
+vane-meta-gen = {path = "../vane-meta-gen",version = "^0.1.0", default-features = false}
 
 # The `console_error_panic_hook` crate provides better debugging of panics by
 # logging them with `console.error`. This is great for development, but requires
 # all the `std::fmt` and `std::panicking` infrastructure, so isn't great for
 # code size when deploying.
 console_error_panic_hook = { version = "0.1.7", optional = true }
-js-sys = "0.3.77"
+js-sys = { version = "0.3.77", optional = true }
 rv-asm.workspace = true
 
 paste = "1.0.15"
-wasm-bindgen-futures = "0.4.50"
-os-async = { git = "https://github.com/portal-co/os-emulation.git" }
-os-ctx = { git = "https://github.com/portal-co/os-emulation.git" }
-os-unix-emulation = { git = "https://github.com/portal-co/os-emulation.git" }
+wasm-bindgen-futures = { version = "0.4.50", optional = true }
+os-async = { git = "https://github.com/portal-co/os-emulation.git", optional = true }
+os-ctx = { git = "https://github.com/portal-co/os-emulation.git", optional = true }
+os-unix-emulation = { git = "https://github.com/portal-co/os-emulation.git", optional = true }
 
 
 [dev-dependencies]

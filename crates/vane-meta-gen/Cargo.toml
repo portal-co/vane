@@ -5,7 +5,14 @@ version.workspace = true
 license.workspace = true
 description.workspace = true
 
+[features]
+default = ["js-host"]
+# When enabled, the `vane_meta!` macro additionally emits the wasm-bindgen
+# surface (getters, `J`/`j`/jit_run, `_sys`, inline-JS helpers). When
+# disabled, only the plain-Rust twin is emitted (D1 in PLAN_LINUX_WASM.md).
+js-host = ["dep:wasm-bindgen"]
+
 [dependencies]
-wasm-bindgen.workspace = true
+wasm-bindgen = { workspace = true, optional = true }
 vane-arch = {path="../vane-arch",version = "^0.1.0", features = ["target-js", "target-wasm"]}
 spin.workspace = true

@@ -1,0 +1,55 @@
+# vane CI.
+#
+# NOTE: this repository currently resolves several dependencies through the
+# shared `portal-hot/.cargo/config.toml` sibling-checkout patches (see the
+# repo's .cargo/config.toml history and PLAN_LINUX_WASM.md), so the jobs
+# below expect a self-hosted runner with the portal-hot checkout layout.
+# Flip `runs-on` to `ubuntu-latest` once the patched git dependencies are
+# publishable on their own.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  native-tests:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Check workspace
+        run: cargo check --workspace
+      - name: Test workspace
+        run: cargo test --workspace
+
+  cfg-matrix:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-unknown-unknown, wasm32-wasip1
+      - name: vane js-host build (browser target)
+        run: cargo check -p vane --target wasm32-unknown-unknown
+      - name: vane plain-Rust twin build (no js-host)
+        run: cargo check -p vane --no-default-features
+      - name: vane-cli wasip1 build (no JS deps)
+        run: >
+          cargo build -p vane-cli --no-default-features
+          --target wasm32-wasip1 --release
+
+  # M0 exit gate (PLAN_LINUX_WASM.md §10).
+  wasip1-hello-gate:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-wasip1, riscv64gc-unknown-none-elf
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run payload inside the WASI module
+        run: harness/run-wasip1-hello.sh

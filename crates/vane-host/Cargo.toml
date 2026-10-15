@@ -1,0 +1,12 @@
+[package]
+name = "vane-host"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+description = "Host-side IO traits for driving a vane emulator instance outside a JS engine (WASI, WASIX, native, tests)"
+publish = false
+
+[features]
+default = []
+
+[dependencies]

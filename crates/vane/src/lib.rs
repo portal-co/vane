@@ -1,17 +1,22 @@
+#[cfg(feature = "js-host")]
 mod utils;
 
 // Re-export Mem for use in tests
 use rv_asm::{Inst, Reg, Xlen};
-use std::{cell::OnceCell, rc::Rc, u64};
+use std::rc::Rc;
 pub use vane_riscv::hint;
 use vane_riscv::template::Params;
 pub use vane_riscv::Mem;
 use vane_riscv::ReleaseFlate;
 use vane_riscv::Riscv;
+#[cfg(feature = "js-host")]
+use std::cell::OnceCell;
+#[cfg(feature = "js-host")]
 use wasm_bindgen::prelude::*;
+#[cfg(feature = "js-host")]
 use wasm_bindgen_futures::JsFuture;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "js-host"))]
 #[path = "../_tests/rv_corpus.rs"]
 mod _tests;
 vane_meta_gen::vane_meta!(Reactor, Core, Riscv, ReleaseFlate {});
@@ -20,11 +25,13 @@ vane_meta_gen::vane_meta!(Reactor, Core, Riscv, ReleaseFlate {});
 /// Installs `console_error_panic_hook` so Rust panics surface as readable
 /// `console.error` messages (with the panic location/message) instead of an
 /// opaque WASM trap.
+#[cfg(feature = "js-host")]
 #[wasm_bindgen(start)]
 fn start() {
     utils::set_panic_hook();
 }
 
+#[cfg(feature = "js-host")]
 #[wasm_bindgen(inline_js = r#"
     export function has_success(err){
         return err?.kind === 'exit';
@@ -37,8 +44,55 @@ extern "C" {
     fn log_test_hint(pc: u64, hint_value: i64);
 }
 
+/// Why [`Reactor::interp_core`] failed.
+///
+/// This is the host-independent error vocabulary of the interpreter; the
+/// `js-host` wrapper converts it to a `JsValue` string at the boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InterpError {
+    /// Instruction decode failed at the reported pc (message from `rv-asm`).
+    Decode(String),
+    /// A decoded instruction has no interpreter implementation yet.
+    Unsupported(String),
+}
+
+impl core::fmt::Display for InterpError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            InterpError::Decode(e) => write!(f, "{e}"),
+            InterpError::Unsupported(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for InterpError {}
+
 // Non-wasm impl block for Rust-only APIs
 impl Reactor {
+    /// Bulk-write guest memory (e.g. loading an ELF segment). Chunks the
+    /// copy across `Mem`'s 64 KiB pages via `get_page`.
+    pub fn write_bytes(&self, mut addr: u64, mut data: &[u8]) {
+        while !data.is_empty() {
+            let page_offset = (addr & 0xffff) as usize;
+            let n = (65536 - page_offset).min(data.len());
+            let dst = self.get_page(addr);
+            // SAFETY: `get_page` returns a pointer to the live 64 KiB page
+            // holding `addr`; `n` never crosses the page end, and pages are
+            // boxed allocations that do not alias `data`.
+            unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), dst, n) };
+            addr = addr.wrapping_add(n as u64);
+            data = &data[n..];
+        }
+    }
+
+    /// Read one guest-memory byte (host-side inspection / syscall shims).
+    ///
+    /// Named differently from the plain-Rust twin's `read_byte` so the same
+    /// call exists under both `js-host` and non-JS builds.
+    pub fn read_guest_byte(&self, addr: u64) -> u8 {
+        self.core.lock().mem.read_byte(addr)
+    }
+
     /// Create a new Reactor with custom memory
     /// This is a safe constructor that allows initializing the reactor with pre-loaded memory
     pub fn new_with_mem(mem: vane_riscv::Mem) -> Self {
@@ -46,45 +100,44 @@ impl Reactor {
             _handle: (),
             core: Rc::new(spin::Mutex::new(Core {
                 mem,
+                #[cfg(feature = "js-host")]
                 state: OnceCell::new(),
+                #[cfg(feature = "js-host")]
                 regs: OnceCell::new(),
+                #[cfg(feature = "js-host")]
                 host_api: OnceCell::new(),
                 test_mode: false,
             })),
         }
     }
-    fn save_regs(&self) -> [u64; 32] {
-        std::array::from_fn(|a| Self::reg(self.clone(), a as u8))
-    }
-    fn restore_regs(&self, a: &[u64; 32]) {
-        for (i, a) in a.iter().cloned().enumerate() {
-            Self::set_reg(self.clone(), i as u8, a);
-        }
-    }
-}
-#[wasm_bindgen]
-impl Reactor {
-    /// Construct a Reactor with empty guest memory. Load a guest image with
-    /// repeated `write_byte` calls (e.g. one per ELF PT_LOAD byte) before
-    /// calling `interp`/`jit_run`.
-    #[wasm_bindgen(constructor)]
-    pub fn new() -> Self {
-        Self::new_with_mem(vane_riscv::Mem::default())
-    }
 
-    /// Write one byte of guest memory. The counterpart to the reads
-    /// `get_page` already exposes; there is no separately-exported `Mem`
-    /// type, since every consumer only ever needs byte-at-a-time image
-    /// loading before execution starts.
-    #[wasm_bindgen(js_name = "write_byte")]
-    pub fn write_byte_js(&self, addr: u64, value: u8) {
-        self.core.lock().mem.write_byte(addr, value);
-    }
-
-    #[wasm_bindgen]
-    pub async fn interp(&self, mut pc: u64) -> Result<JsValue, JsValue> {
+    /// The host-independent RV64 interpreter loop (PLAN_LINUX_WASM.md §4:
+    /// this is the always-available execution engine; JITs layer on top).
+    ///
+    /// Executes from `pc` with a caller-owned register file `regs` (so JS
+    /// hosts can keep their register file wherever they like, and WASI /
+    /// native hosts just hold a `[u64; 32]`). Runs until `on_ecall` reports
+    /// stop or an instruction fails.
+    ///
+    /// `on_ecall` receives the live register file whenever the guest
+    /// executes `ecall`. It may mutate registers (e.g. set `a0` to the
+    /// syscall result) and returns `true` to stop interpretation (the
+    /// returned pc then points at the `ecall`) or `false` to continue at
+    /// `pc + 4`.
+    ///
+    /// Note: this loop only terminates via `on_ecall` returning `true` or an
+    /// error, matching the historical behavior of the JS-facing `interp`.
+    pub async fn interp_core<F>(
+        &self,
+        mut pc: u64,
+        regs: &mut [u64; 32],
+        on_ecall: &mut F,
+    ) -> Result<u64, InterpError>
+    where
+        F: AsyncFnMut(&mut [u64; 32]) -> bool,
+    {
+        #[cfg(feature = "js-host")]
         let test_mode = self.core.lock().test_mode;
-        let mut regs = self.save_regs();
         loop {
             regs[0] = 0;
             // Unaligned-safe fetch: with compressed instructions pc can be
@@ -97,12 +150,12 @@ impl Reactor {
             let (i, b) = match i {
                 Ok(a) => a,
                 Err(e) => {
-                    self.restore_regs(&regs);
-                    return Err(JsValue::from_str(&format!("{e}")));
+                    return Err(InterpError::Decode(format!("{e}")));
                 }
             };
 
             // Check for test marker HINTs when test_mode is enabled
+            #[cfg(feature = "js-host")]
             if test_mode {
                 if let Some(hint_value) = hint::detect_test_marker(&i) {
                     log_test_hint(pc, hint_value);
@@ -408,13 +461,13 @@ impl Reactor {
                     set_reg32!(dest => reg32!(src1).wrapping_add(reg32!(src2)));
                 }
                 Inst::SllW { src2, dest, src1 } => {
-                    set_reg32!(dest => reg32!(src1) << ((reg32!(src2) & 0xffff_ffff) as u32 % 32));
+                    set_reg32!(dest => reg32!(src1) << (((reg32!(src2) & 0xffff_ffff)) % 32));
                 }
                 Inst::SrlW { src2, dest, src1 } => {
-                    set_reg32!(dest => reg32!(src1) >> ((reg32!(src2) & 0xffff_ffff) as u32 % 32));
+                    set_reg32!(dest => reg32!(src1) >> (((reg32!(src2) & 0xffff_ffff)) % 32));
                 }
                 Inst::SraW { src2, dest, src1 } => {
-                    set_reg32!(dest => ((reg32!(src1) as i64) >> ((reg32!(src2) & 0xffff_ffff) as u32 % 32)) as u32);
+                    set_reg32!(dest => ((reg32!(src1) as i64) >> (((reg32!(src2) & 0xffff_ffff)) % 32)) as u32);
                 }
                 Inst::SubW { src2, dest, src1 } => {
                     set_reg32!(dest => reg32!(src1).wrapping_sub(reg32!(src2)));
@@ -441,35 +494,105 @@ impl Reactor {
                 }
                 //Ecall
                 Inst::Ecall => {
-                    self.restore_regs(&regs);
-                    let outcome = self._ecall().await?;
-                    if is_exit(&outcome) {
-                        return Ok(outcome);
+                    if on_ecall(regs).await {
+                        return Ok(pc);
                     }
-                    regs = self.save_regs();
                 }
                 _ => {
-                    self.restore_regs(&regs);
-                    return Err(JsValue::from_str(&format!("iop:{i}")));
+                    return Err(InterpError::Unsupported(format!("iop:{i}")));
                 }
             }
             pc = next;
         }
     }
-    // #[wasm_bindgen()]
-    // pub fn r(&self, a: usize) -> u64 {
-    //     if a == 0 {
-    //         return 0;
-    //     }
-    //     unsafe { &mut *self.core.get() }.regs[a - 1]
-    // }
-    // #[wasm_bindgen]
-    // pub fn s(&self, a: usize, x: u64) {
-    //     if a == 0 {
-    //         return;
-    //     }
-    //     unsafe { &mut *self.core.get() }.regs[a - 1] = x;
-    // }
+}
+
+#[cfg(not(feature = "js-host"))]
+impl Reactor {
+    /// Construct a Reactor with empty guest memory. Load a guest image with
+    /// repeated [`Reactor::write_byte`] calls before calling
+    /// [`Reactor::interp_core`].
+    pub fn new() -> Self {
+        Self::new_with_mem(vane_riscv::Mem::default())
+    }
+}
+
+#[cfg(not(feature = "js-host"))]
+impl Default for Reactor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "js-host")]
+impl Reactor {
+    fn save_regs(&self) -> [u64; 32] {
+        std::array::from_fn(|a| Self::reg(self.clone(), a as u8))
+    }
+    fn restore_regs(&self, a: &[u64; 32]) {
+        for (i, a) in a.iter().cloned().enumerate() {
+            Self::set_reg(self.clone(), i as u8, a);
+        }
+    }
+}
+
+#[cfg(feature = "js-host")]
+#[wasm_bindgen]
+impl Reactor {
+    /// Construct a Reactor with empty guest memory. Load a guest image with
+    /// repeated `write_byte` calls (e.g. one per ELF PT_LOAD byte) before
+    /// calling `interp`/`jit_run`.
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self::new_with_mem(vane_riscv::Mem::default())
+    }
+
+    /// Write one byte of guest memory. The counterpart to the reads
+    /// `get_page` already exposes; there is no separately-exported `Mem`
+    /// type, since every consumer only ever needs byte-at-a-time image
+    /// loading before execution starts.
+    #[wasm_bindgen(js_name = "write_byte")]
+    pub fn write_byte_js(&self, addr: u64, value: u8) {
+        self.core.lock().mem.write_byte(addr, value);
+    }
+
+    #[wasm_bindgen]
+    pub async fn interp(&self, pc: u64) -> Result<JsValue, JsValue> {
+        let mut regs = self.save_regs();
+        let outcome_slot = std::cell::RefCell::new(None::<JsValue>);
+        let err_slot = std::cell::RefCell::new(None::<JsValue>);
+        let mut handler = async |regs: &mut [u64; 32]| -> bool {
+            self.restore_regs(regs);
+            match self._ecall().await {
+                Ok(outcome) => {
+                    if is_exit(&outcome) {
+                        *outcome_slot.borrow_mut() = Some(outcome);
+                        return true;
+                    }
+                }
+                Err(e) => {
+                    *err_slot.borrow_mut() = Some(e);
+                    return true;
+                }
+            }
+            *regs = self.save_regs();
+            false
+        };
+        let result = self.interp_core(pc, &mut regs, &mut handler).await;
+        match result {
+            Ok(_) => {
+                if let Some(e) = err_slot.into_inner() {
+                    return Err(e);
+                }
+                Ok(outcome_slot.into_inner().unwrap_or(JsValue::UNDEFINED))
+            }
+            Err(e) => {
+                self.restore_regs(&regs);
+                Err(JsValue::from_str(&e.to_string()))
+            }
+        }
+    }
+
     #[wasm_bindgen(js_name = "ecall")]
     pub async fn _ecall(&self) -> Result<JsValue, JsValue> {
         let host_api = self
@@ -496,10 +619,12 @@ impl Reactor {
     }
 }
 
+#[cfg(feature = "js-host")]
 struct ReactorCtx {
     reactor: Reactor,
 }
 
+#[cfg(feature = "js-host")]
 impl os_async::AsyncCtx for ReactorCtx {
     async fn read(&mut self, addr: u64, cell: &mut (dyn os_ctx::ArgCell + '_)) {
         let reactor = self.reactor.clone();
@@ -533,10 +658,12 @@ impl os_async::AsyncCtx for ReactorCtx {
     }
 }
 
+#[cfg(feature = "js-host")]
 struct BrowserHost {
     host_api: JsValue,
 }
 
+#[cfg(feature = "js-host")]
 impl BrowserHost {
     /// Invoke a named async JavaScript host operation. A missing capability is
     /// ENOSYS; an exception/rejection is EIO. Filesystem methods may return a
@@ -570,6 +697,7 @@ impl BrowserHost {
     }
 }
 
+#[cfg(feature = "js-host")]
 impl os_unix_emulation::AsyncUnixHost for BrowserHost {
     async fn read(&mut self, fd: u32, bytes: &mut [u8]) -> i64 {
         let view = js_sys::Uint8Array::new_with_length(bytes.len() as u32);
@@ -640,6 +768,7 @@ impl os_unix_emulation::AsyncUnixHost for BrowserHost {
     }
 }
 
+#[cfg(feature = "js-host")]
 fn exit_outcome(code: u32) -> Result<JsValue, JsValue> {
     let outcome = js_sys::Object::new();
     js_sys::Reflect::set(
@@ -655,6 +784,7 @@ fn exit_outcome(code: u32) -> Result<JsValue, JsValue> {
     Ok(outcome.into())
 }
 
+#[cfg(feature = "js-host")]
 fn is_exit(value: &JsValue) -> bool {
     js_sys::Reflect::get(value, &JsValue::from_str("kind"))
         .ok()

@@ -122,7 +122,8 @@ pub fn bootstrap(browser: &Browser, mem_size: u64, abi: GuestAbi, host_callback:
             async ecall(){{\
                 const id=this._next_syscall++;\
                 const request={{id,nr:String(this.r[{number}]??0n),args:[\
-                    String(this.r[{arg0}]??0n),String(this.r[{arg1}]??0n),String(this.r[{arg2}]??0n)\
+                    String(this.r[{arg0}]??0n),String(this.r[{arg1}]??0n),String(this.r[{arg2}]??0n),\
+                    String(this.r[{arg3}]??0n),String(this.r[{arg4}]??0n),String(this.r[{arg5}]??0n)\
                 ]}};\
                 return await new Promise(resolve=>{{\
                     this._pending_syscalls.set(id,resolve);\
@@ -144,6 +145,9 @@ pub fn bootstrap(browser: &Browser, mem_size: u64, abi: GuestAbi, host_callback:
         arg0 = args[0],
         arg1 = args[1],
         arg2 = args[2],
+        arg3 = args[3],
+        arg4 = args[4],
+        arg5 = args[5],
     );
     browser.run_raw_code(format_args!("{code}"));
 }
@@ -196,7 +200,7 @@ fn compile_block(mem: &Mem, pc: u64, flags: Flags, abi: GuestAbi) -> String {
 struct SyscallRequest {
     id: u64,
     number: u64,
-    args: [u64; 3],
+    args: [u64; 6],
 }
 
 fn parse_request(value: &str) -> Result<SyscallRequest, Error> {
@@ -218,12 +222,12 @@ fn parse_request(value: &str) -> Result<SyscallRequest, Error> {
         .get("args")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| Error::Protocol("missing args".into()))?;
-    if args.len() != 3 {
+    if args.len() != 6 {
         return Err(Error::Protocol(
-            "args must have exactly three entries".into(),
+            "args must have exactly six entries".into(),
         ));
     }
-    let mut parsed_args = [0; 3];
+    let mut parsed_args = [0; 6];
     for (slot, value) in parsed_args.iter_mut().zip(args) {
         *slot = value
             .as_str()
@@ -461,11 +465,13 @@ mod tests {
 
     #[test]
     fn request_protocol_preserves_full_u64_arguments() {
-        let request =
-            parse_request(r#"{"id":7,"nr":"18446744073709551615","args":["1","2","3"]}"#).unwrap();
+        let request = parse_request(
+            r#"{"id":7,"nr":"18446744073709551615","args":["1","2","3","4","5","6"]}"#,
+        )
+        .unwrap();
         assert_eq!(request.id, 7);
         assert_eq!(request.number, u64::MAX);
-        assert_eq!(request.args, [1, 2, 3]);
+        assert_eq!(request.args, [1, 2, 3, 4, 5, 6]);
     }
 
     #[test]

@@ -1,5 +1,40 @@
 # Testing Guide
 
+## Host configurations (M0, PLAN_LINUX_WASM.md)
+
+vane now builds in two host configurations:
+
+- **`js-host` (default)** — the historical wasm-bindgen browser/Node surface.
+- **plain-Rust twin (`--no-default-features`)** — no wasm-bindgen, js-sys, or
+  JsValue anywhere; this is the build for `wasm32-wasip1`, WASIX, and native
+  hosts. The `vane_meta!` macro emits both surfaces from one definition
+  (decision D1).
+
+`vane-cli` (`crates/vane-cli`) is the self-driving host binary: it loads a
+statically linked RV64 ELF and runs it under `Reactor::interp_core` (the
+host-independent interpreter loop), bridging a minimal Linux syscall set
+(`write`, `read` EOF, `exit`/`exit_group`) to stdio. It builds natively and
+for `wasm32-wasip1` (`--no-default-features`).
+
+### M0 gate: payload-in-WASI
+
+```sh
+harness/run-wasip1-hello.sh
+```
+
+This builds the `harness/payload-hello` RV64 bare-metal payload, builds
+`vane-cli` for `wasm32-wasip1` (asserting the dependency tree has no JS
+bindings), and runs the payload inside the WASI module under Node's
+`node:wasi` (`harness/run-wasi.mjs`). Expected output:
+`hello from vane wasip1` and `M0 wasip1 gate: PASS`.
+
+Native equivalent:
+
+```sh
+cargo run -p vane-cli -- \
+  --elf harness/payload-hello/target/riscv64gc-unknown-none-elf/release/payload-hello
+```
+
 ## Current approach: WASM-in-JS
 
 vane's emulator core (`crates/vane`) is compiled to `wasm32-unknown-unknown` and its
@@ -31,6 +66,14 @@ Suggested layout:
 - `harness/build.sh` — cross-compile test binaries
 - `harness/run.sh` — run all ELF tests through the WASM tester
 - `harness/docker/` — container images for reproducible cross-compilation
+
+Current contents:
+- `harness/payload-hello/` — detached-cargo-workspace RV64GC bare-metal
+  payload (build from inside its directory so its `.cargo/config.toml`
+  applies; cargo config discovery is cwd-based)
+- `harness/run-wasi.mjs` — minimal WASI preview1 runner for `vane-cli.wasm`
+  (Node `node:wasi`; preopens the cwd so `--elf` paths resolve)
+- `harness/run-wasip1-hello.sh` — the M0 end-to-end gate
 
 ## Future plans
 

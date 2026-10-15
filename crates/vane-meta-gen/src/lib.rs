@@ -1,15 +1,41 @@
 #![no_std]
+//! `vane-meta-gen` — the `vane_meta!` macro that generates a `Reactor`/`Core`
+//! pair for a vane target.
+//!
+//! Per decision **D1** in `PLAN_LINUX_WASM.md`, the macro emits *two*
+//! surfaces from one definition:
+//!
+//! - **`js-host` (default)** — the wasm-bindgen API used by the browser
+//!   package: JS-held register file, `J`/`j`/`jit_run`, `_sys`, the paging
+//!   string getters, and the inline-JS helpers (`get$`, `suspend`, ...).
+//! - **plain-Rust twin** (`not(js-host)`) — the same `Reactor` type with a
+//!   Rust-native API (`get_page`, `jit_code`, typed paging accessors) and no
+//!   `JsValue` anywhere, so the emulator builds for `wasm32-wasip1`, WASIX,
+//!   and native hosts.
+//!
+//! The cfg gates live in the *expansion* of the macro, so they are evaluated
+//! against the feature set of the crate that invokes `vane_meta!` (today:
+//! `vane`, which forwards its own `js-host` feature).
 #[doc(hidden)]
 pub use core;
 #[doc(hidden)]
 pub extern crate alloc;
 pub use spin;
 pub use vane_arch;
+#[cfg(feature = "js-host")]
 pub use wasm_bindgen;
+
 #[macro_export]
 macro_rules! vane_meta {
     ($t:ident, $c:ident, $y:expr, $flate:expr) => {
+        #[cfg(feature = "js-host")]
         #[$crate::wasm_bindgen::prelude::wasm_bindgen(wasm_bindgen = $crate::wasm_bindgen)]
+        #[derive(Clone)]
+        pub struct $t {
+            _handle: (),
+            core: $crate::alloc::rc::Rc<$crate::spin::Mutex<$c>>,
+        }
+        #[cfg(not(feature = "js-host"))]
         #[derive(Clone)]
         pub struct $t {
             _handle: (),
@@ -27,12 +53,146 @@ macro_rules! vane_meta {
         }
         struct $c {
             mem: $crate::vane_arch::Mem,
+            /// JS-held JIT function cache (`p` in the generated code).
+            #[cfg(feature = "js-host")]
             state: $crate::core::cell::OnceCell<$crate::wasm_bindgen::prelude::JsValue>,
+            /// JS-held register file (`r` in the generated code; `xN` BigInt
+            /// properties). Only exists under `js-host`; plain-Rust hosts
+            /// keep the register file in a caller-owned `[u64; 32]`.
+            #[cfg(feature = "js-host")]
             regs: $crate::core::cell::OnceCell<$crate::wasm_bindgen::prelude::JsValue>,
+            /// JS host API object used for Unix syscall dispatch.
+            #[cfg(feature = "js-host")]
             host_api: $crate::core::cell::OnceCell<$crate::wasm_bindgen::prelude::JsValue>,
             test_mode: bool,
         }
 
+        /// Plain-Rust twin surface — emitted only for non-JS hosts (the
+        /// `js-host` build gets the same operations through the
+        /// wasm-bindgen impl below, which is also callable from Rust).
+        #[cfg(not(feature = "js-host"))]
+        impl $t {
+            /// Raw pointer into the 64 KiB guest page containing `a`,
+            /// allocating the page on demand.
+            pub fn get_page(&self, a: u64) -> *mut u8 {
+                self.core.lock().mem.get_page(a)
+            }
+
+            /// Whether test-mode HINT logging is enabled.
+            pub fn test_mode(&self) -> bool {
+                self.core.lock().test_mode
+            }
+
+            /// Enable or disable test mode.
+            pub fn set_test_mode(&self, value: bool) {
+                self.core.lock().test_mode = value;
+            }
+
+            /// Typed accessor for the memory paging mode.
+            pub fn paging_mode(&self) -> $crate::vane_arch::PagingMode {
+                self.core.lock().mem.paging_mode
+            }
+
+            /// Set the memory paging mode.
+            pub fn set_paging_mode(&self, mode: $crate::vane_arch::PagingMode) {
+                self.core.lock().mem.paging_mode = mode;
+            }
+
+            /// Shared page-table virtual address (Shared/Both modes).
+            pub fn shared_page_table_vaddr(&self) -> Option<u64> {
+                self.core.lock().mem.shared_page_table_vaddr
+            }
+
+            /// Set the shared page-table virtual address.
+            pub fn set_shared_page_table_vaddr(&self, addr: Option<u64>) {
+                self.core.lock().mem.shared_page_table_vaddr = addr;
+            }
+
+            /// Shared security-directory virtual address.
+            pub fn shared_security_directory_vaddr(&self) -> Option<u64> {
+                self.core.lock().mem.shared_security_directory_vaddr
+            }
+
+            /// Set the shared security-directory virtual address.
+            pub fn set_shared_security_directory_vaddr(&self, addr: Option<u64>) {
+                self.core.lock().mem.shared_security_directory_vaddr = addr;
+            }
+
+            /// Whether 32-bit physical addressing is used.
+            pub fn use_32bit_paging(&self) -> bool {
+                self.core.lock().mem.use_32bit_paging
+            }
+
+            /// Select 32-bit physical addressing.
+            pub fn set_use_32bit_paging(&self, value: bool) {
+                self.core.lock().mem.use_32bit_paging = value;
+            }
+
+            /// Whether multi-level paging is used.
+            pub fn use_multilevel_paging(&self) -> bool {
+                self.core.lock().mem.use_multilevel_paging
+            }
+
+            /// Select multi-level paging.
+            pub fn set_use_multilevel_paging(&self, value: bool) {
+                self.core.lock().mem.use_multilevel_paging = value;
+            }
+
+            /// Read one guest-memory byte (image loading / inspection).
+            pub fn read_byte(&self, addr: u64) -> u8 {
+                self.core.lock().mem.read_byte(addr)
+            }
+
+            /// Write one guest-memory byte (image loading).
+            pub fn write_byte(&self, addr: u64, value: u8) {
+                self.core.lock().mem.write_byte(addr, value);
+            }
+
+            /// Generate the JavaScript source for the trace rooted at guest
+            /// pc `a`, assuming no cached traces (`Heat::New`). Code
+            /// generation itself is host-independent; only *execution* of
+            /// the generated source needs a JS engine.
+            pub fn jit_code(&self, a: u64) -> String {
+                let f = $flate;
+                let lock = self.core.lock();
+                let test_mode = lock.test_mode;
+                let paging_mode = lock.mem.paging_mode;
+                let shared_page_table_vaddr = lock.mem.shared_page_table_vaddr;
+                let shared_security_directory_vaddr = lock.mem.shared_security_directory_vaddr;
+                let use_32bit_paging = lock.mem.use_32bit_paging;
+                let use_multilevel_paging = lock.mem.use_multilevel_paging;
+                drop(lock);
+
+                let flags = $crate::vane_arch::template::Flags::with_paging(
+                    test_mode,
+                    paging_mode,
+                    shared_page_table_vaddr,
+                    shared_security_directory_vaddr,
+                    use_32bit_paging,
+                    use_multilevel_paging,
+                );
+
+                return ($crate::vane_arch::template::CoreJS {
+                    content: &$y(&$crate::vane_arch::template::TemplateJit {
+                        params: Params {
+                            react: self,
+                            trial: &|_| $crate::vane_arch::Heat::New,
+                            root: a,
+                            flate: &f,
+                            flags,
+                        },
+                        pc: a,
+                        labels: $crate::vane_arch::template::Labels::default(),
+                        depth: 0,
+                    }),
+                    flate: &f,
+                    flags,
+                }
+                .to_string());
+            }
+        }
+
+        #[cfg(feature = "js-host")]
         const _: () = {
             #[$crate::wasm_bindgen::prelude::wasm_bindgen(inline_js = r#"
     const suspend = a=>{

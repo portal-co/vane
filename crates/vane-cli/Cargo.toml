@@ -1,0 +1,19 @@
+[package]
+name = "vane-cli"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+description = "Self-driving vane CLI: loads a RISC-V ELF and runs it under the interpreter with a Linux userspace syscall shim (WASI/WASIX/native host)"
+publish = false
+
+[features]
+# `js` enables vane's wasm-bindgen surface so the same binary can be smoke-run
+# on native dev machines against the exact type JS embedders use. It is off
+# for wasm32-wasip1 / WASIX builds (`--no-default-features`).
+default = ["js"]
+js = ["vane/js-host"]
+
+[dependencies]
+vane = { path = "../vane", default-features = false }
+vane-host = { path = "../vane-host" }
+futures = { version = "0.3", default-features = false, features = ["executor"] }
