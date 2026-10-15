@@ -7,6 +7,8 @@ use std::rc::Rc;
 pub use vane_riscv::hint;
 use vane_riscv::template::Params;
 pub use vane_riscv::Mem;
+/// Engine selection for `run` (interpreter vs JS JIT); see PLAN_LINUX_WASM.md §4.
+pub use vane_arch::ExecEngine;
 use vane_riscv::ReleaseFlate;
 use vane_riscv::Riscv;
 #[cfg(feature = "js-host")]
@@ -19,7 +21,7 @@ use wasm_bindgen_futures::JsFuture;
 #[cfg(all(test, feature = "js-host"))]
 #[path = "../_tests/rv_corpus.rs"]
 mod _tests;
-vane_meta_gen::vane_meta!(Reactor, Core, Riscv, ReleaseFlate {});
+vane_meta_gen::vane_meta!(Reactor, Core, Riscv, ReleaseFlate {}, vane_riscv::template::riscv::rv_emit);
 
 /// wasm-bindgen calls this once when the module is instantiated.
 /// Installs `console_error_panic_hook` so Rust panics surface as readable
@@ -107,6 +109,11 @@ impl Reactor {
                 #[cfg(feature = "js-host")]
                 host_api: OnceCell::new(),
                 test_mode: false,
+                trace_cache: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+                engine: vane_arch::ExecEngine::Interp,
+                pc: 0,
+                #[cfg(not(feature = "js-host"))]
+                regs: [0; 32],
             })),
         }
     }
@@ -461,13 +468,13 @@ impl Reactor {
                     set_reg32!(dest => reg32!(src1).wrapping_add(reg32!(src2)));
                 }
                 Inst::SllW { src2, dest, src1 } => {
-                    set_reg32!(dest => reg32!(src1) << (((reg32!(src2) & 0xffff_ffff)) % 32));
+                    set_reg32!(dest => reg32!(src1) << ((reg32!(src2) & 0xffff_ffff) % 32));
                 }
                 Inst::SrlW { src2, dest, src1 } => {
-                    set_reg32!(dest => reg32!(src1) >> (((reg32!(src2) & 0xffff_ffff)) % 32));
+                    set_reg32!(dest => reg32!(src1) >> ((reg32!(src2) & 0xffff_ffff) % 32));
                 }
                 Inst::SraW { src2, dest, src1 } => {
-                    set_reg32!(dest => ((reg32!(src1) as i64) >> (((reg32!(src2) & 0xffff_ffff)) % 32)) as u32);
+                    set_reg32!(dest => ((reg32!(src1) as i64) >> ((reg32!(src2) & 0xffff_ffff) % 32)) as u32);
                 }
                 Inst::SubW { src2, dest, src1 } => {
                     set_reg32!(dest => reg32!(src1).wrapping_sub(reg32!(src2)));
@@ -589,6 +596,70 @@ impl Reactor {
             Err(e) => {
                 self.restore_regs(&regs);
                 Err(JsValue::from_str(&e.to_string()))
+            }
+        }
+    }
+
+    /// Select the execution engine: `"interp"` (StackOp trace interpreter,
+    /// works without any runtime code generation) or `"jit"` (JS tracing
+    /// JIT via `new Function`). Default: `"interp"`.
+    #[wasm_bindgen(js_name = "set_engine")]
+    pub fn set_engine_js(&self, engine: &str) {
+        self.set_engine(match engine {
+            "jit" | "js" | "js-jit" => ExecEngine::JsJit,
+            _ => ExecEngine::Interp,
+        });
+    }
+
+    /// The current execution engine (`"interp"` or `"jit"`).
+    #[wasm_bindgen(js_name = "get_engine")]
+    pub fn get_engine_js(&self) -> String {
+        match self.engine() {
+            ExecEngine::Interp => "interp".into(),
+            ExecEngine::JsJit => "jit".into(),
+        }
+    }
+
+    /// Engine-dispatching entry point (M1). Runs from `pc` on the engine
+    /// selected with `set_engine`. `interp`/`jit_run` remain available for
+    /// direct engine selection.
+    ///
+    /// With `set_engine("interp")` this touches no runtime codegen —
+    /// `new Function` is never called — so it works under CSP
+    /// `wasm-unsafe-eval`-less pages and other no-JIT environments.
+    #[wasm_bindgen]
+    pub async fn run(&self, pc: u64) -> Result<JsValue, JsValue> {
+        match self.engine() {
+            ExecEngine::JsJit => self.jit_run(pc).await,
+            ExecEngine::Interp => {
+                let outcome_slot = std::cell::RefCell::new(None::<JsValue>);
+                let err_slot = std::cell::RefCell::new(None::<JsValue>);
+                let mut handler =
+                    async |_host: &mut vane_arch::interp::LocalStackHost<Reactor>| -> bool {
+                        match self._ecall().await {
+                            Ok(outcome) => {
+                                if is_exit(&outcome) {
+                                    *outcome_slot.borrow_mut() = Some(outcome);
+                                    return true;
+                                }
+                            }
+                            Err(e) => {
+                                *err_slot.borrow_mut() = Some(e);
+                                return true;
+                            }
+                        }
+                        false
+                    };
+                let result = self.trace_run(pc, &mut handler).await;
+                match result {
+                    Ok(_) => {
+                        if let Some(e) = err_slot.into_inner() {
+                            return Err(e);
+                        }
+                        Ok(outcome_slot.into_inner().unwrap_or(JsValue::UNDEFINED))
+                    }
+                    Err(msg) => Err(JsValue::from_str(&msg)),
+                }
             }
         }
     }

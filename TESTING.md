@@ -16,6 +16,29 @@ host-independent interpreter loop), bridging a minimal Linux syscall set
 (`write`, `read` EOF, `exit`/`exit_group`) to stdio. It builds natively and
 for `wasm32-wasip1` (`--no-default-features`).
 
+### M1 gate: no-JIT execution + engine parity
+
+```sh
+harness/run-nojit-gate.sh
+```
+
+This builds the wasm-pack nodejs package and runs the payload in Node twice:
+once with `new Function`, `eval`, and `WebAssembly.compile*` disabled
+(mirroring Cloudflare Workers / strict CSP), and once with codegen allowed.
+In both environments the `interp` engine (the `StackOp` trace interpreter —
+`Reactor::trace_run`, exposed to JS as `reactor.run()` with
+`set_engine("interp")`) must produce the expected output, the `jit` engine
+must either run (codegen allowed) or degrade via the `get$` fallback (codegen
+banned), and the observable behavior of both engines must be identical (D5
+engine parity).
+
+The Rust-side engine-parity test (same program through `interp_core` and
+`trace_run`, full register + memory comparison) runs with:
+
+```sh
+cargo test -p vane --no-default-features --test engine_parity
+```
+
 ### M0 gate: payload-in-WASI
 
 ```sh

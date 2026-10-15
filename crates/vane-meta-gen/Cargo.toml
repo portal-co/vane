@@ -14,5 +14,5 @@ js-host = ["dep:wasm-bindgen"]
 
 [dependencies]
 wasm-bindgen = { workspace = true, optional = true }
-vane-arch = {path="../vane-arch",version = "^0.1.0", features = ["target-js", "target-wasm"]}
+vane-arch = {path="../vane-arch",version = "^0.1.0", features = ["target-js", "target-wasm", "async-host"]}
 spin.workspace = true

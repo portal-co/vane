@@ -31,6 +31,7 @@ wasm-bindgen = { workspace = true, optional = true }
 spin.workspace = true
 vane-riscv = {path="../vane-riscv",version = "^0.1.0"}
 vane-meta-gen = {path = "../vane-meta-gen",version = "^0.1.0", default-features = false}
+vane-arch = {path = "../vane-arch",version = "^0.1.0", features = ["async-host"]}
 
 # The `console_error_panic_hook` crate provides better debugging of panics by
 # logging them with `console.error`. This is great for development, but requires

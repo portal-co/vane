@@ -53,3 +53,21 @@ jobs:
           node-version: 22
       - name: Run payload inside the WASI module
         run: harness/run-wasip1-hello.sh
+
+  # M1 exit gate: no-JIT execution + engine parity (PLAN_LINUX_WASM.md §10).
+  nojit-gate:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-unknown-unknown, riscv64gc-unknown-none-elf
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+      - name: Run the no-JIT / engine-parity gate
+        run: harness/run-nojit-gate.sh
+      - name: Rust engine-parity test (interp_core vs trace_run)
+        run: cargo test -p vane --no-default-features --test engine_parity

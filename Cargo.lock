@@ -1297,6 +1297,7 @@ dependencies = [
  "paste",
  "rv-asm",
  "spin 0.10.0",
+ "vane-arch",
  "vane-meta-gen",
  "vane-riscv",
  "wasm-bindgen",

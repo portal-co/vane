@@ -27,7 +27,7 @@ pub use wasm_bindgen;
 
 #[macro_export]
 macro_rules! vane_meta {
-    ($t:ident, $c:ident, $y:expr, $flate:expr) => {
+    ($t:ident, $c:ident, $y:expr, $flate:expr, $emit:expr) => {
         #[cfg(feature = "js-host")]
         #[$crate::wasm_bindgen::prelude::wasm_bindgen(wasm_bindgen = $crate::wasm_bindgen)]
         #[derive(Clone)]
@@ -65,7 +65,168 @@ macro_rules! vane_meta {
             #[cfg(feature = "js-host")]
             host_api: $crate::core::cell::OnceCell<$crate::wasm_bindgen::prelude::JsValue>,
             test_mode: bool,
+            /// Shared `StackOp` trace cache keyed by guest pc (M1,
+            /// PLAN_LINUX_WASM.md §4.2). `RefCell` because `interpret_async`
+            /// needs only `&` access to the ops; the cache is per-Reactor and
+            /// never aliased across awaits by construction (single lock
+            /// scope per mutation).
+            trace_cache: $crate::core::cell::RefCell<
+                $crate::alloc::collections::BTreeMap<
+                    u64,
+                    $crate::alloc::rc::Rc<$crate::alloc::vec::Vec<$crate::vane_arch::StackOp>>,
+                >,
+            >,
+            /// Which execution engine `run` dispatches to.
+            engine: $crate::vane_arch::ExecEngine,
+            /// Current guest pc: the register file lives in JS (`r`) under
+            /// `js-host`, so the pc must live here for host-side engines.
+            pc: u64,
+            /// Register file for plain-Rust hosts. Under `js-host` the
+            /// register file lives in the JS `r` object instead.
+            #[cfg(not(feature = "js-host"))]
+            regs: [u64; 32],
         }
+
+        const _: () = {
+            #[cfg(not(feature = "js-host"))]
+            impl $crate::vane_arch::interp::LocalReactor for $t {
+                fn lr_load_reg(&self, r: u8) -> u64 {
+                    self.core.lock().regs[(r % 32) as usize]
+                }
+                fn lr_store_reg(&self, r: u8, v: u64) {
+                    let mut lock = self.core.lock();
+                    let r = (r % 32) as usize;
+                    lock.regs[r] = if r == 0 { 0 } else { v };
+                }
+                fn lr_read_byte(&self, addr: u64) -> u8 {
+                    self.core.lock().mem.read_byte(addr)
+                }
+                fn lr_write_byte(&self, addr: u64, v: u8) {
+                    self.core.lock().mem.write_byte(addr, v);
+                }
+            }
+
+            impl $t {
+                /// Run the guest from `pc` with the `StackOp` trace
+                /// interpreter — no runtime codegen (M1, PLAN_LINUX_WASM.md
+                /// §4.2). Traces are compiled with the same `$y`/`$emit`
+                /// pipeline the JS JIT renders from, so both engines
+                /// execute identical semantics by construction (D5).
+                ///
+                /// `on_ecall` observes the live host (register file +
+                /// memory + pc of the instruction after the ecall) whenever
+                /// the guest executes `ecall`, and returns `true` to stop.
+                pub async fn trace_run<F>(
+                    &self,
+                    pc: u64,
+                    on_ecall: &mut F,
+                ) -> Result<u64, String>
+                where
+                    F: AsyncFnMut(
+                        &mut $crate::vane_arch::interp::LocalStackHost<Self>,
+                    ) -> bool,
+                {
+                    let mut host = $crate::vane_arch::interp::LocalStackHost {
+                        reactor: self.clone(),
+                        test_mode: self.core.lock().test_mode,
+                        pc,
+                        pending_ecall: false,
+                    };
+                    loop {
+                        // Fetch (or compile-and-cache) the trace for pc.
+                        // Neither the mutex nor the RefCell borrow is held
+                        // across an await.
+                        let pc = host.pc;
+                        let ops = if let Some(ops) =
+                            self.core.lock().trace_cache.borrow().get(&pc).cloned()
+                        {
+                            ops
+                        } else {
+                            let f = $flate;
+                            let lock = self.core.lock();
+                            let test_mode = lock.test_mode;
+                            let paging_mode = lock.mem.paging_mode;
+                            let spt = lock.mem.shared_page_table_vaddr;
+                            let ssd = lock.mem.shared_security_directory_vaddr;
+                            let u32p = lock.mem.use_32bit_paging;
+                            let mlp = lock.mem.use_multilevel_paging;
+                            let cache_hit = lock.trace_cache.borrow().contains_key(&pc);
+                            drop(lock);
+                            let mut flags = $crate::vane_arch::template::Flags::with_paging(
+                                test_mode,
+                                paging_mode,
+                                spt,
+                                ssd,
+                                u32p,
+                                mlp,
+                            );
+                            // Terminate every trace right after an ecall so
+                            // the deferred handler below runs at a block
+                            // boundary (see LocalStackHost::ecall).
+                            flags.ecall_boundary = true;
+                            let jit = $crate::vane_arch::template::TemplateJit {
+                                params: Params {
+                                    react: self,
+                                    trial: &|_| {
+                                        if cache_hit {
+                                            $crate::vane_arch::Heat::Cached
+                                        } else {
+                                            $crate::vane_arch::Heat::New
+                                        }
+                                    },
+                                    root: pc,
+                                    flate: &f,
+                                    flags,
+                                },
+                                pc,
+                                labels: $crate::vane_arch::template::Labels::default(),
+                                depth: 0,
+                            };
+                            let ops = $crate::alloc::rc::Rc::new($emit(&jit));
+                            self.core
+                                .lock()
+                                .trace_cache
+                                .borrow_mut()
+                                .insert(pc, ops.clone());
+                            ops
+                        };
+                        let exit =
+                            $crate::vane_arch::interp::interpret_async(&ops, &mut host).await;
+                        match exit {
+                            $crate::vane_arch::interp::Exit::TailCall(next) => {
+                                host.pc = next;
+                                if host.pending_ecall {
+                                    host.pending_ecall = false;
+                                    if on_ecall(&mut host).await {
+                                        self.core.lock().pc = host.pc;
+                                        return Ok(host.pc);
+                                    }
+                                }
+                            }
+                            $crate::vane_arch::interp::Exit::Trap(msg) => {
+                                self.core.lock().pc = host.pc;
+                                return Err(msg);
+                            }
+                            $crate::vane_arch::interp::Exit::Ecall => {
+                                // LocalStackHost::ecall never stops a trace.
+                                self.core.lock().pc = host.pc;
+                                return Err("internal: unexpected Ecall exit".into());
+                            }
+                        }
+                    }
+                }
+
+                /// Which execution engine `run` dispatches to.
+                pub fn engine(&self) -> $crate::vane_arch::ExecEngine {
+                    self.core.lock().engine
+                }
+
+                /// Select the execution engine.
+                pub fn set_engine(&self, engine: $crate::vane_arch::ExecEngine) {
+                    self.core.lock().engine = engine;
+                }
+            }
+        };
 
         /// Plain-Rust twin surface — emitted only for non-JS hosts (the
         /// `js-host` build gets the same operations through the
@@ -279,6 +440,20 @@ macro_rules! vane_meta {
                 }
                 fn set_reg(self, a: u8, b: u64) -> u64 {
                     set_reg(self, a, b)
+                }
+            }
+            impl $crate::vane_arch::interp::LocalReactor for $t {
+                fn lr_load_reg(&self, r: u8) -> u64 {
+                    reg(self.clone(), r)
+                }
+                fn lr_store_reg(&self, r: u8, v: u64) {
+                    set_reg(self.clone(), r, v);
+                }
+                fn lr_read_byte(&self, addr: u64) -> u8 {
+                    self.core.lock().mem.read_byte(addr)
+                }
+                fn lr_write_byte(&self, addr: u64, v: u8) {
+                    self.core.lock().mem.write_byte(addr, v);
                 }
             }
             #[$crate::wasm_bindgen::prelude::wasm_bindgen(wasm_bindgen = $crate::wasm_bindgen)]

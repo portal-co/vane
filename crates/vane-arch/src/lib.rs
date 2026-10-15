@@ -412,6 +412,23 @@ pub enum Heat {
     Cached,
 }
 
+/// Execution engine selection (PLAN_LINUX_WASM.md §4).
+///
+/// The interpreter is the always-available baseline; the JS JIT is an
+/// acceleration layer that requires a host able to compile functions from
+/// strings (`new Function`). All engines consume the same `StackOp` streams
+/// produced by the shared decode/lower pipeline.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExecEngine {
+    /// `StackOp` trace interpreter (`vane_arch::interp`). Works in no-JIT
+    /// environments (Cloudflare Workers, CSP without wasm-unsafe-eval).
+    #[default]
+    Interp,
+    /// Tracing JIT emitting JavaScript source executed via `new Function`.
+    /// Requires the `js-host` feature and a codegen-capable JS engine.
+    JsJit,
+}
+
 pub trait JitCtx {
     fn bytes(&self, a: u64) -> Box<dyn Iterator<Item = u8> + '_>;
 
