@@ -255,6 +255,9 @@ impl<'a, R: vane_arch::JitCtx> Aarch64Reactor<'a, R> {
             match exit {
                 Exit::Trap(message) => return NativeExit::Trap(message),
                 Exit::Ecall => return process_exit.map_or(NativeExit::Ecall, NativeExit::Exit),
+                // Only interpret_async produces Bail (the privileged
+                // machine engine); the sync path never does.
+                Exit::Bail(_) => unreachable!("Bail is only produced by interpret_async"),
                 Exit::TailCall(target) => {
                     let Some(address) = NonZeroU64::new(target) else {
                         return NativeExit::TailCall(target);

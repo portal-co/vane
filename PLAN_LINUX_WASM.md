@@ -263,7 +263,37 @@ Device framework: memory-mapped dispatch in `Mem` on reserved physical ranges �
 
 ---
 
-### StackOp port of the interpreter (user-requested, next)
+### StackOp port of the interpreter (user-requested) — DONE (M4.5)
+
+The privileged/machine path now runs on the `StackOp` trace engine, giving
+virtualization (machine mode + Sv39 translation) parity with the JIT
+lowering pipeline:
+
+- **Trap atomicity**: host memory ops translate (TLB) and dispatch MMIO; a
+  fault records a pending trap and the interpreter bails at the next
+  instruction boundary (`Exit::Bail`), the dispatch undoes only the faulting
+  instruction's register writes (per-instruction undo log), and re-runs it
+  through `step_one` which raises the trap with correct state.
+- **Interrupt timing**: device (MMIO) accesses set an irq-check flag; the
+  interpreter exits at the next instruction boundary so the dispatch loop's
+  step hook delivers the interrupt between instructions (matching hardware).
+  The step hook runs at the top of each dispatch.
+- **Op fuel**: `interpret_async_fueled` bounds each trace at instruction
+  boundaries so guest spin loops yield to the dispatch loop (interrupt
+  delivery, fuel, poweroff).
+- **Privileged instructions** (CSR ops, xret, wfi, sfence, ecall/ebreak,
+  AMOs, fence.i, and the FP ops rv_float_ops doesn't lower) boundary out of
+  traces and are executed by `step_one` — the single shared instruction
+  implementation (D5).
+
+Validated by `trace_parity_privileged` (Sv39 + page fault, trace vs step
+parity), `machine_trace` (devices + timer + PLIC via traces), and
+OpenSBI+kernel booting under the trace engine.
+
+The remaining optimization (superinstruction fusion over the ported traces)
+lands after this port.
+
+### Instruction-sequence acceleration (user-requested)
 
 Port the interpreter path to `StackOp` traces so the *virtualized* path
 (machine mode + Sv39 translation) has JIT parity with the userspace JIT:

@@ -1713,6 +1713,142 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 
 [[patch.unused]]
+name = "portal-pc-waffle"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-backend"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-copying"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-copying-passes"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-entity"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-frontend"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-fuzzing"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-hooking"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-ir"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-lowering"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-passes"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-passes-shared"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-solutions-sdk"
+version = "0.0.2"
+
+[[patch.unused]]
+name = "pit-lang-generic"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "pit-rust-generic"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-aarch64"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-arm"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-riscv32"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-writer"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-x86"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "pit-patch"
+version = "0.5.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-jsc-common"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-cfg"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-ll-common"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-ssa"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-tac"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-util"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "lazy-repo"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "lazy-repo-crypto"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "lazy-repo-std"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "lazy-repo"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "lazy-repo-crypto"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "lazy-repo-std"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "thin-mcp"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "portal-solutions-blitz-aarch64"
 version = "0.1.0"
 
@@ -1773,59 +1909,95 @@ name = "volar-llvm-pass-support"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "portal-solutions-asm-aarch64"
+name = "volar-circuit-exec-core"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "portal-solutions-asm-arm"
+name = "volar-llvm-constchain"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "portal-solutions-asm-riscv32"
+name = "volar-llvm-import-core"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "portal-solutions-asm-writer"
+name = "volar-llvm-jumpthread"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "portal-solutions-asm-x86"
+name = "volar-llvm-pass-build"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "thin-mcp"
+name = "volar-llvm-pass-support"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "lazy-repo"
+name = "portal-pc-asm-common"
+version = "0.1.1"
+
+[[patch.unused]]
+name = "pit-core"
+version = "0.5.0-alpha.1"
+
+[[patch.unused]]
+name = "vaffle"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "lazy-repo-crypto"
+name = "volar-evm-backend"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "lazy-repo-std"
+name = "volar-ir"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "lazy-repo"
+name = "volar-ir-build"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "lazy-repo-crypto"
+name = "volar-ir-common"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "lazy-repo-std"
+name = "volar-ir-opt"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "pit-lang-generic"
+name = "volar-ir-passes"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "pit-rust-generic"
+name = "volar-ir-simd"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-lir-test-corpus"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-llvm-ir-import"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-llvm-vaffle-import"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-provenance"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-riscv-test-programs"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-vaffle-target"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-wasm-circuit-import"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -1906,66 +2078,6 @@ version = "0.1.0"
 
 [[patch.unused]]
 name = "os-unix-wasi"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "vaffle"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-evm-backend"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-ir"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-ir-build"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-ir-common"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-ir-opt"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-ir-passes"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-ir-simd"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-lir-test-corpus"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-llvm-ir-import"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-llvm-vaffle-import"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-provenance"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-riscv-test-programs"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-vaffle-target"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-wasm-circuit-import"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -2079,115 +2191,3 @@ version = "0.1.0"
 [[patch.unused]]
 name = "xtask"
 version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-pc-asm-common"
-version = "0.1.1"
-
-[[patch.unused]]
-name = "pit-core"
-version = "0.5.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-solutions-sdk"
-version = "0.0.2"
-
-[[patch.unused]]
-name = "pit-patch"
-version = "0.5.0-alpha.1"
-
-[[patch.unused]]
-name = "volar-circuit-exec-core"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-llvm-constchain"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-llvm-import-core"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-llvm-jumpthread"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-llvm-pass-build"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-llvm-pass-support"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-jsc-common"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-cfg"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-ll-common"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-ssa"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-tac"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-util"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-pc-waffle"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-backend"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-copying"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-copying-passes"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-entity"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-frontend"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-fuzzing"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-hooking"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-ir"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-lowering"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-passes"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-passes-shared"
-version = "0.6.0-alpha.1"

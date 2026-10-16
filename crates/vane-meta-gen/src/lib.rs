@@ -43,12 +43,15 @@ macro_rules! vane_meta {
         }
         impl $crate::vane_arch::JitCtx for $t {
             fn bytes(&self, a: u64) -> $crate::alloc::boxed::Box<dyn Iterator<Item = u8> + '_> {
-                $crate::alloc::boxed::Box::new((a..).map(move |a| {
-                    self.core.lock().mem.read_byte(a)
-                }))
+                $crate::alloc::boxed::Box::new((a..).map(move |a| self.byte(a)))
             }
             fn byte(&self, a: u64) -> u8 {
-                self.core.lock().mem.read_byte(a)
+                // Instruction-fetch read for trace compilation: translate
+                // when Sv39 is active (identity otherwise).
+                let mut lock = self.core.lock();
+                let lock = &mut *lock;
+                let pa = lock.hart.translate_exec(&mut lock.mem, a).unwrap_or(a);
+                lock.mem.read_byte(pa)
             }
         }
         struct $c {
@@ -109,11 +112,114 @@ macro_rules! vane_meta {
                     lock.regs[r] = if r == 0 { 0 } else { v };
                 }
                 fn lr_read_byte(&self, addr: u64) -> u8 {
-                    self.core.lock().mem.read_byte(addr)
+                    // Fetch validation (CheckCode): translate as exec.
+                    let mut lock = self.core.lock();
+                    let lock = &mut *lock;
+                    let pa = lock
+                        .hart
+                        .translate_exec(&mut lock.mem, addr)
+                        .unwrap_or(addr);
+                    lock.mem.read_byte(pa)
                 }
                 fn lr_write_byte(&self, addr: u64, v: u8) {
-                    self.core.lock().mem.write_byte(addr, v);
+                    // Data write: translate + MMIO.
+                    let mut lock = self.core.lock();
+                    let lock = &mut *lock;
+                    let pa = match lock.hart.translate_store(&mut lock.mem, addr) {
+                        Ok(p) => p,
+                        Err(_) => {
+                            lock.hart.pending_trace_trap = true;
+                            return;
+                        }
+                    };
+                    match lock
+                        .hart
+                        .machine_store(pa, $crate::vane_arch::MemWidth::B1, v as u64)
+                    {
+                        Some(Ok(())) => {}
+                        Some(Err(_)) => lock.hart.pending_trace_trap = true,
+                        None => lock.mem.write_byte(pa, v),
+                    }
                 }
+                fn lr_load_mem(&self, addr: u64, width: $crate::vane_arch::MemWidth, signed: bool) -> u64 {
+                    let mut lock = self.core.lock();
+                    let lock = &mut *lock;
+                    let pa = match lock.hart.translate_load(&mut lock.mem, addr) {
+                        Ok(p) => p,
+                        Err(_) => {
+                            lock.hart.pending_trace_trap = true;
+                            return 0;
+                        }
+                    };
+                    if let Some(r) = lock.hart.machine_load(pa, width, signed) {
+                        return match r {
+                            Ok(v) => v,
+                            Err(_) => {
+                                lock.hart.pending_trace_trap = true;
+                                0
+                            }
+                        };
+                    }
+                    let n = match width {
+                        $crate::vane_arch::MemWidth::B1 => 1,
+                        $crate::vane_arch::MemWidth::B2 => 2,
+                        $crate::vane_arch::MemWidth::B4 => 4,
+                        $crate::vane_arch::MemWidth::B8 => 8,
+                    };
+                    let mut v = 0u64;
+                    for i in 0..n {
+                        v |= (lock.mem.read_byte(pa.wrapping_add(i)) as u64) << (8 * i);
+                    }
+                    if signed {
+                        match width {
+                            $crate::vane_arch::MemWidth::B1 => v as u8 as i8 as i64 as u64,
+                            $crate::vane_arch::MemWidth::B2 => v as u16 as i16 as i64 as u64,
+                            $crate::vane_arch::MemWidth::B4 => v as u32 as i32 as i64 as u64,
+                            $crate::vane_arch::MemWidth::B8 => v,
+                        }
+                    } else {
+                        v
+                    }
+                }
+                fn lr_store_mem(&self, addr: u64, width: $crate::vane_arch::MemWidth, v: u64) {
+                    let mut lock = self.core.lock();
+                    let lock = &mut *lock;
+                    let pa = match lock.hart.translate_store(&mut lock.mem, addr) {
+                        Ok(p) => p,
+                        Err(_) => {
+                            lock.hart.pending_trace_trap = true;
+                            return;
+                        }
+                    };
+                    if let Some(r) = lock.hart.machine_store(pa, width, v) {
+                        if r.is_err() {
+                            lock.hart.pending_trace_trap = true;
+                        }
+                        return;
+                    }
+                    let n = match width {
+                        $crate::vane_arch::MemWidth::B1 => 1,
+                        $crate::vane_arch::MemWidth::B2 => 2,
+                        $crate::vane_arch::MemWidth::B4 => 4,
+                        $crate::vane_arch::MemWidth::B8 => 8,
+                    };
+                    for i in 0..n {
+                        lock.mem.write_byte(pa.wrapping_add(i), (v >> (8 * i)) as u8);
+                    }
+                }
+                fn lr_take_pending_trap(&self) -> bool {
+                    let mut lock = self.core.lock();
+                    let p = lock.hart.pending_trace_trap;
+                    lock.hart.pending_trace_trap = false;
+                    p
+                }
+                fn lr_take_irq_check(&self) -> bool {
+                    let mut lock = self.core.lock();
+                    let p = lock.hart.pending_irq_check;
+                    lock.hart.pending_irq_check = false;
+                    p
+                }
+
             }
 
             impl $t {
@@ -126,10 +232,13 @@ macro_rules! vane_meta {
                 /// `on_ecall` observes the live host (register file +
                 /// memory + pc of the instruction after the ecall) whenever
                 /// the guest executes `ecall`, and returns `true` to stop.
-                pub async fn trace_run<F>(
+                /// Bounded variant of [`Self::trace_run`]: returns `Ok(pc)`
+                /// after `fuel` trace dispatches.
+                pub async fn trace_run_fueled<F>(
                     &self,
                     pc: u64,
                     on_ecall: &mut F,
+                    mut fuel: Option<u64>,
                 ) -> Result<u64, String>
                 where
                     F: AsyncFnMut(
@@ -141,8 +250,20 @@ macro_rules! vane_meta {
                         test_mode: self.core.lock().test_mode,
                         pc,
                         pending_ecall: false,
+                        undo_log: $crate::alloc::vec::Vec::new(),
+                        undo_mark: 0,
                     };
                     loop {
+                        if let Some(f) = &mut fuel {
+                            if *f == 0 {
+                                return Ok(host.pc);
+                            }
+                            *f -= 1;
+                        }
+                        // A guest poweroff stops the run.
+                        if self.core.lock().hart.power_pending() {
+                            return Ok(host.pc);
+                        }
                         // Fetch (or compile-and-cache) the trace for pc.
                         // Neither the mutex nor the RefCell borrow is held
                         // across an await.
@@ -214,18 +335,35 @@ macro_rules! vane_meta {
                                 .insert(pc, ops.clone());
                             ops
                         };
-                        let exit =
-                            $crate::vane_arch::interp::interpret_async(&ops, &mut host).await;
+                        // Fresh undo log for this trace (trap atomicity).
+                        host.undo_log.clear();
+                        host.undo_mark = 0;
+                        // Before running the trace: deliver pending
+                        // interrupts and step privileged instructions. This
+                        // must happen at the *top* of the dispatch — doing it
+                        // only at the TailCall would run a whole inlined
+                        // region before the interrupt is noticed.
+                        if let Some(np) = $step(self, host.pc, false)? {
+                            host.pc = np;
+                            continue;
+                        }
+                        let pc = host.pc;
+                        let exit = {
+                            // Per-trace op budget: bounds how long a trace
+                            // runs before yielding to the dispatch loop
+                            // (interrupt delivery, ecall handling, fuel).
+                            let mut op_fuel: u64 = 4096;
+                            $crate::vane_arch::interp::interpret_async_fueled(
+                                &ops,
+                                &mut host,
+                                Some(&mut op_fuel),
+                            )
+                            .await
+                            .expect("a fuel budget was supplied, so FuelExhausted is unreachable")
+                        };
                         match exit {
                             $crate::vane_arch::interp::Exit::TailCall(next) => {
                                 host.pc = next;
-                                // Privileged stepper hook (M3): when the
-                                // hart is enabled, execute translated or
-                                // privileged-class instructions via the
-                                // arch's step function instead of tracing.
-                                if let Some(np) = $step(self, host.pc)? {
-                                    host.pc = np;
-                                }
                                 if host.pending_ecall {
                                     host.pending_ecall = false;
                                     if on_ecall(&mut host).await {
@@ -238,6 +376,18 @@ macro_rules! vane_meta {
                                 self.core.lock().pc = host.pc;
                                 return Err(msg);
                             }
+                            $crate::vane_arch::interp::Exit::Bail(fault_pc) => {
+                                // A memory access trapped mid-trace. Undo
+                                // the faulting instruction's register writes
+                                // (earlier instructions' writes stay) and
+                                // re-run it through the stepper, which
+                                // raises the trap with correct state.
+                                host.undo_pending_inst();
+                                match $step(self, fault_pc, true)? {
+                                    Some(np) => host.pc = np,
+                                    None => host.pc = fault_pc,
+                                }
+                            }
                             $crate::vane_arch::interp::Exit::Ecall => {
                                 // LocalStackHost::ecall never stops a trace.
                                 self.core.lock().pc = host.pc;
@@ -245,6 +395,21 @@ macro_rules! vane_meta {
                             }
                         }
                     }
+                }
+
+                /// Run the guest from `pc` on the `StackOp` trace engine
+                /// (unbounded). See [`Self::trace_run_fueled`].
+                pub async fn trace_run<F>(
+                    &self,
+                    pc: u64,
+                    on_ecall: &mut F,
+                ) -> Result<u64, String>
+                where
+                    F: AsyncFnMut(
+                        &mut $crate::vane_arch::interp::LocalStackHost<Self>,
+                    ) -> bool,
+                {
+                    self.trace_run_fueled(pc, on_ecall, None).await
                 }
 
                 /// Which execution engine `run` dispatches to.
@@ -481,11 +646,114 @@ macro_rules! vane_meta {
                     set_reg(self.clone(), r, v);
                 }
                 fn lr_read_byte(&self, addr: u64) -> u8 {
-                    self.core.lock().mem.read_byte(addr)
+                    // Fetch validation (CheckCode): translate as exec.
+                    let mut lock = self.core.lock();
+                    let lock = &mut *lock;
+                    let pa = lock
+                        .hart
+                        .translate_exec(&mut lock.mem, addr)
+                        .unwrap_or(addr);
+                    lock.mem.read_byte(pa)
                 }
                 fn lr_write_byte(&self, addr: u64, v: u8) {
-                    self.core.lock().mem.write_byte(addr, v);
+                    // Data write: translate + MMIO.
+                    let mut lock = self.core.lock();
+                    let lock = &mut *lock;
+                    let pa = match lock.hart.translate_store(&mut lock.mem, addr) {
+                        Ok(p) => p,
+                        Err(_) => {
+                            lock.hart.pending_trace_trap = true;
+                            return;
+                        }
+                    };
+                    match lock
+                        .hart
+                        .machine_store(pa, $crate::vane_arch::MemWidth::B1, v as u64)
+                    {
+                        Some(Ok(())) => {}
+                        Some(Err(_)) => lock.hart.pending_trace_trap = true,
+                        None => lock.mem.write_byte(pa, v),
+                    }
                 }
+                fn lr_load_mem(&self, addr: u64, width: $crate::vane_arch::MemWidth, signed: bool) -> u64 {
+                    let mut lock = self.core.lock();
+                    let lock = &mut *lock;
+                    let pa = match lock.hart.translate_load(&mut lock.mem, addr) {
+                        Ok(p) => p,
+                        Err(_) => {
+                            lock.hart.pending_trace_trap = true;
+                            return 0;
+                        }
+                    };
+                    if let Some(r) = lock.hart.machine_load(pa, width, signed) {
+                        return match r {
+                            Ok(v) => v,
+                            Err(_) => {
+                                lock.hart.pending_trace_trap = true;
+                                0
+                            }
+                        };
+                    }
+                    let n = match width {
+                        $crate::vane_arch::MemWidth::B1 => 1,
+                        $crate::vane_arch::MemWidth::B2 => 2,
+                        $crate::vane_arch::MemWidth::B4 => 4,
+                        $crate::vane_arch::MemWidth::B8 => 8,
+                    };
+                    let mut v = 0u64;
+                    for i in 0..n {
+                        v |= (lock.mem.read_byte(pa.wrapping_add(i)) as u64) << (8 * i);
+                    }
+                    if signed {
+                        match width {
+                            $crate::vane_arch::MemWidth::B1 => v as u8 as i8 as i64 as u64,
+                            $crate::vane_arch::MemWidth::B2 => v as u16 as i16 as i64 as u64,
+                            $crate::vane_arch::MemWidth::B4 => v as u32 as i32 as i64 as u64,
+                            $crate::vane_arch::MemWidth::B8 => v,
+                        }
+                    } else {
+                        v
+                    }
+                }
+                fn lr_store_mem(&self, addr: u64, width: $crate::vane_arch::MemWidth, v: u64) {
+                    let mut lock = self.core.lock();
+                    let lock = &mut *lock;
+                    let pa = match lock.hart.translate_store(&mut lock.mem, addr) {
+                        Ok(p) => p,
+                        Err(_) => {
+                            lock.hart.pending_trace_trap = true;
+                            return;
+                        }
+                    };
+                    if let Some(r) = lock.hart.machine_store(pa, width, v) {
+                        if r.is_err() {
+                            lock.hart.pending_trace_trap = true;
+                        }
+                        return;
+                    }
+                    let n = match width {
+                        $crate::vane_arch::MemWidth::B1 => 1,
+                        $crate::vane_arch::MemWidth::B2 => 2,
+                        $crate::vane_arch::MemWidth::B4 => 4,
+                        $crate::vane_arch::MemWidth::B8 => 8,
+                    };
+                    for i in 0..n {
+                        lock.mem.write_byte(pa.wrapping_add(i), (v >> (8 * i)) as u8);
+                    }
+                }
+                fn lr_take_pending_trap(&self) -> bool {
+                    let mut lock = self.core.lock();
+                    let p = lock.hart.pending_trace_trap;
+                    lock.hart.pending_trace_trap = false;
+                    p
+                }
+                fn lr_take_irq_check(&self) -> bool {
+                    let mut lock = self.core.lock();
+                    let p = lock.hart.pending_irq_check;
+                    lock.hart.pending_irq_check = false;
+                    p
+                }
+
             }
             #[$crate::wasm_bindgen::prelude::wasm_bindgen(wasm_bindgen = $crate::wasm_bindgen)]
             impl $t {

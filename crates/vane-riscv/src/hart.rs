@@ -246,6 +246,18 @@ pub struct HartState {
     /// *different* word). Saves the decode match on hot loops.
     pub decode_cache: [Option<(u32, rv_asm::Inst, rv_asm::IsCompressed)>; 1024],
 
+    /// A memory access inside a trace trapped (page/access fault). The trace
+    /// bails at the next instruction boundary and the dispatch loop re-runs
+    /// the faulting instruction through the stepper, which re-raises the
+    /// trap with correct architectural state.
+    pub pending_trace_trap: bool,
+
+    /// A device (MMIO) access ran inside a trace — an interrupt may newly be
+    /// pending. The trace exits at the next instruction boundary so the
+    /// dispatch loop can deliver it (interrupts are taken between
+    /// instructions, not mid-trace).
+    pub pending_irq_check: bool,
+
     /// The machine (devices) attached to this hart, or None for pure-RAM
     /// operation (legacy userspace emulation). When present, physical
     /// accesses below [`crate::machine::RAM_BASE`] route to devices and the
@@ -292,6 +304,8 @@ impl Default for HartState {
             fcsr: 0,
             itime: 0,
             decode_cache: [const { None }; 1024],
+            pending_trace_trap: false,
+            pending_irq_check: false,
             machine: None,
         }
     }
@@ -649,6 +663,15 @@ impl HartState {
         Some(())
     }
 
+    /// Whether the machine's syscon fired (poweroff/reboot). The trace
+    /// dispatch loop checks this per dispatch to stop a powered-off guest.
+    pub fn power_pending(&self) -> bool {
+        self.machine
+            .as_ref()
+            .map(|m| m.syscon.power.is_some())
+            .unwrap_or(false)
+    }
+
     /// Per-step refresh of device-driven interrupt lines (no host IO).
     /// Runs in `step_one` before the pending-interrupt check.
     pub fn machine_step_irqs(&mut self) {
@@ -702,6 +725,65 @@ impl HartState {
         }
 
         self.sv39_walk(mem, vaddr, asid, access)
+    }
+
+    /// Translate a data-load address (identity when translation is off).
+    pub fn translate_load(&mut self, mem: &mut Mem, vaddr: u64) -> Result<u64, Trap> {
+        self.translate(mem, vaddr, Access::Load)
+    }
+
+    /// Translate a data-store address.
+    pub fn translate_store(&mut self, mem: &mut Mem, vaddr: u64) -> Result<u64, Trap> {
+        self.translate(mem, vaddr, Access::Store)
+    }
+
+    /// Translate an instruction-fetch address.
+    pub fn translate_exec(&mut self, mem: &mut Mem, vaddr: u64) -> Result<u64, Trap> {
+        self.translate(mem, vaddr, Access::Exec)
+    }
+
+    /// Device read at a physical address: `None` when no machine is attached
+    /// or the address is RAM, `Some(Ok(v))` for a device value,
+    /// `Some(Err(_))` for an access fault.
+    pub fn machine_load(
+        &mut self,
+        pa: u64,
+        width: vane_arch::MemWidth,
+        signed: bool,
+    ) -> Option<Result<u64, Trap>> {
+        let m = self.machine.as_mut()?;
+        if !crate::machine::Machine::is_mmio(pa) {
+            return None;
+        }
+        let w = match width {
+            vane_arch::MemWidth::B1 => 1,
+            vane_arch::MemWidth::B2 => 2,
+            vane_arch::MemWidth::B4 => 4,
+            vane_arch::MemWidth::B8 => 8,
+        };
+        self.pending_irq_check = true;
+        Some(m.load(pa, w, signed))
+    }
+
+    /// Device write at a physical address; see [`HartState::machine_load`].
+    pub fn machine_store(
+        &mut self,
+        pa: u64,
+        width: vane_arch::MemWidth,
+        v: u64,
+    ) -> Option<Result<(), Trap>> {
+        let m = self.machine.as_mut()?;
+        if !crate::machine::Machine::is_mmio(pa) {
+            return None;
+        }
+        let w = match width {
+            vane_arch::MemWidth::B1 => 1,
+            vane_arch::MemWidth::B2 => 2,
+            vane_arch::MemWidth::B4 => 4,
+            vane_arch::MemWidth::B8 => 8,
+        };
+        self.pending_irq_check = true;
+        Some(m.store(pa, w, v))
     }
 
     fn tlb_permits(&self, flags: u8, access: Access) -> bool {

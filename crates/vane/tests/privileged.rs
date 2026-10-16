@@ -516,7 +516,7 @@ fn stepper_and_trace_engines_agree_under_privilege() {
             if pc == CODE + 12 {
                 break;
             }
-            pc = match r.privileged_step(pc).expect("privileged_step") {
+            pc = match r.privileged_step(pc, false).expect("privileged_step") {
                 Some(next) => next,
                 None => {
                     for i in 1..32u8 {

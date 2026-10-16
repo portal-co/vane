@@ -58,6 +58,9 @@ struct Args {
     /// Bytes to inject into the machine UART's RX queue at boot (test
     /// payloads read them via the emulated 16550).
     uart_rx: Option<Vec<u8>>,
+    /// Execution engine: `trace` (StackOp traces, the default — the StackOp
+    /// port) or `step` (per-instruction step_one reference).
+    engine: String,
 }
 
 const RAM_BASE: u64 = 0x8000_0000;
@@ -80,6 +83,7 @@ fn parse_args() -> Result<Args, String> {
     let mut append = None;
     let mut ram_size = 128 * 1024 * 1024; // 128 MiB bring-up default
     let mut uart_rx: Option<Vec<u8>> = None;
+    let mut engine: Option<String> = None;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -108,6 +112,9 @@ fn parse_args() -> Result<Args, String> {
                 let v = it.next().ok_or("--uart-rx needs a value")?;
                 uart_rx = Some(v.into_bytes());
             }
+            "--engine" => {
+                engine = Some(it.next().ok_or("--engine needs a value")?);
+            }
             "--ram-size" => {
                 let v = it.next().ok_or("--ram-size needs a value")?;
                 ram_size = if let Some(h) = v.strip_prefix("0x") {
@@ -131,6 +138,7 @@ fn parse_args() -> Result<Args, String> {
         initrd,
         append,
         ram_size,
+        engine: engine.unwrap_or_else(|| "trace".into()),
         uart_rx,
     })
 }
@@ -266,6 +274,11 @@ fn main() {
         regs[10] = 0; // hartid
         regs[11] = DTB_ADDR;
         regs[12] = FW_DYNAMIC_INFO_ADDR; // a2 for OpenSBI fw_dynamic
+        // The trace engine's register file lives in the Reactor (Core.regs);
+        // mirror the boot registers there too.
+        reactor.write_reg(10, 0);
+        reactor.write_reg(11, DTB_ADDR);
+        reactor.write_reg(12, FW_DYNAMIC_INFO_ADDR);
     }
 
     let mut host = StdioHost;
@@ -278,13 +291,34 @@ fn main() {
         // Privileged/machine mode: ecall traps in-guest; completion is
         // reported via tohost (payload tests) or the syscon (poweroff).
         const FUEL: u64 = 1_000_000;
+        // Trace dispatch fuel is per-trace (a trace can run thousands of
+        // instructions), so use a smaller count to keep the host tick rate
+        // (UART drain, syscon, tohost) responsive.
+        const FUEL_TRACE: u64 = 50_000;
         let mut total: u64 = 0;
         let t0 = std::time::Instant::now();
         loop {
-            let mut noop = async |_: &mut [u64; 32]| -> bool { false };
-            let result = futures::executor::block_on(
-                reactor.interp_core_fueled(pc, &mut regs, &mut noop, Some(FUEL)),
-            );
+            let result = if args.engine == "trace" {
+                // The StackOp trace engine (the port): traces run translated
+                // and MMIO-aware code with trap-atomic bails; privileged
+                // instructions and interrupts dispatch through the stepper.
+                let mut noop =
+                    async |_: &mut vane::vane_riscv::interp::LocalStackHost<vane::Reactor>| -> bool {
+                        false
+                    };
+                let result = futures::executor::block_on(
+                    reactor.trace_run_fueled(pc, &mut noop, Some(FUEL_TRACE)),
+                );
+                drop(noop);
+                result.map_err(vane::InterpError::Unsupported)
+            } else {
+                let mut noop = async |_: &mut [u64; 32]| -> bool { false };
+                let result = futures::executor::block_on(
+                    reactor.interp_core_fueled(pc, &mut regs, &mut noop, Some(FUEL)),
+                );
+                drop(noop);
+                result
+            };
             match result {
                 Ok(next_pc) => pc = next_pc,
                 Err(e) => {

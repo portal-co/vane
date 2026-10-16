@@ -155,6 +155,18 @@ impl Reactor {
         self.core.lock().hart.enabled
     }
 
+    /// Set a guest register (works under both host configurations).
+    pub fn write_reg(&self, reg: u8, value: u64) {
+        use vane_arch::interp::LocalReactor;
+        self.lr_store_reg(reg, value);
+    }
+
+    /// Read a guest register.
+    pub fn read_reg(&self, reg: u8) -> u64 {
+        use vane_arch::interp::LocalReactor;
+        self.lr_load_reg(reg)
+    }
+
     /// Attach/detach the QEMU-virt-compatible machine (devices) — M4,
     /// PLAN_LINUX_WASM.md §7.4. When attached, sub-RAM physical accesses
     /// route to devices (UART/ACLINT/PLIC/syscon) and the trace engine
@@ -209,6 +221,7 @@ impl Reactor {
             mem,
             hart,
             code_dirty,
+            trace_cache,
             ..
         } = core;
         let hart_enabled = hart.enabled;
@@ -407,6 +420,11 @@ impl Reactor {
                 if !hart_enabled {
                     illegal_or_unsupported!(i);
                 }
+                if ($csr).0 == 0x180 && $write {
+                    // satp write: flush the VA-keyed trace cache (the TLB
+                    // flush happens inside hart.csr_op).
+                    trace_cache.borrow_mut().clear();
+                }
                 match hart.csr_op($op, ($csr).0, $val, $write) {
                     Ok(old) => {
                         set_reg!($dest => old);
@@ -433,16 +451,15 @@ impl Reactor {
             };
         }
         macro_rules! set_reg {
-            ($a:expr => $b:expr) => {
+            ($a:expr => $b:expr) => {{
+                let v = $b;
+                // Writes to x0 are discarded (architectural).
                 match $a {
-                    Reg(r) => match $b {
-                        v => {
-                            regs[(r % 32) as usize] = v;
-                            v
-                        }
-                    },
+                    Reg(0) => {}
+                    Reg(r) => regs[(r % 32) as usize] = v,
                 }
-            };
+                v
+            }};
         }
         macro_rules! set_reg32 {
             ($a:expr => $b:expr) => {
@@ -937,6 +954,8 @@ impl Reactor {
                     return Ok(StepOutcome::Next(hart.raise(t, pc)));
                 }
                 hart.sfence_vma(reg!(addr), reg!(asid));
+                // Mappings may have changed: traces are keyed by virtual pc.
+                trace_cache.borrow_mut().clear();
             }
             // ── F/D extension (privileged mode only; the JS JIT handles FP
             // in legacy mode via StackOp) ──
@@ -1016,45 +1035,143 @@ impl Reactor {
     /// at `pc` is privileged-class, execute one instruction via
     /// [`Reactor::step_one`] and return the new pc. Returns `Ok(None)` when
     /// tracing `pc` is safe (hart disabled, or M/bare-mode ordinary code).
-    pub fn privileged_step(&self, pc: u64) -> Result<Option<u64>, String> {
-        use vane_arch::interp::LocalReactor;
+    pub fn privileged_step(&self, pc: u64, force: bool) -> Result<Option<u64>, String> {
         {
-            let mut lock = self.core.lock();
-            if !lock.hart.enabled {
+            let mut guard = self.core.lock();
+            if !guard.hart.enabled {
                 return Ok(None);
             }
-            // A live machine (devices) means every access may be MMIO —
-            // traces cannot capture device semantics, so step everything
-            // (same treatment as active Sv39 translation).
-            let force_step = lock.hart.machine.is_some() || lock.hart.translation_active();
-            if !force_step {
-                // Peek at the instruction; only privileged-class instructions
-                // need the stepper — everything else traces normally.
-                let code = unsafe { (lock.mem.get_page(pc) as *mut u32).read_unaligned() };
-                let needs_step = match Inst::decode(code, Xlen::Rv64) {
-                    Ok((inst, _)) => matches!(
-                        inst,
-                        Inst::Csrrw { .. }
-                            | Inst::Csrrs { .. }
-                            | Inst::Csrrc { .. }
-                            | Inst::Csrrwi { .. }
-                            | Inst::Csrrsi { .. }
-                            | Inst::Csrrci { .. }
-                            | Inst::Mret
-                            | Inst::Sret
-                            | Inst::Wfi
-                            | Inst::SfenceVma { .. }
-                            | Inst::Ecall
-                            | Inst::Ebreak
-                    ),
-                    // Decode failure: let the stepper raise the trap.
-                    Err(_) => true,
-                };
-                if !needs_step {
-                    return Ok(None);
+            // Interrupt injection point for the trace engine: refresh device
+            // lines and deliver any pending interrupt before tracing on.
+            guard.hart.machine_step_irqs();
+            if let Some(cause) = guard.hart.pending_interrupt() {
+                let npc = guard.hart.raise(
+                    vane_riscv::hart::Trap {
+                        cause,
+                        tval: 0,
+                        interrupt: true,
+                    },
+                    pc,
+                );
+                return Ok(Some(npc));
+            }
+            // The Bail path calls with force=true: the stepper re-runs the
+            // faulting instruction (a regular load/store) to raise the trap.
+            if force {
+                // Drop the core lock first — step_privileged_full locks it
+                // (spin::Mutex is not reentrant).
+                drop(guard);
+                return self.step_privileged_full(pc).map(Some);
+            }
+            // Peek at the instruction (translating the fetch when Sv39 is
+            // active); only privileged-class instructions need the stepper —
+            // everything else traces normally (the StackOp port).
+            let core = &mut *guard;
+            let Core { mem, hart, .. } = core;
+            let fetch_pa = if hart.translation_active() {
+                match hart.translate_exec(&mut *mem, pc) {
+                    Ok(p) => p,
+                    // Fetch fault: the stepper raises it properly.
+                    Err(_) => return self.step_privileged_full(pc).map(Some),
                 }
+            } else {
+                pc
+            };
+            let code = unsafe { (mem.get_page(fetch_pa) as *mut u32).read_unaligned() };
+            let needs_step = match Inst::decode(code, Xlen::Rv64) {
+                Ok((inst, _)) => matches!(
+                    inst,
+                    Inst::Csrrw { .. }
+                        | Inst::Csrrs { .. }
+                        | Inst::Csrrc { .. }
+                        | Inst::Csrrwi { .. }
+                        | Inst::Csrrsi { .. }
+                        | Inst::Csrrci { .. }
+                        | Inst::Mret
+                        | Inst::Sret
+                        | Inst::Wfi
+                        | Inst::SfenceVma { .. }
+                        | Inst::Ecall
+                        | Inst::Ebreak
+                        // fence.i flushes the code-dirty flag (step_one
+                        // handles it) — boundary it like the privileged ops.
+                        | Inst::FenceI
+                        // AMOs (lr/sc + atomic ops): not lowered to StackOps
+                        // by rv_emit, so they boundary out of traces and the
+                        // stepper handles them (single implementation, D5).
+                        | Inst::LrW { .. }
+                        | Inst::ScW { .. }
+                        | Inst::AmoW { .. }
+                        | Inst::LrD { .. }
+                        | Inst::ScD { .. }
+                        | Inst::AmoD { .. }
+                        // FP ops rv_float_ops doesn't lower (moves, min/max,
+                        // comparisons, conversions, classify, sign-inject,
+                        // fused multiply-add) — boundary out of traces and
+                        // step via step_one's exec_fp (D5: one semantics).
+                        | Inst::FmaddS { .. }
+                        | Inst::FmsubS { .. }
+                        | Inst::FnmsubS { .. }
+                        | Inst::FnmaddS { .. }
+                        | Inst::FmaddD { .. }
+                        | Inst::FmsubD { .. }
+                        | Inst::FnmsubD { .. }
+                        | Inst::FnmaddD { .. }
+                        | Inst::FsgnjS { .. }
+                        | Inst::FsgnjnS { .. }
+                        | Inst::FsgnjxS { .. }
+                        | Inst::FsgnjD { .. }
+                        | Inst::FsgnjnD { .. }
+                        | Inst::FsgnjxD { .. }
+                        | Inst::FminS { .. }
+                        | Inst::FmaxS { .. }
+                        | Inst::FminD { .. }
+                        | Inst::FmaxD { .. }
+                        | Inst::FeqS { .. }
+                        | Inst::FltS { .. }
+                        | Inst::FleS { .. }
+                        | Inst::FeqD { .. }
+                        | Inst::FltD { .. }
+                        | Inst::FleD { .. }
+                        | Inst::FclassS { .. }
+                        | Inst::FclassD { .. }
+                        | Inst::FmvXW { .. }
+                        | Inst::FmvXD { .. }
+                        | Inst::FmvWX { .. }
+                        | Inst::FmvDX { .. }
+                        | Inst::FcvtWS { .. }
+                        | Inst::FcvtWuS { .. }
+                        | Inst::FcvtLS { .. }
+                        | Inst::FcvtLuS { .. }
+                        | Inst::FcvtWD { .. }
+                        | Inst::FcvtWuD { .. }
+                        | Inst::FcvtLD { .. }
+                        | Inst::FcvtLuD { .. }
+                        | Inst::FcvtSW { .. }
+                        | Inst::FcvtSWu { .. }
+                        | Inst::FcvtSL { .. }
+                        | Inst::FcvtSLu { .. }
+                        | Inst::FcvtDW { .. }
+                        | Inst::FcvtDWu { .. }
+                        | Inst::FcvtDL { .. }
+                        | Inst::FcvtDLu { .. }
+                        | Inst::FcvtSD { .. }
+                        | Inst::FcvtDS { .. }
+                ),
+                // Decode failure: let the stepper raise the trap.
+                Err(_) => true,
+            };
+            if !needs_step {
+                return Ok(None);
             }
         }
+        self.step_privileged_full(pc).map(Some)
+    }
+
+    /// Execute one instruction through `step_one` on the trace dispatch
+    /// path (registers synced through the [`LocalReactor`] interface).
+    fn step_privileged_full(&self, pc: u64) -> Result<u64, String> {
+        use vane_arch::interp::LocalReactor;
         let mut regs = [0u64; 32];
         for i in 1..32u8 {
             regs[i as usize] = self.lr_load_reg(i);
@@ -1064,7 +1181,7 @@ impl Reactor {
                 for i in 1..32u8 {
                     self.lr_store_reg(i, regs[i as usize]);
                 }
-                Ok(Some(np))
+                Ok(np)
             }
             Ok(StepOutcome::LegacyEcall(_)) => {
                 Err("internal: legacy ecall reached with hart enabled".into())
