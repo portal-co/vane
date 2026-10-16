@@ -15,7 +15,10 @@ pub mod state {
     }
 }
 
+pub mod fdt;
+pub mod fp;
 pub mod hart;
+pub mod machine;
 pub mod hint;
 pub mod template;
 

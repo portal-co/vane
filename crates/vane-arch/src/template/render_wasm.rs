@@ -41,7 +41,12 @@ pub fn render_stack_to_wasm<'a>(
         }
         macro_rules! mem_arg {
             ($max_align:expr) => {
-                wasmparser::MemArg { align: 0, max_align: $max_align, offset: 0, memory: abi.mem_idx }
+                wasmparser::MemArg {
+                    align: 0,
+                    max_align: $max_align,
+                    offset: 0,
+                    memory: abi.mem_idx,
+                }
             };
         }
         // Div/rem-by-zero: WASM's native div/rem instructions trap on a
@@ -55,15 +60,27 @@ pub fn render_stack_to_wasm<'a>(
             // `$zero_branch`: the WASM instruction producing the zero-
             // divisor result (I64Const -1 for div; LocalGet a for rem).
             ($wasm_op:expr, $zero_branch:expr) => {{
-                op!(Operator::LocalSet { local_index: abi.scratch_b }); // pop b
-                op!(Operator::LocalSet { local_index: abi.scratch_a }); // pop a
-                op!(Operator::LocalGet { local_index: abi.scratch_b });
+                op!(Operator::LocalSet {
+                    local_index: abi.scratch_b
+                }); // pop b
+                op!(Operator::LocalSet {
+                    local_index: abi.scratch_a
+                }); // pop a
+                op!(Operator::LocalGet {
+                    local_index: abi.scratch_b
+                });
                 op!(Operator::I64Eqz);
-                op!(Operator::If { blockty: wasmparser::BlockType::Type(wasmparser::ValType::I64) });
+                op!(Operator::If {
+                    blockty: wasmparser::BlockType::Type(wasmparser::ValType::I64)
+                });
                 $zero_branch;
                 op!(Operator::Else);
-                op!(Operator::LocalGet { local_index: abi.scratch_a });
-                op!(Operator::LocalGet { local_index: abi.scratch_b });
+                op!(Operator::LocalGet {
+                    local_index: abi.scratch_a
+                });
+                op!(Operator::LocalGet {
+                    local_index: abi.scratch_b
+                });
                 op!($wasm_op);
                 op!(Operator::End);
             }};
@@ -73,17 +90,29 @@ pub fn render_stack_to_wasm<'a>(
         // instructions operate on a 32-bit view regardless of upper bits).
         macro_rules! yield_div_rem_32 {
             ($wasm_op:expr, $zero_branch:expr) => {{
-                op!(Operator::LocalSet { local_index: abi.scratch_b }); // pop b:i64
-                op!(Operator::LocalSet { local_index: abi.scratch_a }); // pop a:i64
-                op!(Operator::LocalGet { local_index: abi.scratch_b });
+                op!(Operator::LocalSet {
+                    local_index: abi.scratch_b
+                }); // pop b:i64
+                op!(Operator::LocalSet {
+                    local_index: abi.scratch_a
+                }); // pop a:i64
+                op!(Operator::LocalGet {
+                    local_index: abi.scratch_b
+                });
                 op!(Operator::I32WrapI64);
                 op!(Operator::I32Eqz);
-                op!(Operator::If { blockty: wasmparser::BlockType::Type(wasmparser::ValType::I64) });
+                op!(Operator::If {
+                    blockty: wasmparser::BlockType::Type(wasmparser::ValType::I64)
+                });
                 $zero_branch;
                 op!(Operator::Else);
-                op!(Operator::LocalGet { local_index: abi.scratch_a });
+                op!(Operator::LocalGet {
+                    local_index: abi.scratch_a
+                });
                 op!(Operator::I32WrapI64);
-                op!(Operator::LocalGet { local_index: abi.scratch_b });
+                op!(Operator::LocalGet {
+                    local_index: abi.scratch_b
+                });
                 op!(Operator::I32WrapI64);
                 op!($wasm_op);
                 op!(Operator::I64ExtendI32S);
@@ -97,9 +126,13 @@ pub fn render_stack_to_wasm<'a>(
         // `StackOp`'s doc).
         macro_rules! yield_binop32 {
             ($wasm_op:expr) => {{
-                op!(Operator::LocalSet { local_index: abi.scratch_b }); // pop b:i64
+                op!(Operator::LocalSet {
+                    local_index: abi.scratch_b
+                }); // pop b:i64
                 op!(Operator::I32WrapI64); // wrap a -> i32
-                op!(Operator::LocalGet { local_index: abi.scratch_b });
+                op!(Operator::LocalGet {
+                    local_index: abi.scratch_b
+                });
                 op!(Operator::I32WrapI64); // wrap b -> i32
                 op!($wasm_op);
                 op!(Operator::I64ExtendI32S);
@@ -167,14 +200,18 @@ pub fn render_stack_to_wasm<'a>(
                     if r == 0 {
                         op!(Operator::I64Const { value: 0 });
                     } else {
-                        op!(Operator::LocalGet { local_index: abi.reg_base + r as u32 });
+                        op!(Operator::LocalGet {
+                            local_index: abi.reg_base + r as u32
+                        });
                     }
                 }
                 StackOp::StoreReg(r) => {
                     if r == 0 {
                         op!(Operator::Drop);
                     } else {
-                        op!(Operator::LocalSet { local_index: abi.reg_base + r as u32 });
+                        op!(Operator::LocalSet {
+                            local_index: abi.reg_base + r as u32
+                        });
                     }
                 }
                 StackOp::Drop => {
@@ -192,14 +229,26 @@ pub fn render_stack_to_wasm<'a>(
                 // not something to silently zero, so this preserves the
                 // original safety property for anything not yet mapped.
                 StackOp::LoadState(slot) => {
-                    match abi.state_slots.iter().find(|(name, _)| *name == slot.as_str()) {
-                        Some((_, local)) => op!(Operator::LocalGet { local_index: *local }),
+                    match abi
+                        .state_slots
+                        .iter()
+                        .find(|(name, _)| *name == slot.as_str())
+                    {
+                        Some((_, local)) => op!(Operator::LocalGet {
+                            local_index: *local
+                        }),
                         None => op!(Operator::Unreachable),
                     }
                 }
                 StackOp::StoreState(slot) => {
-                    match abi.state_slots.iter().find(|(name, _)| *name == slot.as_str()) {
-                        Some((_, local)) => op!(Operator::LocalSet { local_index: *local }),
+                    match abi
+                        .state_slots
+                        .iter()
+                        .find(|(name, _)| *name == slot.as_str())
+                    {
+                        Some((_, local)) => op!(Operator::LocalSet {
+                            local_index: *local
+                        }),
                         None => op!(Operator::Unreachable),
                     }
                 }
@@ -226,28 +275,26 @@ pub fn render_stack_to_wasm<'a>(
                 // all-ones, remainder = the dividend unchanged) — matching
                 // `emit_div_rem_by_zero_checked` below.
                 StackOp::DivU64 => {
-                    yield_div_rem_64!(
-                        Operator::I64DivU,
-                        op!(Operator::I64Const { value: -1 })
-                    );
+                    yield_div_rem_64!(Operator::I64DivU, op!(Operator::I64Const { value: -1 }));
                 }
                 StackOp::DivS64 => {
-                    yield_div_rem_64!(
-                        Operator::I64DivS,
-                        op!(Operator::I64Const { value: -1 })
-                    );
+                    yield_div_rem_64!(Operator::I64DivS, op!(Operator::I64Const { value: -1 }));
                 }
                 StackOp::RemU64 => {
                     // Remainder-by-zero: the dividend (scratch_a).
                     yield_div_rem_64!(
                         Operator::I64RemU,
-                        op!(Operator::LocalGet { local_index: abi.scratch_a })
+                        op!(Operator::LocalGet {
+                            local_index: abi.scratch_a
+                        })
                     );
                 }
                 StackOp::RemS64 => {
                     yield_div_rem_64!(
                         Operator::I64RemS,
-                        op!(Operator::LocalGet { local_index: abi.scratch_a })
+                        op!(Operator::LocalGet {
+                            local_index: abi.scratch_a
+                        })
                     );
                 }
                 StackOp::And64 => {
@@ -364,29 +411,27 @@ pub fn render_stack_to_wasm<'a>(
                 StackOp::ShrU32 => yield_binop32!(Operator::I32ShrU),
                 StackOp::ShrS32 => yield_binop32!(Operator::I32ShrS),
                 StackOp::DivU32 => {
-                    yield_div_rem_32!(
-                        Operator::I32DivU,
-                        op!(Operator::I64Const { value: -1 })
-                    );
+                    yield_div_rem_32!(Operator::I32DivU, op!(Operator::I64Const { value: -1 }));
                 }
                 StackOp::DivS32 => {
-                    yield_div_rem_32!(
-                        Operator::I32DivS,
-                        op!(Operator::I64Const { value: -1 })
-                    );
+                    yield_div_rem_32!(Operator::I32DivS, op!(Operator::I64Const { value: -1 }));
                 }
                 StackOp::RemU32 => {
                     // Remainder-by-zero: the dividend's low 32 bits,
                     // sign-extended back to i64 (matching the Else branch).
                     yield_div_rem_32!(
                         Operator::I32RemU,
-                        op!(Operator::LocalGet { local_index: abi.scratch_a })
+                        op!(Operator::LocalGet {
+                            local_index: abi.scratch_a
+                        })
                     );
                 }
                 StackOp::RemS32 => {
                     yield_div_rem_32!(
                         Operator::I32RemS,
-                        op!(Operator::LocalGet { local_index: abi.scratch_a })
+                        op!(Operator::LocalGet {
+                            local_index: abi.scratch_a
+                        })
                     );
                 }
 
@@ -394,13 +439,27 @@ pub fn render_stack_to_wasm<'a>(
                 StackOp::LoadMem { width, signed } => {
                     op!(Operator::I32WrapI64); // addr: i64 -> i32 (flat memory model)
                     match (width, signed) {
-                        (MemWidth::B1, true) => op!(Operator::I64Load8S { memarg: mem_arg!(0) }),
-                        (MemWidth::B1, false) => op!(Operator::I64Load8U { memarg: mem_arg!(0) }),
-                        (MemWidth::B2, true) => op!(Operator::I64Load16S { memarg: mem_arg!(1) }),
-                        (MemWidth::B2, false) => op!(Operator::I64Load16U { memarg: mem_arg!(1) }),
-                        (MemWidth::B4, true) => op!(Operator::I64Load32S { memarg: mem_arg!(2) }),
-                        (MemWidth::B4, false) => op!(Operator::I64Load32U { memarg: mem_arg!(2) }),
-                        (MemWidth::B8, _) => op!(Operator::I64Load { memarg: mem_arg!(3) }),
+                        (MemWidth::B1, true) => op!(Operator::I64Load8S {
+                            memarg: mem_arg!(0)
+                        }),
+                        (MemWidth::B1, false) => op!(Operator::I64Load8U {
+                            memarg: mem_arg!(0)
+                        }),
+                        (MemWidth::B2, true) => op!(Operator::I64Load16S {
+                            memarg: mem_arg!(1)
+                        }),
+                        (MemWidth::B2, false) => op!(Operator::I64Load16U {
+                            memarg: mem_arg!(1)
+                        }),
+                        (MemWidth::B4, true) => op!(Operator::I64Load32S {
+                            memarg: mem_arg!(2)
+                        }),
+                        (MemWidth::B4, false) => op!(Operator::I64Load32U {
+                            memarg: mem_arg!(2)
+                        }),
+                        (MemWidth::B8, _) => op!(Operator::I64Load {
+                            memarg: mem_arg!(3)
+                        }),
                     }
                 }
                 StackOp::StoreMem { width } => {
@@ -408,25 +467,43 @@ pub fn render_stack_to_wasm<'a>(
                     // top) — matches WASM store's own [addr, value] operand
                     // order, so only `addr` (now buried below `value`) needs
                     // reordering through a scratch local to wrap it to i32.
-                    op!(Operator::LocalSet { local_index: abi.scratch_a }); // pop value
+                    op!(Operator::LocalSet {
+                        local_index: abi.scratch_a
+                    }); // pop value
                     op!(Operator::I32WrapI64); // wrap addr -> i32
-                    op!(Operator::LocalGet { local_index: abi.scratch_a }); // push value back
+                    op!(Operator::LocalGet {
+                        local_index: abi.scratch_a
+                    }); // push value back
                     match width {
-                        MemWidth::B1 => op!(Operator::I64Store8 { memarg: mem_arg!(0) }),
-                        MemWidth::B2 => op!(Operator::I64Store16 { memarg: mem_arg!(1) }),
-                        MemWidth::B4 => op!(Operator::I64Store32 { memarg: mem_arg!(2) }),
-                        MemWidth::B8 => op!(Operator::I64Store { memarg: mem_arg!(3) }),
+                        MemWidth::B1 => op!(Operator::I64Store8 {
+                            memarg: mem_arg!(0)
+                        }),
+                        MemWidth::B2 => op!(Operator::I64Store16 {
+                            memarg: mem_arg!(1)
+                        }),
+                        MemWidth::B4 => op!(Operator::I64Store32 {
+                            memarg: mem_arg!(2)
+                        }),
+                        MemWidth::B8 => op!(Operator::I64Store {
+                            memarg: mem_arg!(3)
+                        }),
                     }
                 }
 
                 // ── Side effects ────────────────────────────────────────────
                 StackOp::Ecall => {
                     for r in 0..abi.num_regs {
-                        op!(Operator::LocalGet { local_index: abi.reg_base + r });
+                        op!(Operator::LocalGet {
+                            local_index: abi.reg_base + r
+                        });
                     }
-                    op!(Operator::Call { function_index: abi.ecall_func_idx });
+                    op!(Operator::Call {
+                        function_index: abi.ecall_func_idx
+                    });
                     for r in (0..abi.num_regs).rev() {
-                        op!(Operator::LocalSet { local_index: abi.reg_base + r });
+                        op!(Operator::LocalSet {
+                            local_index: abi.reg_base + r
+                        });
                     }
                 }
                 StackOp::Trap(_msg) => {
@@ -437,12 +514,20 @@ pub fn render_stack_to_wasm<'a>(
                     // (which must precede it as `target_pc`, the last
                     // argument, per the shared calling convention), then
                     // push it back.
-                    op!(Operator::LocalSet { local_index: abi.scratch_a });
+                    op!(Operator::LocalSet {
+                        local_index: abi.scratch_a
+                    });
                     for r in 0..abi.num_regs {
-                        op!(Operator::LocalGet { local_index: abi.reg_base + r });
+                        op!(Operator::LocalGet {
+                            local_index: abi.reg_base + r
+                        });
                     }
-                    op!(Operator::LocalGet { local_index: abi.scratch_a });
-                    op!(Operator::ReturnCall { function_index: abi.lookup_stub_func_idx });
+                    op!(Operator::LocalGet {
+                        local_index: abi.scratch_a
+                    });
+                    op!(Operator::ReturnCall {
+                        function_index: abi.lookup_stub_func_idx
+                    });
                 }
                 StackOp::Log(_) => {} // diagnostic hint — no WASM equivalent
 
@@ -459,31 +544,52 @@ pub fn render_stack_to_wasm<'a>(
                 }
 
                 // ── Instruction integrity check ─────────────────────────────
-                StackOp::CheckCode { addr, expected, miss_label: _ } => {
+                StackOp::CheckCode {
+                    addr,
+                    expected,
+                    miss_label: _,
+                } => {
                     let cmp = match expected.len() {
                         4 => Some((
-                            u32::from_le_bytes([expected[0], expected[1], expected[2], expected[3]]) as i32,
-                            Operator::I32Load { memarg: mem_arg!(2) },
+                            u32::from_le_bytes([expected[0], expected[1], expected[2], expected[3]])
+                                as i32,
+                            Operator::I32Load {
+                                memarg: mem_arg!(2),
+                            },
                         )),
                         2 => Some((
                             u16::from_le_bytes([expected[0], expected[1]]) as i32,
-                            Operator::I32Load16U { memarg: mem_arg!(1) },
+                            Operator::I32Load16U {
+                                memarg: mem_arg!(1),
+                            },
                         )),
                         _ => None, // unknown width — skip check, matching the JS renderer
                     };
                     if let Some((expected_i32, load_op)) = cmp {
-                        op!(Operator::I32Const { value: (addr as u32) as i32 }); // flat memory model
+                        op!(Operator::I32Const {
+                            value: (addr as u32) as i32
+                        }); // flat memory model
                         op!(load_op);
-                        op!(Operator::I32Const { value: expected_i32 });
+                        op!(Operator::I32Const {
+                            value: expected_i32
+                        });
                         op!(Operator::I32Ne);
-                        op!(Operator::If { blockty: wasmparser::BlockType::Empty });
+                        op!(Operator::If {
+                            blockty: wasmparser::BlockType::Empty
+                        });
                         op!(Operator::I64Const { value: addr as i64 });
-                        op!(Operator::Call { function_index: abi.jit_invalidate_func_idx });
+                        op!(Operator::Call {
+                            function_index: abi.jit_invalidate_func_idx
+                        });
                         for r in 0..abi.num_regs {
-                            op!(Operator::LocalGet { local_index: abi.reg_base + r });
+                            op!(Operator::LocalGet {
+                                local_index: abi.reg_base + r
+                            });
                         }
                         op!(Operator::I64Const { value: addr as i64 });
-                        op!(Operator::ReturnCall { function_index: abi.lookup_stub_func_idx });
+                        op!(Operator::ReturnCall {
+                            function_index: abi.lookup_stub_func_idx
+                        });
                         op!(Operator::End);
                     }
                 }

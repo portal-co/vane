@@ -190,13 +190,14 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
 
     // ── Hint / test-mode logging ──────────────────────────────────────────────
     if this.params.flags.test_mode
-        && let Some(hint_value) = hint::detect_test_marker(&inst) {
-            ops.push(StackOp::Log(alloc::format!(
-                "[HINT] PC=0x{:x}: Test case {}",
-                this.pc,
-                hint_value
-            )));
-        }
+        && let Some(hint_value) = hint::detect_test_marker(&inst)
+    {
+        ops.push(StackOp::Log(alloc::format!(
+            "[HINT] PC=0x{:x}: Test case {}",
+            this.pc,
+            hint_value
+        )));
+    }
 
     // ── Instruction → StackOp mapping ────────────────────────────────────────
 

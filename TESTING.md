@@ -16,6 +16,29 @@ host-independent interpreter loop), bridging a minimal Linux syscall set
 (`write`, `read` EOF, `exit`/`exit_group`) to stdio. It builds natively and
 for `wasm32-wasip1` (`--no-default-features`).
 
+### M4 gates: machine model and Linux boot
+
+```sh
+harness/run-machine-gate.sh       # devices: UART/ACLINT/PLIC/syscon (fast)
+harness/run-linux-boot-gate.sh    # full OpenSBI+Linux+initramfs boot (slow)
+```
+
+`run-machine-gate.sh` runs `harness/payload-machine` (M-mode device
+exerciser) under `vane-cli --machine` natively and under WASI; expect
+`M1:TTTK`.
+
+`run-linux-boot-gate.sh` boots OpenSBI + the Debian riscv64 kernel + a
+busybox initramfs (see `harness/linux/README.md` for fetching the
+artifacts) and asserts the OpenSBI banner, userspace init, correct
+`uname -a` and `sha256sum` output, and a clean SBI SRST poweroff. The
+interpreter runs ~1M instr/s, so the boot takes tens of minutes — this is a
+manual/nightly gate, not per-commit CI.
+
+The device model is QEMU `virt`-shaped: ns16550a UART @ 0x1000_0000 (PLIC
+source 10), CLINT-compatible timer @ 0x200_0000, PLIC @ 0xC00_0000, SiFive
+test finisher @ 0x10_0000. The DTB is generated at runtime by
+`vane_riscv::machine::virt_dtb`.
+
 ### M3 gate: privileged architecture
 
 ```sh

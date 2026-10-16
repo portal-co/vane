@@ -223,9 +223,7 @@ fn parse_request(value: &str) -> Result<SyscallRequest, Error> {
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| Error::Protocol("missing args".into()))?;
     if args.len() != 6 {
-        return Err(Error::Protocol(
-            "args must have exactly six entries".into(),
-        ));
+        return Err(Error::Protocol("args must have exactly six entries".into()));
     }
     let mut parsed_args = [0; 6];
     for (slot, value) in parsed_args.iter_mut().zip(args) {
@@ -253,7 +251,11 @@ impl RemoteBuffer {
         let valid = usize::try_from(length).is_ok() && length <= mem_size;
         Self {
             address,
-            bytes: valid.then(|| vec![0; length as usize]).unwrap_or_default(),
+            bytes: if valid {
+                vec![0; length as usize]
+            } else {
+                Default::default()
+            },
             valid,
         }
     }
@@ -324,14 +326,14 @@ async fn handle_syscall<H: HostApi + ?Sized>(
         &mut remote,
         &mut host,
     );
-    if matches!(decoded, Some(Syscall::Read)) {
-        if let Outcome::Return(count) = outcome {
-            let count = usize::try_from(count.max(0))
-                .unwrap_or(usize::MAX)
-                .min(remote.bytes.len());
-            if count != 0 {
-                put_guest_buffer(browser, remote.address, &remote.bytes[..count], mem_size).await;
-            }
+    if matches!(decoded, Some(Syscall::Read))
+        && let Outcome::Return(count) = outcome
+    {
+        let count = usize::try_from(count.max(0))
+            .unwrap_or(usize::MAX)
+            .min(remote.bytes.len());
+        if count != 0 {
+            put_guest_buffer(browser, remote.address, &remote.bytes[..count], mem_size).await;
         }
     }
     match outcome {

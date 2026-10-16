@@ -10,8 +10,8 @@
 
 use rv_asm::{Csr, Imm, Inst, Reg, Xlen};
 use vane::vane_riscv::hart::{
-    CAUSE_ECALL_S, CAUSE_ILLEGAL, CAUSE_LOAD_PAGE_FAULT, CAUSE_STORE_PAGE_FAULT, HartState, PrivMode, IRQ_SSIP,
-    MISA_VALUE, SATP_MODE_SV39,
+    HartState, PrivMode, CAUSE_ECALL_S, CAUSE_ILLEGAL, CAUSE_LOAD_PAGE_FAULT,
+    CAUSE_STORE_PAGE_FAULT, IRQ_SSIP, MISA_VALUE, SATP_MODE_SV39,
 };
 use vane::{Reactor, StepOutcome};
 
@@ -256,13 +256,21 @@ const PTE_D: u64 = 128;
 
 fn build_sv39_tables(r: &Reactor) {
     // root[2]: identity megapage for code region (PA 0x8000_0000, RWX).
-    write_qword(r, ROOT + 2 * 8, (0x8000_0000 >> 12 << 10) | PTE_A | PTE_D | PTE_X | PTE_W | PTE_R | PTE_V);
+    write_qword(
+        r,
+        ROOT + 2 * 8,
+        (0x8000_0000 >> 12 << 10) | PTE_A | PTE_D | PTE_X | PTE_W | PTE_R | PTE_V,
+    );
     // root[1] -> L2
     write_qword(r, ROOT + 8, (L2 >> 12 << 10) | PTE_V);
     // l2[0] -> L3
     write_qword(r, L2, (L3 >> 12 << 10) | PTE_V);
     // l3[0]: VA 0x4000_0000 -> DATA_PA, RW (no X)
-    write_qword(r, L3, (DATA_PA >> 12 << 10) | PTE_A | PTE_D | PTE_W | PTE_R | PTE_V);
+    write_qword(
+        r,
+        L3,
+        (DATA_PA >> 12 << 10) | PTE_A | PTE_D | PTE_W | PTE_R | PTE_V,
+    );
     // Preload the mapped data page.
     write_qword(r, DATA_PA, MAGIC);
 }
@@ -342,7 +350,11 @@ fn sv39_permission_fault_and_sfence() {
     let r = new_hart();
     build_sv39_tables(&r);
     // Store to a read-only mapping: rebuild with W cleared.
-    write_qword(&r, L3, (DATA_PA >> 12 << 10) | PTE_A | PTE_D | PTE_R | PTE_V);
+    write_qword(
+        &r,
+        L3,
+        (DATA_PA >> 12 << 10) | PTE_A | PTE_D | PTE_R | PTE_V,
+    );
     write_inst(
         &r,
         CODE,
@@ -401,34 +413,54 @@ fn stepper_and_trace_engines_agree_under_privilege() {
     let prog = |r: &Reactor| {
         // csrrw x10, mscratch, x1 ; ecall (to M handler at MTVEC which is
         // just an mret back) ; csrrs x11, mscratch, x0
-        write_inst(r, CODE, &Inst::Csrrw {
-            csr: Csr::MSCRATCH,
-            dest: Reg(10),
-            src: Reg(1),
-        });
+        write_inst(
+            r,
+            CODE,
+            &Inst::Csrrw {
+                csr: Csr::MSCRATCH,
+                dest: Reg(10),
+                src: Reg(1),
+            },
+        );
         write_inst(r, CODE + 4, &Inst::Ecall);
         // M-mode handler: mepc += 4; mret.
-        write_inst(r, MTVEC, &Inst::Csrrs {
-            csr: Csr::MEPC,
-            dest: Reg(5),
-            src: Reg(0),
-        });
-        write_inst(r, MTVEC + 4, &Inst::Addi {
-            imm: Imm::new_i32(4),
-            dest: Reg(5),
-            src1: Reg(5),
-        });
-        write_inst(r, MTVEC + 8, &Inst::Csrrw {
-            csr: Csr::MEPC,
-            dest: Reg(0),
-            src: Reg(5),
-        });
+        write_inst(
+            r,
+            MTVEC,
+            &Inst::Csrrs {
+                csr: Csr::MEPC,
+                dest: Reg(5),
+                src: Reg(0),
+            },
+        );
+        write_inst(
+            r,
+            MTVEC + 4,
+            &Inst::Addi {
+                imm: Imm::new_i32(4),
+                dest: Reg(5),
+                src1: Reg(5),
+            },
+        );
+        write_inst(
+            r,
+            MTVEC + 8,
+            &Inst::Csrrw {
+                csr: Csr::MEPC,
+                dest: Reg(0),
+                src: Reg(5),
+            },
+        );
         write_inst(r, MTVEC + 12, &Inst::Mret);
-        write_inst(r, CODE + 8, &Inst::Csrrs {
-            csr: Csr::MSCRATCH,
-            dest: Reg(11),
-            src: Reg(0),
-        });
+        write_inst(
+            r,
+            CODE + 8,
+            &Inst::Csrrs {
+                csr: Csr::MSCRATCH,
+                dest: Reg(11),
+                src: Reg(0),
+            },
+        );
     };
     let setup = |r: &Reactor| {
         r.set_hart_enabled(true);

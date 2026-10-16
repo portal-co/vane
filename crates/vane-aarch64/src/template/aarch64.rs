@@ -529,7 +529,7 @@ fn emit_dp3(ops: &mut Vec<StackOp>, word: u32, kind: u8) {
                 ops.push(StackOp::Trunc32);
             }
         }
-        2 | 3 | 4 | 5 => {
+        2..=5 => {
             // signed/unsigned long MADD/MSUB
             read_gpr(ops, ra(word), false);
             read_widened(ops, rn(word), kind == 2 || kind == 3);

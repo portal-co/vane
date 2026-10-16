@@ -1,6 +1,4 @@
 use vane_target_core::{CoreOpcode, FloatBinOp, FloatUnaryOp, FloatWidth, MemWidth, StackOp};
-#[cfg(feature = "target-wasm")]
-use wasmparser::Operator;
 
 use crate::*;
 
@@ -936,7 +934,7 @@ impl<'a> Display for CoreJS<'a> {
 
         self.write_data_function(fmt, &data)?;
 
-        write!(fmt, ";{}}}", &self.content)
+        write!(fmt, ";{}}}", self.content)
     }
 }
 

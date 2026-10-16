@@ -177,7 +177,8 @@ extern "C" fn main_entry() -> ! {
             const RWAD: u64 = 2 | 4 | 64 | 128;
 
             // root[2]: 1 GiB identity megapage for 0x8000_0000.. (code/data)
-            root.add(2).write_volatile((0x8000_0000 >> 12 << 10) | RWXADG | V);
+            root.add(2)
+                .write_volatile((0x8000_0000 >> 12 << 10) | RWXADG | V);
             // root[1] -> L2 (VA 0x4000_0000 lives under index 1)
             root.add(1).write_volatile(((l2 as u64) >> 12 << 10) | V);
             // l2[0] -> L3

@@ -263,6 +263,38 @@ Device framework: memory-mapped dispatch in `Mem` on reserved physical ranges �
 
 ---
 
+### StackOp port of the interpreter (user-requested, next)
+
+Port the interpreter path to `StackOp` traces so the *virtualized* path
+(machine mode + Sv39 translation) has JIT parity with the userspace JIT:
+the trace engine must handle translation (TLB), MMIO dispatch, and
+trap-atomic faults, so Linux runs on compiled traces rather than
+per-instruction `step_one`. Do this once an opening comes up (after the M4
+boot is confirmed). Then apply the sequence-acceleration optimizations
+(superinstructions/fusion) once the port is confirmed correct.
+
+### Instruction-sequence acceleration (user-requested)
+
+Accelerate common RISC-V instruction sequences to make Linux boot faster.
+Sequences inside a trace cannot self-modify (fence.i is the only sync
+point, and it sets the code-dirty flag), so the trace interpreter may fuse
+hot sequences (e.g. `ld`+`bne` spin loops, auipc+ld, memcpy loops, the
+misaligned-access measurement loops Linux runs at boot) into
+superinstructions instead of dispatching per instruction. Implement when an
+opening appears — natural openings are the trace engine (StackOp fusion
+pass) and the M5-era performance work.
+
+### fence.i flag for trace invalidation (user-requested future improvement)
+
+Instead of comparing/invalidating cached traces (or JS JIT functions) on
+every `fence.i` — or keeping unconditional `CheckCode` integrity guards in
+every trace — keep a per-VM **code-dirty flag**: `fence.i` sets it, and
+trace/JIT compilation validates-and-clears. While the flag is clear, the
+JIT may emit *direct calls* between cached traces with no per-entry
+comparison at all (per the spec, self-modifying code without `fence.i` is
+UB, so eliding the check is conformant). This turns the steady-state JIT
+dispatch into an unconditional call chain.
+
 ## 9. Deferral hooks (not in this plan, but designed-for)
 
 - **SMP**: `Hart` is already (will be) a struct; ACLINT MSWI and PLIC contexts are per-hart shaped; `SharedArrayBuffer` resident pool + WASIX threads are the two carrier mechanisms. Atomic extension semantics are per-hart correct (LR/SC reservation model must become reservation-per-hart when SMP lands).

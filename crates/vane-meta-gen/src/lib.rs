@@ -81,6 +81,11 @@ macro_rules! vane_meta {
             /// Current guest pc: the register file lives in JS (`r`) under
             /// `js-host`, so the pc must live here for host-side engines.
             pc: u64,
+            /// Code-dirty flag (set by `fence.i`): the trace cache validates
+            /// and clears on the next dispatch rather than on every fence —
+            /// while clear, traces/JIT functions may chain directly with no
+            /// integrity comparison (PLAN_LINUX_WASM.md §9).
+            code_dirty: bool,
             /// Register file for plain-Rust hosts. Under `js-host` the
             /// register file lives in the JS `r` object instead.
             #[cfg(not(feature = "js-host"))]
@@ -142,6 +147,15 @@ macro_rules! vane_meta {
                         // Neither the mutex nor the RefCell borrow is held
                         // across an await.
                         let pc = host.pc;
+                        // fence.i contract: revalidate code only once per
+                        // fence, not per trace (see Core::code_dirty).
+                        {
+                            let mut lock = self.core.lock();
+                            if lock.code_dirty {
+                                lock.trace_cache.borrow_mut().clear();
+                                lock.code_dirty = false;
+                            }
+                        }
                         let ops = if let Some(ops) =
                             self.core.lock().trace_cache.borrow().get(&pc).cloned()
                         {

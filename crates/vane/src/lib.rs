@@ -3,18 +3,18 @@ mod utils;
 
 // Re-export Mem for use in tests
 use rv_asm::{Inst, Reg, Xlen};
+#[cfg(feature = "js-host")]
+use std::cell::OnceCell;
 use std::rc::Rc;
+/// Engine selection for `run` (interpreter vs JS JIT); see PLAN_LINUX_WASM.md §4.
+pub use vane_arch::ExecEngine;
+/// Re-exported for host/test access to the privileged hart state.
+pub use vane_riscv;
 pub use vane_riscv::hint;
 use vane_riscv::template::Params;
 pub use vane_riscv::Mem;
-/// Re-exported for host/test access to the privileged hart state.
-pub use vane_riscv;
-/// Engine selection for `run` (interpreter vs JS JIT); see PLAN_LINUX_WASM.md §4.
-pub use vane_arch::ExecEngine;
 use vane_riscv::ReleaseFlate;
 use vane_riscv::Riscv;
-#[cfg(feature = "js-host")]
-use std::cell::OnceCell;
 #[cfg(feature = "js-host")]
 use wasm_bindgen::prelude::*;
 #[cfg(feature = "js-host")]
@@ -90,7 +90,6 @@ pub enum StepOutcome {
     LegacyEcall(u64),
 }
 
-
 // Non-wasm impl block for Rust-only APIs
 impl Reactor {
     /// Bulk-write guest memory (e.g. loading an ELF segment). Chunks the
@@ -134,6 +133,7 @@ impl Reactor {
                 trace_cache: std::cell::RefCell::new(std::collections::BTreeMap::new()),
                 engine: vane_arch::ExecEngine::Interp,
                 pc: 0,
+                code_dirty: false,
                 #[cfg(not(feature = "js-host"))]
                 regs: [0; 32],
                 hart: Default::default(),
@@ -155,6 +155,26 @@ impl Reactor {
         self.core.lock().hart.enabled
     }
 
+    /// Attach/detach the QEMU-virt-compatible machine (devices) — M4,
+    /// PLAN_LINUX_WASM.md §7.4. When attached, sub-RAM physical accesses
+    /// route to devices (UART/ACLINT/PLIC/syscon) and the trace engine
+    /// steps every instruction instead of tracing.
+    pub fn set_machine_enabled(&self, enabled: bool) {
+        let mut lock = self.core.lock();
+        lock.hart.machine = if enabled {
+            Some(vane_riscv::machine::Machine::new())
+        } else {
+            None
+        };
+    }
+
+    /// Access the machine (None when not attached) — for hosts feeding
+    /// console input and draining output.
+    pub fn with_machine<R>(&self, f: impl FnOnce(&mut vane_riscv::machine::Machine) -> R) -> Option<R> {
+        let mut lock = self.core.lock();
+        lock.hart.machine.as_mut().map(f)
+    }
+
     /// Access the privileged hart state (CSRs, privilege mode, mip/mie,
     /// satp) — used by device models, tests, and host drivers.
     pub fn with_hart<R>(&self, f: impl FnOnce(&mut vane_riscv::hart::HartState) -> R) -> R {
@@ -171,20 +191,31 @@ impl Reactor {
     /// entry, and xRET.
     pub fn step_one(&self, pc: u64, regs: &mut [u64; 32]) -> Result<StepOutcome, InterpError> {
         use vane_riscv::hart::{
-            Access, CAUSE_BREAKPOINT, CAUSE_ECALL_M, CAUSE_ECALL_S, CAUSE_ECALL_U,
-            CAUSE_ILLEGAL, CsrOp, PrivMode, Trap,
+            Access, CsrOp, PrivMode, Trap, CAUSE_BREAKPOINT, CAUSE_ECALL_M, CAUSE_ECALL_S,
+            CAUSE_ECALL_U, CAUSE_FETCH_ACCESS, CAUSE_ILLEGAL, CAUSE_LOAD_ACCESS,
+            CAUSE_MISALIGNED_LOAD, CAUSE_MISALIGNED_STORE, CAUSE_STORE_ACCESS, MSTATUS_FS,
         };
         let mut guard = self.core.lock();
+        // itime advances on every step, before any early return — virtual
+        // machine time must never stall, even in a trap storm.
+        guard.hart.itime = guard.hart.itime.wrapping_add(1);
         #[cfg(feature = "js-host")]
         let test_mode = guard.test_mode;
         // Destructure into disjoint field borrows: the MMU walker takes
         // &mut hart and &mut mem simultaneously.
         let core = &mut *guard;
         #[allow(unused_variables)]
-        let Core { mem, hart, .. } = core;
+        let Core {
+            mem,
+            hart,
+            code_dirty,
+            ..
+        } = core;
         let hart_enabled = hart.enabled;
         if hart_enabled {
-            // Pending interrupts are taken before the next instruction.
+            // Refresh device-driven interrupt lines, then take any pending
+            // interrupt before executing the next instruction.
+            hart.machine_step_irqs();
             if let Some(cause) = hart.pending_interrupt() {
                 let npc = hart.raise(
                     Trap {
@@ -196,7 +227,10 @@ impl Reactor {
                 );
                 return Ok(StepOutcome::Next(npc));
             }
-            if hart.mcountinhibit & 1 == 0 {
+            // With a machine attached, the cycle CSR reads the machine
+            // clock instead (see hart.rs), so only count instructions when
+            // bare.
+            if hart.mcountinhibit & 1 == 0 && hart.machine.is_none() {
                 hart.mcycle += 1;
             }
             if hart.mcountinhibit & 4 == 0 {
@@ -215,12 +249,36 @@ impl Reactor {
         } else {
             pc
         };
+        // MMIO regions are not executable.
+        if hart.machine.is_some() && vane_riscv::machine::Machine::is_mmio(fetch_pa) {
+            let t = Trap::exception(CAUSE_FETCH_ACCESS, pc);
+            return Ok(StepOutcome::Next(hart.raise(t, pc)));
+        }
         // Unaligned-safe fetch: with compressed instructions pc can be
         // 2 mod 4, and a raw aligned deref is both UB in Rust and broken
         // on backends that honor the alignment hint (wasm2js lowers an
         // align=4 load to HEAP32[addr >> 2], reading the wrong word).
-        let code = unsafe { (mem.get_page(fetch_pa) as *mut u32).read_unaligned() };
-        let i = Inst::decode(code, Xlen::Rv64);
+        let code = if (fetch_pa & 0xFFFF) > 0xFFFC {
+            // Fetch crosses a 64 KiB Mem page boundary: read byte-wise.
+            (0..4).fold(0u32, |acc, i| {
+                acc | (mem.read_byte(fetch_pa.wrapping_add(i)) as u32) << (8 * i)
+            })
+        } else {
+            unsafe { (mem.get_page(fetch_pa) as *mut u32).read_unaligned() }
+        };
+        // Decode memoization (pure function of the instruction word).
+        let cache_idx = (code as usize) & 1023;
+        let cached = hart.decode_cache[cache_idx].as_ref().filter(|(w, _, _)| *w == code);
+        let i = match cached {
+            Some((_, inst, comp)) => Ok((*inst, *comp)),
+            None => {
+                let d = Inst::decode(code, Xlen::Rv64);
+                if let Ok((inst, comp)) = &d {
+                    hart.decode_cache[cache_idx] = Some((code, *inst, *comp));
+                }
+                d
+            }
+        };
         let (i, b) = match i {
             Ok(a) => a,
             Err(e) => {
@@ -258,6 +316,77 @@ impl Reactor {
                     }
                 } else {
                     va
+                }
+            }};
+        }
+        // Load/store through the machine when one is attached and the
+        // physical address is in the MMIO region; raw page access otherwise.
+        macro_rules! loadv {
+            ($pa:expr, $width:expr, $signed:expr) => {{
+                let pa = $pa;
+                let width: u64 = $width;
+                if hart.machine.is_some() && vane_riscv::machine::Machine::is_mmio(pa) {
+                    match hart.machine.as_mut().unwrap().load(pa, width as u8, $signed) {
+                        Ok(v) => v,
+                        Err(t) => return Ok(StepOutcome::Next(hart.raise(t, pc))),
+                    }
+                } else if (pa & 0xFFFF) + width > 0x1_0000 {
+                    // Page-crossing access: the 64 KiB Mem pages are separate
+                    // allocations, so read byte-wise across the boundary.
+                    let mut v = 0u64;
+                    for i in 0..width {
+                        v |= (mem.read_byte(pa.wrapping_add(i)) as u64) << (8 * i);
+                    }
+                    if $signed {
+                        match width {
+                            1 => v as u8 as i8 as i64 as u64,
+                            2 => v as u16 as i16 as i64 as u64,
+                            4 => v as u32 as i32 as i64 as u64,
+                            _ => v,
+                        }
+                    } else {
+                        v
+                    }
+                } else {
+                    let ptr = mem.get_page(pa);
+                    match (width, $signed) {
+                        (1, true) => (unsafe { *(ptr as *mut i8) }) as i64 as u64,
+                        (1, false) => (unsafe { *(ptr as *mut u8) }) as u64,
+                        (2, true) => (unsafe { (ptr as *mut i16).read_unaligned() }) as i64 as u64,
+                        (2, false) => (unsafe { (ptr as *mut u16).read_unaligned() }) as u64,
+                        (4, true) => (unsafe { (ptr as *mut i32).read_unaligned() }) as i64 as u64,
+                        (4, false) => (unsafe { (ptr as *mut u32).read_unaligned() }) as u64,
+                        (8, _) => unsafe { (ptr as *mut u64).read_unaligned() },
+                        _ => unreachable!(),
+                    }
+                }
+            }};
+        }
+        macro_rules! storev {
+            ($pa:expr, $width:expr, $val:expr) => {{
+                let pa = $pa;
+                let width: u64 = $width;
+                let v = $val;
+                if hart.machine.is_some() && vane_riscv::machine::Machine::is_mmio(pa) {
+                    if let Err(t) = hart.machine.as_mut().unwrap().store(pa, width as u8, v) {
+                        return Ok(StepOutcome::Next(hart.raise(t, pc)));
+                    }
+                } else if (pa & 0xFFFF) + width > 0x1_0000 {
+                    // Page-crossing store: byte-wise across the boundary.
+                    for i in 0..width {
+                        mem.write_byte(pa.wrapping_add(i), (v >> (8 * i)) as u8);
+                    }
+                } else {
+                    let ptr = mem.get_page(pa);
+                    unsafe {
+                        match width {
+                            1 => *(ptr as *mut u8) = v as u8,
+                            2 => (ptr as *mut u16).write_unaligned(v as u16),
+                            4 => (ptr as *mut u32).write_unaligned(v as u32),
+                            8 => (ptr as *mut u64).write_unaligned(v),
+                            _ => unreachable!(),
+                        }
+                    }
                 }
             }};
         }
@@ -485,101 +614,69 @@ impl Reactor {
             Inst::Lb { offset, dest, base } => {
                 let va = reg!(base).wrapping_add_signed(offset.as_i64());
                 let pa = xlate!(va, Access::Load);
-                set_reg!(dest => match mem.get_page(pa){
-                    p => unsafe{
-                        *(p as *mut i8)
-                    }
-                } as i64 as u64);
+                set_reg!(dest => loadv!(pa, 1, true));
             }
             Inst::Lbu { offset, dest, base } => {
                 let va = reg!(base).wrapping_add_signed(offset.as_i64());
                 let pa = xlate!(va, Access::Load);
-                set_reg!(dest => match mem.get_page(pa){
-                    p => unsafe{
-                        *(p as *mut u8)
-                    }
-                } as u64);
+                set_reg!(dest => loadv!(pa, 1, false));
             }
             Inst::Lh { offset, dest, base } => {
                 let va = reg!(base).wrapping_add_signed(offset.as_i64());
                 let pa = xlate!(va, Access::Load);
-                set_reg!(dest => match mem.get_page(pa){
-                    p => unsafe{
-                        *(p as *mut i16)
-                    }
-                } as i64 as u64);
+                set_reg!(dest => loadv!(pa, 2, true));
             }
             Inst::Lhu { offset, dest, base } => {
                 let va = reg!(base).wrapping_add_signed(offset.as_i64());
                 let pa = xlate!(va, Access::Load);
-                set_reg!(dest => match mem.get_page(pa){
-                    p => unsafe{
-                        (p as *mut u16).read_unaligned()
-                    }
-                } as u64);
+                set_reg!(dest => loadv!(pa, 2, false));
             }
             Inst::Lw { offset, dest, base } => {
                 let va = reg!(base).wrapping_add_signed(offset.as_i64());
                 let pa = xlate!(va, Access::Load);
-                set_reg!(dest => match mem.get_page(pa){
-                    p => unsafe{
-                        (p as *mut i32).read_unaligned()
-                    }
-                } as i64 as u64);
+                set_reg!(dest => loadv!(pa, 4, true));
             }
             Inst::Lwu { offset, dest, base } => {
                 let va = reg!(base).wrapping_add_signed(offset.as_i64());
                 let pa = xlate!(va, Access::Load);
-                set_reg!(dest => match mem.get_page(pa){
-                    p => unsafe{
-                        (p as *mut u32).read_unaligned()
-                    }
-                } as u64);
+                set_reg!(dest => loadv!(pa, 4, false));
             }
             Inst::Ld { offset, dest, base } => {
                 let va = reg!(base).wrapping_add_signed(offset.as_i64());
                 let pa = xlate!(va, Access::Load);
-                set_reg!(dest => match mem.get_page(pa){
-                    p => unsafe{
-                        (p as *mut u64).read_unaligned()
-                    }
-                });
+                set_reg!(dest => loadv!(pa, 8, false));
             }
             //Stores
             Inst::Sb { offset, src, base } => {
                 let va = reg!(base).wrapping_add_signed(offset.as_i64());
                 let pa = xlate!(va, Access::Store);
-                let ptr = mem.get_page(pa);
-                unsafe {
-                    *(ptr as *mut u8) = (reg!(src) & 0xff) as u8;
-                }
+                storev!(pa, 1, reg!(src));
             }
             Inst::Sh { offset, src, base } => {
                 let va = reg!(base).wrapping_add_signed(offset.as_i64());
                 let pa = xlate!(va, Access::Store);
-                let ptr = mem.get_page(pa);
-                unsafe {
-                    (ptr as *mut u16).write_unaligned((reg!(src) & 0xffff) as u16);
-                }
+                storev!(pa, 2, reg!(src));
             }
             Inst::Sw { offset, src, base } => {
                 let va = reg!(base).wrapping_add_signed(offset.as_i64());
                 let pa = xlate!(va, Access::Store);
-                let ptr = mem.get_page(pa);
-                unsafe {
-                    (ptr as *mut u32).write_unaligned((reg!(src) & 0xffff_ffff) as u32);
-                }
+                storev!(pa, 4, reg!(src));
             }
             Inst::Sd { offset, src, base } => {
                 let va = reg!(base).wrapping_add_signed(offset.as_i64());
                 let pa = xlate!(va, Access::Store);
-                let ptr = mem.get_page(pa);
-                unsafe {
-                    (ptr as *mut u64).write_unaligned(reg!(src));
-                }
+                storev!(pa, 8, reg!(src));
             }
             //Fence
             Inst::Fence { fence: _ } => {}
+            Inst::FenceI => {
+                // No icache to flush; per the trace-invalidation contract
+                // (PLAN_LINUX_WASM.md §9), just mark code dirty — the trace
+                // cache revalidates once on the next dispatch.
+                if hart_enabled {
+                    *code_dirty = true;
+                }
+            }
             //Wide
             //Immediates
             Inst::AddiW { imm, dest, src1 } => {
@@ -592,7 +689,7 @@ impl Reactor {
                 set_reg32!(dest => reg32!(src1) >> (imm.as_u32() % 32));
             }
             Inst::SraiW { imm, dest, src1 } => {
-                set_reg32!(dest => ((reg32!(src1) as i64) >> (imm.as_u32() % 32)) as u32);
+                set_reg32!(dest => ((reg32!(src1) as i32) >> (imm.as_u32() % 32)) as u32);
             }
             //Regs
             Inst::AddW { src2, dest, src1 } => {
@@ -605,7 +702,7 @@ impl Reactor {
                 set_reg32!(dest => reg32!(src1) >> ((reg32!(src2) & 0xffff_ffff) % 32));
             }
             Inst::SraW { src2, dest, src1 } => {
-                set_reg32!(dest => ((reg32!(src1) as i64) >> ((reg32!(src2) & 0xffff_ffff) % 32)) as u32);
+                set_reg32!(dest => ((reg32!(src1) as i32) >> ((reg32!(src2) & 0xffff_ffff) % 32)) as u32);
             }
             Inst::SubW { src2, dest, src1 } => {
                 set_reg32!(dest => reg32!(src1).wrapping_sub(reg32!(src2)));
@@ -629,6 +726,125 @@ impl Reactor {
             Inst::RemuW { src2, dest, src1 } => {
                 let (a, b) = (reg32!(src1), reg32!(src2));
                 set_reg32!(dest => if b == 0 { a } else { a % b });
+            }
+            //Atomics (A extension)
+            Inst::LrW { dest, addr, .. } => {
+                let va = reg!(addr);
+                let pa = xlate!(va, Access::Load);
+                if pa % 4 != 0 {
+                    let t = Trap::exception(CAUSE_MISALIGNED_LOAD, va);
+                    return Ok(StepOutcome::Next(hart.raise(t, pc)));
+                }
+                if hart.machine.is_some() && vane_riscv::machine::Machine::is_mmio(pa) {
+                    let t = Trap::exception(CAUSE_LOAD_ACCESS, va);
+                    return Ok(StepOutcome::Next(hart.raise(t, pc)));
+                }
+                hart.reservation = Some(pa);
+                set_reg!(dest => loadv!(pa, 4, true));
+            }
+            Inst::ScW { dest, addr, src, .. } => {
+                let va = reg!(addr);
+                let pa = xlate!(va, Access::Store);
+                if pa % 4 != 0 {
+                    let t = Trap::exception(CAUSE_MISALIGNED_STORE, va);
+                    return Ok(StepOutcome::Next(hart.raise(t, pc)));
+                }
+                if hart.machine.is_some() && vane_riscv::machine::Machine::is_mmio(pa) {
+                    let t = Trap::exception(CAUSE_STORE_ACCESS, va);
+                    return Ok(StepOutcome::Next(hart.raise(t, pc)));
+                }
+                let ok = hart.reservation == Some(pa);
+                hart.reservation = None;
+                if ok {
+                    storev!(pa, 4, reg!(src));
+                }
+                set_reg!(dest => if ok { 0 } else { 1 });
+            }
+            Inst::AmoW { op, dest, addr, src, .. } => {
+                let va = reg!(addr);
+                let pa = xlate!(va, Access::Store);
+                if pa % 4 != 0 {
+                    let t = Trap::exception(CAUSE_MISALIGNED_STORE, va);
+                    return Ok(StepOutcome::Next(hart.raise(t, pc)));
+                }
+                if hart.machine.is_some() && vane_riscv::machine::Machine::is_mmio(pa) {
+                    let t = Trap::exception(CAUSE_STORE_ACCESS, va);
+                    return Ok(StepOutcome::Next(hart.raise(t, pc)));
+                }
+                let old = loadv!(pa, 4, false) as u32;
+                let srcv = reg!(src) as u32;
+                let new = match op {
+                    rv_asm::AmoOp::Swap => srcv,
+                    rv_asm::AmoOp::Add => old.wrapping_add(srcv),
+                    rv_asm::AmoOp::Xor => old ^ srcv,
+                    rv_asm::AmoOp::And => old & srcv,
+                    rv_asm::AmoOp::Or => old | srcv,
+                    rv_asm::AmoOp::Min => (old as i32).min(srcv as i32) as u32,
+                    rv_asm::AmoOp::Max => (old as i32).max(srcv as i32) as u32,
+                    rv_asm::AmoOp::Minu => old.min(srcv),
+                    rv_asm::AmoOp::Maxu => old.max(srcv),
+                };
+                storev!(pa, 4, new as u64);
+                set_reg!(dest => old as i32 as i64 as u64);
+            }
+            Inst::LrD { dest, addr, .. } => {
+                let va = reg!(addr);
+                let pa = xlate!(va, Access::Load);
+                if pa % 8 != 0 {
+                    let t = Trap::exception(CAUSE_MISALIGNED_LOAD, va);
+                    return Ok(StepOutcome::Next(hart.raise(t, pc)));
+                }
+                if hart.machine.is_some() && vane_riscv::machine::Machine::is_mmio(pa) {
+                    let t = Trap::exception(CAUSE_LOAD_ACCESS, va);
+                    return Ok(StepOutcome::Next(hart.raise(t, pc)));
+                }
+                hart.reservation = Some(pa);
+                set_reg!(dest => loadv!(pa, 8, false));
+            }
+            Inst::ScD { dest, addr, src, .. } => {
+                let va = reg!(addr);
+                let pa = xlate!(va, Access::Store);
+                if pa % 8 != 0 {
+                    let t = Trap::exception(CAUSE_MISALIGNED_STORE, va);
+                    return Ok(StepOutcome::Next(hart.raise(t, pc)));
+                }
+                if hart.machine.is_some() && vane_riscv::machine::Machine::is_mmio(pa) {
+                    let t = Trap::exception(CAUSE_STORE_ACCESS, va);
+                    return Ok(StepOutcome::Next(hart.raise(t, pc)));
+                }
+                let ok = hart.reservation == Some(pa);
+                hart.reservation = None;
+                if ok {
+                    storev!(pa, 8, reg!(src));
+                }
+                set_reg!(dest => if ok { 0 } else { 1 });
+            }
+            Inst::AmoD { op, dest, addr, src, .. } => {
+                let va = reg!(addr);
+                let pa = xlate!(va, Access::Store);
+                if pa % 8 != 0 {
+                    let t = Trap::exception(CAUSE_MISALIGNED_STORE, va);
+                    return Ok(StepOutcome::Next(hart.raise(t, pc)));
+                }
+                if hart.machine.is_some() && vane_riscv::machine::Machine::is_mmio(pa) {
+                    let t = Trap::exception(CAUSE_STORE_ACCESS, va);
+                    return Ok(StepOutcome::Next(hart.raise(t, pc)));
+                }
+                let old = loadv!(pa, 8, false);
+                let srcv = reg!(src);
+                let new = match op {
+                    rv_asm::AmoOp::Swap => srcv,
+                    rv_asm::AmoOp::Add => old.wrapping_add(srcv),
+                    rv_asm::AmoOp::Xor => old ^ srcv,
+                    rv_asm::AmoOp::And => old & srcv,
+                    rv_asm::AmoOp::Or => old | srcv,
+                    rv_asm::AmoOp::Min => (old as i64).min(srcv as i64) as u64,
+                    rv_asm::AmoOp::Max => (old as i64).max(srcv as i64) as u64,
+                    rv_asm::AmoOp::Minu => old.min(srcv),
+                    rv_asm::AmoOp::Maxu => old.max(srcv),
+                };
+                storev!(pa, 8, new);
+                set_reg!(dest => old);
             }
             //Environment
             Inst::Ecall => {
@@ -702,8 +918,7 @@ impl Reactor {
                 }
                 // Implemented as a NOP (the spec explicitly allows this);
                 // interrupts are checked at every step anyway.
-                if hart.priv_mode < PrivMode::M
-                    && hart.mstatus & vane_riscv::hart::MSTATUS_TW != 0
+                if hart.priv_mode < PrivMode::M && hart.mstatus & vane_riscv::hart::MSTATUS_TW != 0
                 {
                     let t = Trap::exception(CAUSE_ILLEGAL, code as u64);
                     return Ok(StepOutcome::Next(hart.raise(t, pc)));
@@ -723,8 +938,74 @@ impl Reactor {
                 }
                 hart.sfence_vma(reg!(addr), reg!(asid));
             }
-            _ => {
-                illegal_or_unsupported!(i);
+            // ── F/D extension (privileged mode only; the JS JIT handles FP
+            // in legacy mode via StackOp) ──
+            Inst::Flw { offset, dest, base } => {
+                if !hart_enabled {
+                    illegal_or_unsupported!(i);
+                }
+                if hart.mstatus & MSTATUS_FS == 0 {
+                    let t = Trap::exception(CAUSE_ILLEGAL, code as u64);
+                    return Ok(StepOutcome::Next(hart.raise(t, pc)));
+                }
+                let va = reg!(base).wrapping_add_signed(offset.as_i64());
+                let pa = xlate!(va, Access::Load);
+                let v = { loadv!(pa, 4, false) as u32 };
+                hart.write_f32(dest, f32::from_bits(v));
+            }
+            Inst::Fld { offset, dest, base } => {
+                if !hart_enabled {
+                    illegal_or_unsupported!(i);
+                }
+                if hart.mstatus & MSTATUS_FS == 0 {
+                    let t = Trap::exception(CAUSE_ILLEGAL, code as u64);
+                    return Ok(StepOutcome::Next(hart.raise(t, pc)));
+                }
+                let va = reg!(base).wrapping_add_signed(offset.as_i64());
+                let pa = xlate!(va, Access::Load);
+                let v = loadv!(pa, 8, false);
+                hart.write_f64(dest, f64::from_bits(v));
+            }
+            Inst::Fsw { offset, src, base } => {
+                if !hart_enabled {
+                    illegal_or_unsupported!(i);
+                }
+                if hart.mstatus & MSTATUS_FS == 0 {
+                    let t = Trap::exception(CAUSE_ILLEGAL, code as u64);
+                    return Ok(StepOutcome::Next(hart.raise(t, pc)));
+                }
+                let va = reg!(base).wrapping_add_signed(offset.as_i64());
+                let pa = xlate!(va, Access::Store);
+                storev!(pa, 4, hart.fregs[src.0 as usize] & 0xffff_ffff);
+            }
+            Inst::Fsd { offset, src, base } => {
+                if !hart_enabled {
+                    illegal_or_unsupported!(i);
+                }
+                if hart.mstatus & MSTATUS_FS == 0 {
+                    let t = Trap::exception(CAUSE_ILLEGAL, code as u64);
+                    return Ok(StepOutcome::Next(hart.raise(t, pc)));
+                }
+                let va = reg!(base).wrapping_add_signed(offset.as_i64());
+                let pa = xlate!(va, Access::Store);
+                storev!(pa, 8, hart.fregs[src.0 as usize]);
+            }
+            inst => {
+                if !hart_enabled {
+                    illegal_or_unsupported!(inst);
+                }
+                // FS gate: F/D instructions trap illegal when FP is off.
+                if hart.mstatus & MSTATUS_FS == 0 {
+                    let t = Trap::exception(CAUSE_ILLEGAL, code as u64);
+                    return Ok(StepOutcome::Next(hart.raise(t, pc)));
+                }
+                match vane_riscv::fp::exec_fp(hart, regs, &inst) {
+                    vane_riscv::fp::FpOutcome::NotFp => illegal_or_unsupported!(inst),
+                    vane_riscv::fp::FpOutcome::Done => {}
+                    vane_riscv::fp::FpOutcome::Writeback(rd, v) => {
+                        set_reg!(rd => v);
+                    }
+                }
             }
         }
         done!()
@@ -742,7 +1023,11 @@ impl Reactor {
             if !lock.hart.enabled {
                 return Ok(None);
             }
-            if !lock.hart.translation_active() {
+            // A live machine (devices) means every access may be MMIO —
+            // traces cannot capture device semantics, so step everything
+            // (same treatment as active Sv39 translation).
+            let force_step = lock.hart.machine.is_some() || lock.hart.translation_active();
+            if !force_step {
                 // Peek at the instruction; only privileged-class instructions
                 // need the stepper — everything else traces normally.
                 let code = unsafe { (lock.mem.get_page(pc) as *mut u32).read_unaligned() };
@@ -1080,23 +1365,43 @@ impl BrowserHost {
             .dyn_into::<js_sys::Function>()
             .map_err(|_| -os_unix_emulation::ENOSYS)?;
         let array = js_sys::Array::new();
-        for arg in args { array.push(arg); }
-        let value = method.apply(&self.host_api, &array).map_err(|_| -os_unix_emulation::EIO)?;
-        JsFuture::from(js_sys::Promise::resolve(&value)).await.map_err(|_| -os_unix_emulation::EIO)
+        for arg in args {
+            array.push(arg);
+        }
+        let value = method
+            .apply(&self.host_api, &array)
+            .map_err(|_| -os_unix_emulation::EIO)?;
+        JsFuture::from(js_sys::Promise::resolve(&value))
+            .await
+            .map_err(|_| -os_unix_emulation::EIO)
     }
 
     async fn call(&self, name: &str, args: &[JsValue]) -> i64 {
-        self.call_value(name, args).await.ok()
+        self.call_value(name, args)
+            .await
+            .ok()
             .and_then(|value| value.as_f64())
             .map(|value| value as i64)
             .unwrap_or(-os_unix_emulation::ENOSYS)
     }
 
-    async fn stat_call(&self, name: &str, args: &[JsValue], stat: &mut os_unix_emulation::LinuxRv64Stat) -> i64 {
-        let value = match self.call_value(name, args).await { Ok(value) => value, Err(errno) => return errno };
-        if let Some(errno) = value.as_f64() { return errno as i64; }
+    async fn stat_call(
+        &self,
+        name: &str,
+        args: &[JsValue],
+        stat: &mut os_unix_emulation::LinuxRv64Stat,
+    ) -> i64 {
+        let value = match self.call_value(name, args).await {
+            Ok(value) => value,
+            Err(errno) => return errno,
+        };
+        if let Some(errno) = value.as_f64() {
+            return errno as i64;
+        }
         let bytes = js_sys::Uint8Array::new(&value);
-        if bytes.length() != os_unix_emulation::LINUX_RV64_STAT_LEN as u32 { return -os_unix_emulation::EIO; }
+        if bytes.length() != os_unix_emulation::LINUX_RV64_STAT_LEN as u32 {
+            return -os_unix_emulation::EIO;
+        }
         bytes.copy_to(&mut stat.0);
         0
     }
@@ -1137,34 +1442,68 @@ impl os_unix_emulation::AsyncUnixHost for BrowserHost {
     }
 
     async fn openat(&mut self, dirfd: i32, path: &[u8], flags: u32, mode: u32) -> i64 {
-        let Ok(path) = core::str::from_utf8(path) else { return -os_unix_emulation::EINVAL; };
-        self.call("openat", &[
-            JsValue::from_f64(dirfd as f64), JsValue::from_str(path),
-            JsValue::from_f64(flags as f64), JsValue::from_f64(mode as f64),
-        ]).await
+        let Ok(path) = core::str::from_utf8(path) else {
+            return -os_unix_emulation::EINVAL;
+        };
+        self.call(
+            "openat",
+            &[
+                JsValue::from_f64(dirfd as f64),
+                JsValue::from_str(path),
+                JsValue::from_f64(flags as f64),
+                JsValue::from_f64(mode as f64),
+            ],
+        )
+        .await
     }
 
     async fn lseek(&mut self, fd: u32, offset: i64, whence: u32) -> i64 {
-        self.call("lseek", &[
-            JsValue::from_f64(fd as f64), js_sys::BigInt::from(offset).into(),
-            JsValue::from_f64(whence as f64),
-        ]).await
+        self.call(
+            "lseek",
+            &[
+                JsValue::from_f64(fd as f64),
+                js_sys::BigInt::from(offset).into(),
+                JsValue::from_f64(whence as f64),
+            ],
+        )
+        .await
     }
 
     async fn fstat(&mut self, fd: u32, stat: &mut os_unix_emulation::LinuxRv64Stat) -> i64 {
-        self.stat_call("fstat", &[JsValue::from_f64(fd as f64)], stat).await
+        self.stat_call("fstat", &[JsValue::from_f64(fd as f64)], stat)
+            .await
     }
 
-    async fn fstatat(&mut self, dirfd: i32, path: &[u8], flags: u32, stat: &mut os_unix_emulation::LinuxRv64Stat) -> i64 {
-        let Ok(path) = core::str::from_utf8(path) else { return -os_unix_emulation::EINVAL; };
-        self.stat_call("fstatat", &[
-            JsValue::from_f64(dirfd as f64), JsValue::from_str(path), JsValue::from_f64(flags as f64),
-        ], stat).await
+    async fn fstatat(
+        &mut self,
+        dirfd: i32,
+        path: &[u8],
+        flags: u32,
+        stat: &mut os_unix_emulation::LinuxRv64Stat,
+    ) -> i64 {
+        let Ok(path) = core::str::from_utf8(path) else {
+            return -os_unix_emulation::EINVAL;
+        };
+        self.stat_call(
+            "fstatat",
+            &[
+                JsValue::from_f64(dirfd as f64),
+                JsValue::from_str(path),
+                JsValue::from_f64(flags as f64),
+            ],
+            stat,
+        )
+        .await
     }
 
     async fn getdents64(&mut self, fd: u32, bytes: &mut [u8]) -> i64 {
         let view = js_sys::Uint8Array::new_with_length(bytes.len() as u32);
-        let result = self.call("getdents64", &[JsValue::from_f64(fd as f64), JsValue::from(view.clone())]).await;
+        let result = self
+            .call(
+                "getdents64",
+                &[JsValue::from_f64(fd as f64), JsValue::from(view.clone())],
+            )
+            .await;
         if result > 0 {
             let count = core::cmp::min(result as usize, bytes.len());
             view.copy_to(&mut bytes[..count]);

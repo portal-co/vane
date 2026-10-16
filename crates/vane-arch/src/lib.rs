@@ -16,11 +16,11 @@ macro_rules! gen_block {
 }
 
 use alloc::{boxed::Box, collections::btree_map::BTreeMap};
-use os_page::GuestMemory as _;
 #[doc(hidden)]
 pub use core;
 use core::fmt::Display;
 use core::fmt::Formatter;
+use os_page::GuestMemory as _;
 #[doc(hidden)]
 pub use paste;
 pub use vane_target_core::{FloatBinOp, FloatUnaryOp, FloatWidth, MemWidth, StackOp, StateSlot};
@@ -51,12 +51,13 @@ pub use template::{
 /// Paging mode selector
 ///
 /// Determines which paging system to use for memory translation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PagingMode {
     /// Use the legacy on-demand page allocation system (default)
     /// - 64KB pages stored in BTreeMap
     /// - Automatic page allocation on access
     /// - Best for sparse address spaces
+    #[default]
     Legacy,
 
     /// Use the shared page table system
@@ -73,12 +74,6 @@ pub enum PagingMode {
     /// - Page table accessed via legacy get_page()
     /// - Allows controlled memory mapping within virtual space
     Both,
-}
-
-impl Default for PagingMode {
-    fn default() -> Self {
-        PagingMode::Legacy
-    }
 }
 
 /// Memory manager with dual paging support

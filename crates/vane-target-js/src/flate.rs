@@ -9,7 +9,7 @@ pub trait Flate {
 pub struct DebugFlate {}
 impl Flate for DebugFlate {
     fn flate<'a>(&'a self, a: &'a str) -> Arc<dyn Display + 'a> {
-        return Arc::new(a);
+        Arc::new(a)
     }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -54,7 +54,9 @@ pub const CAUSE_FETCH_ACCESS: u64 = 1;
 pub const CAUSE_ILLEGAL: u64 = 2;
 pub const CAUSE_BREAKPOINT: u64 = 3;
 pub const CAUSE_MISALIGNED_LOAD: u64 = 4;
+pub const CAUSE_LOAD_ACCESS: u64 = 5;
 pub const CAUSE_MISALIGNED_STORE: u64 = 6;
+pub const CAUSE_STORE_ACCESS: u64 = 7;
 pub const CAUSE_ECALL_U: u64 = 8;
 pub const CAUSE_ECALL_S: u64 = 9;
 pub const CAUSE_ECALL_M: u64 = 11;
@@ -222,6 +224,34 @@ pub struct HartState {
     pub minstret: u64,
 
     tlb: BTreeMap<(u64, u64), TlbEntry>,
+
+    /// LR/SC reservation: the physical address of the outstanding
+    /// load-reserved (single-hart model). Cleared by trap entry and SC.
+    pub reservation: Option<u64>,
+
+    /// Floating-point register file (raw bits; F32 values NaN-boxed) and
+    /// fcsr (fflags in bits 0-4, frm in bits 5-7).
+    pub fregs: [u64; 32],
+    pub fcsr: u64,
+
+    /// Internal always-advancing instruction-time counter (not a CSR, not
+    /// affected by mcountinhibit) — drives the machine's virtual mtime.
+    /// Driving mtime from `minstret` breaks when firmware masks the counter
+    /// (OpenSBI does), freezing time and starving the guest's timer.
+    pub itime: u64,
+
+    /// Decode memoization: a direct-mapped cache from instruction word to
+    /// decoded instruction. The mapping is a pure function of the word, so
+    /// entries never need invalidation (self-modifying code writes a
+    /// *different* word). Saves the decode match on hot loops.
+    pub decode_cache: [Option<(u32, rv_asm::Inst, rv_asm::IsCompressed)>; 1024],
+
+    /// The machine (devices) attached to this hart, or None for pure-RAM
+    /// operation (legacy userspace emulation). When present, physical
+    /// accesses below [`crate::machine::RAM_BASE`] route to devices and the
+    /// trace engine steps every instruction instead of tracing (device
+    /// semantics cannot be captured in precompiled traces).
+    pub machine: Option<crate::machine::Machine>,
 }
 
 impl Default for HartState {
@@ -257,6 +287,12 @@ impl Default for HartState {
             mcycle: 0,
             minstret: 0,
             tlb: BTreeMap::new(),
+            reservation: None,
+            fregs: [0; 32],
+            fcsr: 0,
+            itime: 0,
+            decode_cache: [const { None }; 1024],
+            machine: None,
         }
     }
 }
@@ -278,9 +314,7 @@ impl HartState {
     /// True when supervisor virtual memory translation applies to the
     /// current privilege mode.
     pub fn translation_active(&self) -> bool {
-        self.enabled
-            && self.priv_mode != PrivMode::M
-            && (self.satp >> 60) != SATP_MODE_BARE
+        self.enabled && self.priv_mode != PrivMode::M && (self.satp >> 60) != SATP_MODE_BARE
     }
 
     /// Check a pending, enabled, and appropriately-delegated interrupt.
@@ -302,19 +336,19 @@ impl HartState {
         // M-mode: interrupts not delegated to S are taken in M when the
         // current mode is below M or M's global enable is set.
         let m_pending = pending & !self.mideleg;
-        if m_pending != 0
-            && (self.priv_mode < PrivMode::M || self.mstatus & MSTATUS_MIE != 0)
-        {
+        if m_pending != 0 && (self.priv_mode < PrivMode::M || self.mstatus & MSTATUS_MIE != 0) {
             for (bit, cause) in ORDER {
                 if m_pending & bit != 0 {
                     return Some(cause);
                 }
             }
         }
-        // S-mode: delegated interrupts are taken in S when the current mode
-        // is below S or S's global enable is set.
+        // S-mode: delegated interrupts are taken in S only when the current
+        // mode is S or below (never in M — they pend until the next mret),
+        // and then only when below S or S's global enable is set.
         let s_pending = pending & self.mideleg;
-        if s_pending != 0
+        if self.priv_mode <= PrivMode::S
+            && s_pending != 0
             && (self.priv_mode < PrivMode::S || self.mstatus & MSTATUS_SIE != 0)
         {
             for (bit, cause) in ORDER {
@@ -329,6 +363,8 @@ impl HartState {
     /// Raise a trap, applying delegation. Returns the new pc (the trap
     /// vector address).
     pub fn raise(&mut self, trap: Trap, pc: u64) -> u64 {
+        // Trap entry clears the LR/SC reservation (spec requirement).
+        self.reservation = None;
         let cause_field = trap.cause | ((trap.interrupt as u64) << 63);
         let deleg = if trap.interrupt {
             self.mideleg
@@ -442,13 +478,7 @@ impl HartState {
     /// Execute a Zicsr operation. `value` is the rs1 (or zimm) operand;
     /// `write` is false for CSRRS/CSRRC with rs1 = x0 (no side effects).
     /// Returns the old CSR value, or an illegal-instruction trap.
-    pub fn csr_op(
-        &mut self,
-        op: CsrOp,
-        csr: u16,
-        value: u64,
-        write: bool,
-    ) -> Result<u64, Trap> {
+    pub fn csr_op(&mut self, op: CsrOp, csr: u16, value: u64, write: bool) -> Result<u64, Trap> {
         let illegal = || Trap::exception(CAUSE_ILLEGAL, 0);
         if !self.csr_privilege_ok(csr) {
             return Err(illegal());
@@ -476,6 +506,21 @@ impl HartState {
     }
 
     fn csr_read(&self, csr: u16) -> Option<u64> {
+        // FP CSRs are only accessible when mstatus.FS != 0.
+        if matches!(csr, 0x001..=0x003) && self.mstatus & MSTATUS_FS == 0 {
+            return None;
+        }
+        // Counter CSRs (cycle/time/instret) are gated by mcounteren when
+        // accessed below M, and additionally by scounteren from U.
+        if matches!(csr, 0xC00..=0xC02) {
+            let bit = 1u64 << (csr - 0xC00);
+            if self.priv_mode < PrivMode::M && self.mcounteren & bit == 0 {
+                return None;
+            }
+            if self.priv_mode == PrivMode::U && self.scounteren & bit == 0 {
+                return None;
+            }
+        }
         Some(match csr {
             0x300 => self.mstatus_read(),
             0x301 => MISA_VALUE,
@@ -494,36 +539,55 @@ impl HartState {
             0x34A => self.mtinst,
             0x34B => self.mtval2,
             0x747 => self.mseccfg,
-            0xF11 => 0,              // mvendorid
-            0xF12 => 0,              // marchid
-            0xF13 => 0,              // mimpid
-            0xF14 => 0,              // mhartid (single hart)
+            0xF11 => 0, // mvendorid
+            0xF12 => 0, // marchid
+            0xF13 => 0, // mimpid
+            0xF14 => 0, // mhartid (single hart)
             0x100 => self.sstatus_read(),
             0x104 => self.mie & self.mideleg, // sie
             0x105 => self.stvec,
             0x106 => self.scounteren,
-            0x10A => 0,              // senvcfg
+            0x10A => 0, // senvcfg
             0x140 => self.sscratch,
             0x141 => self.sepc,
             0x142 => self.scause,
             0x143 => self.stval,
             0x144 => self.mip & self.mideleg, // sip
             0x180 => self.satp,
-            0xC00 => self.mcycle,    // cycle
-            0xC01 => 0,              // time (RTC device lands in M4)
-            0xC02 => self.minstret,  // instret
-            0x3A0..=0x3AF if csr % 2 == 0 => {
-                self.pmpcfg[((csr - 0x3A0) / 2) as usize]
-            }
+            // cycle: with a machine attached, track mtime — the kernel
+            // mixes rdcycle and mtime in its clockevent math, so they must
+            // share a rate. Without a machine, mcycle counts instructions.
+            0xC00 => self
+                .machine
+                .as_ref()
+                .map(|m| m.aclint.mtime())
+                .unwrap_or(self.mcycle),
+            // time: the machine's ACLINT mtime (host-driven); 0 without a
+            // machine. Linux's rdtime-based calibration loops need this to
+            // advance.
+            0xC01 => self
+                .machine
+                .as_ref()
+                .map(|m| m.aclint.mtime())
+                .unwrap_or(0),
+            0xC02 => self.minstret, // instret
+            0x001 => self.fcsr & 0x1F,     // fflags
+            0x002 => (self.fcsr >> 5) & 7, // frm
+            0x003 => self.fcsr & 0xFF,     // fcsr
+            0x3A0..=0x3AF if csr.is_multiple_of(2) => self.pmpcfg[((csr - 0x3A0) / 2) as usize],
             0x3B0..=0x3EF => self.pmpaddr[(csr - 0x3B0) as usize],
             _ => return None,
         })
     }
 
     fn csr_write(&mut self, csr: u16, value: u64) -> Option<()> {
+        // FP CSRs are only accessible when mstatus.FS != 0.
+        if matches!(csr, 0x001..=0x003) && self.mstatus & MSTATUS_FS == 0 {
+            return None;
+        }
         match csr {
             0x300 => self.mstatus = value & MSTATUS_WMASK,
-            0x301 => {} // misa: WARL, ignore writes
+            0x301 => {}                                 // misa: WARL, ignore writes
             0x302 => self.medeleg = value & !(1 << 11), // ecall-from-M not delegatable
             0x303 => self.mideleg = value & IRQ_S,
             0x304 => self.mie = value & IRQ_ALL,
@@ -540,8 +604,7 @@ impl HartState {
             0x34B => self.mtval2 = value,
             0x747 => {} // mseccfg: we implement no PMP locks/ePMP; WARL zero
             0x100 => {
-                self.mstatus =
-                    (self.mstatus & !SSTATUS_MASK) | (value & SSTATUS_MASK);
+                self.mstatus = (self.mstatus & !SSTATUS_MASK) | (value & SSTATUS_MASK);
             }
             0x104 => {
                 // sie: S-writable bits of mie that are delegated to S
@@ -570,9 +633,12 @@ impl HartState {
                     self.satp = value;
                 }
             }
+            0x001 => self.fcsr = (self.fcsr & !0x1F) | (value & 0x1F),
+            0x002 => self.fcsr = (self.fcsr & !0xE0) | ((value & 7) << 5),
+            0x003 => self.fcsr = value & 0xFF,
             0xC00 => self.mcycle = value,
             0xC02 => self.minstret = value,
-            0x3A0..=0x3AF if csr % 2 == 0 => {
+            0x3A0..=0x3AF if csr.is_multiple_of(2) => {
                 self.pmpcfg[((csr - 0x3A0) / 2) as usize] = value;
             }
             0x3B0..=0x3EF => {
@@ -581,6 +647,34 @@ impl HartState {
             _ => return None,
         }
         Some(())
+    }
+
+    /// Per-step refresh of device-driven interrupt lines (no host IO).
+    /// Runs in `step_one` before the pending-interrupt check.
+    pub fn machine_step_irqs(&mut self) {
+        if let Some(m) = self.machine.as_mut() {
+            // Virtual time: mtime tracks retired instructions (100ns per
+            // instruction — a nominal 10 MHz timebase at 10 Minstr/s).
+            // Real-time clocks race ahead of a slow interpreter and turn
+            // the kernel's timer into an interrupt storm; virtual time
+            // keeps the guest self-consistent regardless of host speed.
+            m.aclint.time_nanos = self.itime.saturating_mul(100);
+            let (set, clear) = m.step_irqs();
+            self.mip = (self.mip | set) & !clear;
+        }
+    }
+
+    /// Host tick for the machine (devices): drive time, feed UART RX,
+    /// fold device-driven interrupt lines into `mip`. Returns a power
+    /// action if the syscon fired.
+    pub fn machine_tick(
+        &mut self,
+        rx: &[u8],
+    ) -> Option<crate::machine::PowerAction> {
+        let m = self.machine.as_mut()?;
+        let (set, clear) = m.tick(rx);
+        self.mip = (self.mip | set) & !clear;
+        m.syscon.power
     }
 
     // ── Sv39 translation ──────────────────────────────────────────────────
@@ -611,7 +705,12 @@ impl HartState {
     }
 
     fn tlb_permits(&self, flags: u8, access: Access) -> bool {
-        let (r, w, x, u) = (flags & 1 != 0, flags & 2 != 0, flags & 4 != 0, flags & 8 != 0);
+        let (r, w, x, u) = (
+            flags & 1 != 0,
+            flags & 2 != 0,
+            flags & 4 != 0,
+            flags & 8 != 0,
+        );
         let mxr = self.mstatus & MSTATUS_MXR != 0;
         let sum = self.mstatus & MSTATUS_SUM != 0;
         match self.priv_mode {

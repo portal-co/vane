@@ -1,15 +1,18 @@
-//! `vane-cli` — self-driving vane host (M0 of PLAN_LINUX_WASM.md).
+//! `vane-cli` — self-driving vane host.
 //!
-//! Loads a statically linked RV64 ELF and runs it under the interpreter
-//! (`Reactor::interp_core` — no JS engine, no runtime codegen), bridging a
-//! minimal Linux-userspace syscall set to stdio:
+//! Two modes:
 //!
-//! - `write(64)`  fd 1/2 → host stdout
-//! - `read(63)`   → EOF (0) for now
-//! - `exit(93)` / `exit_group(94)` → stop, propagate the exit code
-//! - everything else → `-ENOSYS`
+//! - **Userspace-shim mode (default)**: load a static RV64 ELF and bridge a
+//!   minimal Linux syscall set (write/read/exit) to stdio. Used by the M0
+//!   gate.
+//! - **Machine mode (`--hart --machine`)**: boot with the privileged
+//!   architecture and the QEMU-virt device model (UART/ACLINT/PLIC/syscon).
+//!   Optionally boots OpenSBI + a Linux Image + initrd + generated DTB.
 //!
-//! Usage: `vane-cli --elf <path> [--entry 0xADDR] [--max-insns N]`
+//! Usage:
+//!   vane-cli --elf <payload.elf> [--hart] [--tohost 0xADDR]
+//!   vane-cli --machine --opensbi fw_jump.bin --kernel Image [--initrd INITRD]
+//!            [--append "console=ttyS0 ..."] [--ram-size 128MiB]
 
 mod elf;
 
@@ -29,7 +32,7 @@ impl HostIo for StdioHost {
 }
 
 struct Args {
-    elf_path: String,
+    elf_path: Option<String>,
     entry: Option<u64>,
     max_insns: Option<u64>,
     /// Enable the privileged architecture (M3): boot in M-mode with the
@@ -40,7 +43,29 @@ struct Args {
     /// interpreter rounds; a nonzero value with bit 0 set ends the run with
     /// exit code `value >> 1`.
     tohost: Option<u64>,
+    /// Attach the QEMU-virt machine (M4).
+    machine: bool,
+    /// OpenSBI firmware binary (flat, loaded at 0x8000_0000).
+    opensbi: Option<String>,
+    /// Kernel image (flat or ELF, loaded at 0x8020_0000).
+    kernel: Option<String>,
+    /// initrd (cpio archive, loaded at 0x8400_0000).
+    initrd: Option<String>,
+    /// Kernel command line for the DTB's /chosen/bootargs.
+    append: Option<String>,
+    /// RAM size in bytes (decimal or 0x-hex).
+    ram_size: u64,
+    /// Bytes to inject into the machine UART's RX queue at boot (test
+    /// payloads read them via the emulated 16550).
+    uart_rx: Option<Vec<u8>>,
 }
+
+const RAM_BASE: u64 = 0x8000_0000;
+/// fw_dynamic_info structure address (QEMU convention: a2 points here).
+const FW_DYNAMIC_INFO_ADDR: u64 = 0x87E0_0000;
+const KERNEL_ADDR: u64 = 0x8020_0000;
+const INITRD_ADDR: u64 = 0x8400_0000;
+const DTB_ADDR: u64 = 0x87F0_0000;
 
 fn parse_args() -> Result<Args, String> {
     let mut elf_path = None;
@@ -48,6 +73,13 @@ fn parse_args() -> Result<Args, String> {
     let mut max_insns = None;
     let mut hart = false;
     let mut tohost = None;
+    let mut machine = false;
+    let mut opensbi = None;
+    let mut kernel = None;
+    let mut initrd = None;
+    let mut append = None;
+    let mut ram_size = 128 * 1024 * 1024; // 128 MiB bring-up default
+    let mut uart_rx: Option<Vec<u8>> = None;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -62,21 +94,69 @@ fn parse_args() -> Result<Args, String> {
                 max_insns = Some(v.parse().map_err(|e| format!("--max-insns: {e}"))?);
             }
             "--hart" => hart = true,
+            "--machine" => machine = true,
             "--tohost" => {
                 let v = it.next().ok_or("--tohost needs a value")?;
                 let v = v.strip_prefix("0x").unwrap_or(&v);
                 tohost = Some(u64::from_str_radix(v, 16).map_err(|e| format!("--tohost: {e}"))?);
             }
+            "--opensbi" => opensbi = Some(it.next().ok_or("--opensbi needs a value")?),
+            "--kernel" => kernel = Some(it.next().ok_or("--kernel needs a value")?),
+            "--initrd" => initrd = Some(it.next().ok_or("--initrd needs a value")?),
+            "--append" => append = Some(it.next().ok_or("--append needs a value")?),
+            "--uart-rx" => {
+                let v = it.next().ok_or("--uart-rx needs a value")?;
+                uart_rx = Some(v.into_bytes());
+            }
+            "--ram-size" => {
+                let v = it.next().ok_or("--ram-size needs a value")?;
+                ram_size = if let Some(h) = v.strip_prefix("0x") {
+                    u64::from_str_radix(h, 16).map_err(|e| format!("--ram-size: {e}"))?
+                } else {
+                    v.parse().map_err(|e| format!("--ram-size: {e}"))?
+                };
+            }
             other => return Err(format!("unknown argument: {other}")),
         }
     }
     Ok(Args {
-        elf_path: elf_path.ok_or("missing required --elf <path>")?,
+        elf_path,
         entry,
         max_insns,
         hart,
         tohost,
+        machine,
+        opensbi,
+        kernel,
+        initrd,
+        append,
+        ram_size,
+        uart_rx,
     })
+}
+
+/// Load a binary image at `addr`; if it parses as ELF64, honor its segments
+/// and return its entry point. Returns the entry pc.
+fn load_image(reactor: &Reactor, path: &str, flat_addr: u64) -> u64 {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("vane-cli: cannot read {path}: {e}");
+            std::process::exit(2);
+        }
+    };
+    match elf::load(reactor, &bytes) {
+        Ok(entry) => {
+            eprintln!("vane-cli: {path}: ELF, entry {entry:#x}");
+            entry
+        }
+        Err(_) => {
+            // Flat binary at the fixed address.
+            reactor.write_bytes(flat_addr, &bytes);
+            eprintln!("vane-cli: {path}: flat, {} bytes at {flat_addr:#x}", bytes.len());
+            flat_addr
+        }
+    }
 }
 
 fn main() {
@@ -84,38 +164,122 @@ fn main() {
         Ok(a) => a,
         Err(e) => {
             eprintln!("vane-cli: {e}");
-            eprintln!("usage: vane-cli --elf <path> [--entry 0xADDR] [--max-insns N]");
-            std::process::exit(2);
-        }
-    };
-    let bytes = match std::fs::read(&args.elf_path) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("vane-cli: cannot read {}: {e}", args.elf_path);
+            eprintln!("usage: vane-cli --elf <path> [--hart] [--tohost 0xADDR] | --machine --opensbi F --kernel K [--initrd I] [--append CMDLINE]");
             std::process::exit(2);
         }
     };
     let reactor = Reactor::new();
-    let entry = match elf::load(&reactor, &bytes) {
-        Ok(e) => args.entry.unwrap_or(e),
-        Err(e) => {
-            eprintln!("vane-cli: {}: {e}", args.elf_path);
-            std::process::exit(2);
+
+    let entry;
+    if args.machine {
+        // Machine mode: devices + privileged architecture.
+        reactor.set_hart_enabled(true);
+        reactor.set_machine_enabled(true);
+        if let Some(rx) = &args.uart_rx {
+            reactor.with_machine(|m| m.uart.push_rx(rx));
         }
-    };
+
+        let mut next_addr = RAM_BASE;
+        if let Some(p) = &args.opensbi {
+            load_image(&reactor, p, RAM_BASE);
+            next_addr = KERNEL_ADDR;
+        }
+        if let Some(p) = &args.kernel {
+            load_image(&reactor, p, next_addr.max(KERNEL_ADDR));
+        }
+        let initrd_range = if let Some(p) = &args.initrd {
+            let bytes = std::fs::read(p).expect("initrd");
+            reactor.write_bytes(INITRD_ADDR, &bytes);
+            Some((INITRD_ADDR, INITRD_ADDR + bytes.len() as u64))
+        } else {
+            None
+        };
+        // fw_dynamic_info for OpenSBI's fw_dynamic firmware
+        // (https://github.com/riscv-software-src/opensbi include/fw_dynamic.h):
+        // magic "OSBI" (0x4942534F), version 2, next_addr/next_mode (1=S),
+        // options 0, boot_hart 0.
+        if args.opensbi.is_some() {
+            let kernel_entry = KERNEL_ADDR;
+            let info: [u64; 6] = [
+                0x4942_534F,
+                2,
+                kernel_entry,
+                1,
+                0,
+                0,
+            ];
+            let mut bytes = Vec::new();
+            for w in info {
+                bytes.extend_from_slice(&w.to_le_bytes());
+            }
+            reactor.write_bytes(FW_DYNAMIC_INFO_ADDR, &bytes);
+        }
+        let bootargs = args.append.as_deref().unwrap_or("console=ttyS0");
+        let dtb = vane::vane_riscv::machine::virt_dtb(args.ram_size, initrd_range, bootargs);
+        reactor.write_bytes(DTB_ADDR, &dtb);
+
+        // A bare-metal payload (ELF) may take the place of firmware+kernel
+        // (used by the machine-model gate).
+        entry = if let Some(p) = &args.elf_path {
+            let bytes = std::fs::read(p).expect("elf payload");
+            match elf::load(&reactor, &bytes) {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("vane-cli: {p}: {e}");
+                    std::process::exit(2);
+                }
+            }
+        } else {
+            RAM_BASE
+        };
+    } else {
+        // Payload mode: a single ELF.
+        let elf_path = match &args.elf_path {
+            Some(p) => p.clone(),
+            None => {
+                eprintln!("vane-cli: need --elf <path> (or --machine with --opensbi/--kernel)");
+                std::process::exit(2);
+            }
+        };
+        let bytes = match std::fs::read(&elf_path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("vane-cli: cannot read {elf_path}: {e}");
+                std::process::exit(2);
+            }
+        };
+        entry = match elf::load(&reactor, &bytes) {
+            Ok(e) => args.entry.unwrap_or(e),
+            Err(e) => {
+                eprintln!("vane-cli: {elf_path}: {e}");
+                std::process::exit(2);
+            }
+        };
+        if args.hart {
+            reactor.set_hart_enabled(true);
+        }
+    }
+
+    // Boot register state for machine mode: a0 = hartid, a1 = dtb.
+    let mut regs = [0u64; 32];
+    if args.machine {
+        regs[10] = 0; // hartid
+        regs[11] = DTB_ADDR;
+        regs[12] = FW_DYNAMIC_INFO_ADDR; // a2 for OpenSBI fw_dynamic
+    }
 
     let mut host = StdioHost;
     let mut exit_code: Option<u64> = None;
     let mut insns: u64 = 0;
-    let mut regs = [0u64; 32];
     let mut pc = entry;
 
-    if args.hart {
-        // Privileged mode: ecall traps in-guest; the payload reports
-        // completion through `tohost` (riscv-tests convention).
-        reactor.set_hart_enabled(true);
+    let fueled = args.hart || args.machine;
+    if fueled {
+        // Privileged/machine mode: ecall traps in-guest; completion is
+        // reported via tohost (payload tests) or the syscon (poweroff).
         const FUEL: u64 = 1_000_000;
         let mut total: u64 = 0;
+        let t0 = std::time::Instant::now();
         loop {
             let mut noop = async |_: &mut [u64; 32]| -> bool { false };
             let result = futures::executor::block_on(
@@ -129,12 +293,42 @@ fn main() {
                 }
             }
             total += FUEL;
-            if let Some(max) = args.max_insns {
-                if total >= max {
+
+            // Heartbeat for boot debugging: VANE_HEARTBEAT=1 prints
+            // pc/priv/mcause each round.
+            if std::env::var_os("VANE_HEARTBEAT").is_some() {
+                let (privm, mcause, mip) = reactor.with_hart(|h| (h.priv_mode, h.mcause, h.mip));
+                let (mtime, mtimecmp) = reactor
+                    .with_machine(|m| (m.aclint.mtime(), m.aclint.mtimecmp))
+                    .unwrap_or((0, 0));
+                eprintln!("[{total}M] pc={pc:#x} priv={privm:?} mcause={mcause:#x} mip={mip:#x} mtime={mtime} mtimecmp={mtimecmp:#x}");
+            }
+
+            // Device tick: real time, drain UART TX to stdout.
+            if args.machine {
+                let _ = t0;
+                let power = reactor.with_hart(|h| h.machine_tick(&[]));
+                if let Some(tx) = reactor.with_machine(|m| m.uart.drain_tx()) {
+                    for b in tx {
+                        host.uart_write(b);
+                    }
+                }
+                if let Some(p) = power {
+                    use vane::vane_riscv::machine::PowerAction;
+                    match p {
+                        PowerAction::PowerOff { code } => std::process::exit(code as i32),
+                        PowerAction::Reboot => {
+                            eprintln!("vane-cli: guest requested reboot; stopping");
+                            std::process::exit(0);
+                        }
+                    }
+                }
+            }
+            if let Some(max) = args.max_insns
+                && total >= max {
                     eprintln!("vane-cli: instruction cap reached ({max})");
                     std::process::exit(3);
                 }
-            }
             if let Some(tohost) = args.tohost {
                 let mut v = 0u64;
                 for i in 0..8 {
@@ -147,9 +341,7 @@ fn main() {
         }
     }
 
-    // The interpreter only yields at ecall boundaries, so the instruction
-    // cap is enforced between ecall-separated runs. Good enough for M0's
-    // "stub payload" gate; a fueled/stepping interpreter is M1 work.
+    // Legacy userspace-shim mode.
     loop {
         let mut on_ecall = async |regs: &mut [u64; 32]| -> bool {
             let nr = regs[17];

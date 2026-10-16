@@ -1,0 +1,5 @@
+# Large fetched artifacts (see README.md)
+/opensbi.bin
+/linux
+/initrd.gz
+/alpine-minirootfs-*.tar.gz
