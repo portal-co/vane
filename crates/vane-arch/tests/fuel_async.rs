@@ -40,7 +40,11 @@ fn spin_loop_yields_on_fuel() {
             pending_ecall: false,
             undo_log: Vec::new(),
             undo_mark: 0,
+            regs: [0; 32],
+            regs_dirty: false,
+            check_code_integrity: true,
         };
+        host.load_regs();
         // drive the async fn with a noop waker
         let w = std::task::Waker::noop();
         let mut cx = std::task::Context::from_waker(&w);

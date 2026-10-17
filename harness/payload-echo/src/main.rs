@@ -25,7 +25,11 @@ fn poweroff(code: u32) -> ! {
     unsafe {
         core::ptr::write_volatile(
             SYSCON as *mut u32,
-            if code == 0 { 0x5555 } else { (code << 16) | 0x3333 },
+            if code == 0 {
+                0x5555
+            } else {
+                (code << 16) | 0x3333
+            },
         )
     };
     loop {}

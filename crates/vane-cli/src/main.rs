@@ -384,7 +384,7 @@ fn main() {
                 let mut buf = [0u8; 256];
                 loop {
                     match stdin.read(&mut buf) {
-                        Ok(0) => break,        // EOF
+                        Ok(0) => break, // EOF
                         Ok(n) => {
                             for &b in &buf[..n] {
                                 if tx.send(b).is_err() {

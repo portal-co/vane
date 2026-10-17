@@ -1118,6 +1118,31 @@ impl Reactor {
     /// at `pc` is privileged-class, execute one instruction via
     /// [`Reactor::step_one`] and return the new pc. Returns `Ok(None)` when
     /// tracing `pc` is safe (hart disabled, or M/bare-mode ordinary code).
+    /// Deliver a pending interrupt, if any, diverting to the trap handler.
+    /// Cheap (no instruction peek): refreshes device lines and checks
+    /// mip/mie. Runs every trace dispatch even when the trace is cached —
+    /// the peek in [`privileged_step`](Self::privileged_step) is skipped for
+    /// cached traces, so this is the interrupt-delivery fast path.
+    pub fn deliver_pending_interrupt(&self, pc: u64) -> Result<Option<u64>, String> {
+        let mut guard = self.core.lock();
+        if !guard.hart.enabled {
+            return Ok(None);
+        }
+        guard.hart.machine_step_irqs();
+        if let Some(cause) = guard.hart.pending_interrupt() {
+            let npc = guard.hart.raise(
+                vane_riscv::hart::Trap {
+                    cause,
+                    tval: 0,
+                    interrupt: true,
+                },
+                pc,
+            );
+            return Ok(Some(npc));
+        }
+        Ok(None)
+    }
+
     pub fn privileged_step(&self, pc: u64, force: bool) -> Result<Option<u64>, String> {
         {
             let mut guard = self.core.lock();

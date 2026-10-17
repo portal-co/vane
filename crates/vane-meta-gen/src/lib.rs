@@ -111,6 +111,17 @@ macro_rules! vane_meta {
                     let r = (r % 32) as usize;
                     lock.regs[r] = if r == 0 { 0 } else { v };
                 }
+                // Bulk register access for the trace engine's register
+                // cache: one lock for the whole file instead of one per
+                // register operand (the hot-path win).
+                fn lr_load_all_regs(&self) -> [u64; 32] {
+                    self.core.lock().regs
+                }
+                fn lr_store_all_regs(&self, regs: &[u64; 32]) {
+                    let mut lock = self.core.lock();
+                    lock.regs = *regs;
+                    lock.regs[0] = 0; // x0 is hardwired to zero
+                }
                 fn lr_read_byte(&self, addr: u64) -> u8 {
                     // Fetch validation (CheckCode): translate as exec.
                     let mut lock = self.core.lock();
@@ -245,23 +256,38 @@ macro_rules! vane_meta {
                         &mut $crate::vane_arch::interp::LocalStackHost<Self>,
                     ) -> bool,
                 {
+                    // The register cache starts from the reactor's register
+                    // file; register ops in traces hit the cache (no lock).
+                    let initial_regs = $crate::vane_arch::interp::LocalReactor::lr_load_all_regs(self);
+                    let (test_mode0, hart_enabled0) = {
+                        let g = self.core.lock();
+                        (g.test_mode, g.hart.enabled)
+                    };
                     let mut host = $crate::vane_arch::interp::LocalStackHost {
                         reactor: self.clone(),
-                        test_mode: self.core.lock().test_mode,
+                        test_mode: test_mode0,
                         pc,
                         pending_ecall: false,
                         undo_log: $crate::alloc::vec::Vec::new(),
                         undo_mark: 0,
+                        regs: initial_regs,
+                        regs_dirty: false,
+                        // With the privileged hart active, the fence.i/satp
+                        // trace-invalidation contract covers self-modifying
+                        // code, so CheckCode need not re-read code bytes.
+                        check_code_integrity: !hart_enabled0,
                     };
                     loop {
                         if let Some(f) = &mut fuel {
                             if *f == 0 {
+                                host.flush_regs();
                                 return Ok(host.pc);
                             }
                             *f -= 1;
                         }
                         // A guest poweroff stops the run.
                         if self.core.lock().hart.power_pending() {
+                            host.flush_regs();
                             return Ok(host.pc);
                         }
                         // Fetch (or compile-and-cache) the trace for pc.
@@ -342,8 +368,12 @@ macro_rules! vane_meta {
                         // interrupts and step privileged instructions. This
                         // must happen at the *top* of the dispatch — doing it
                         // only at the TailCall would run a whole inlined
-                        // region before the interrupt is noticed.
+                        // region before the interrupt is noticed. The stepper
+                        // reads/writes the reactor's registers, so flush the
+                        // cache first; if it stepped, reload the cache.
+                        host.flush_regs();
                         if let Some(np) = $step(self, host.pc, false)? {
+                            host.load_regs();
                             host.pc = np;
                             continue;
                         }
@@ -367,12 +397,14 @@ macro_rules! vane_meta {
                                 if host.pending_ecall {
                                     host.pending_ecall = false;
                                     if on_ecall(&mut host).await {
+                                        host.flush_regs();
                                         self.core.lock().pc = host.pc;
                                         return Ok(host.pc);
                                     }
                                 }
                             }
                             $crate::vane_arch::interp::Exit::Trap(msg) => {
+                                host.flush_regs();
                                 self.core.lock().pc = host.pc;
                                 return Err(msg);
                             }
@@ -383,8 +415,15 @@ macro_rules! vane_meta {
                                 // re-run it through the stepper, which
                                 // raises the trap with correct state.
                                 host.undo_pending_inst();
+                                // Flush the undone cache so the forced
+                                // re-step sees the pre-instruction state,
+                                // then reload the cache from the result.
+                                host.flush_regs();
                                 match $step(self, fault_pc, true)? {
-                                    Some(np) => host.pc = np,
+                                    Some(np) => {
+                                        host.load_regs();
+                                        host.pc = np;
+                                    }
                                     None => host.pc = fault_pc,
                                 }
                             }

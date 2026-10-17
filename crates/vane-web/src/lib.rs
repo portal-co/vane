@@ -211,7 +211,8 @@ impl WebMachine {
         self.reactor.write_bytes(DTB_ADDR, &dtb);
 
         if self.reactor.swap_active() {
-            self.reactor.pin_swap_range(RAM_BASE, KERNEL_ADDR - RAM_BASE);
+            self.reactor
+                .pin_swap_range(RAM_BASE, KERNEL_ADDR - RAM_BASE);
             self.reactor
                 .pin_swap_range(KERNEL_ADDR, kernel.len() as u64);
             if let Some((s, e)) = initrd_range {
@@ -280,9 +281,8 @@ impl WebMachine {
         let mut done = false;
         let mut code = 0u32;
 
-        let mut noop = async |_: &mut vane::vane_riscv::interp::LocalStackHost<Reactor>| -> bool {
-            false
-        };
+        let mut noop =
+            async |_: &mut vane::vane_riscv::interp::LocalStackHost<Reactor>| -> bool { false };
         let result = self
             .reactor
             .trace_run_fueled(self.pc, &mut noop, Some(dispatches))
