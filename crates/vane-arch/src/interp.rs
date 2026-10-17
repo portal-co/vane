@@ -1090,7 +1090,66 @@ pub async fn interpret_async_fueled(
                 ip += 1;
             }
             StackOp::LoadReg(r) => {
-                val.push(if *r == 0 { 0 } else { host.load_reg(*r).await });
+                // Interpret-time superinstruction fusion (M7+): recognize
+                // common straight-line StackOp subsequences and run them as
+                // one step, skipping the value-stack round-trips. The fused
+                // ops use the same host.register/memory calls (preserving
+                // the register cache, undo log, and trap-atomic bail).
+                let a = *r;
+                let n1 = ops.get(ip + 1);
+                let n2 = ops.get(ip + 2);
+                let n3 = ops.get(ip + 3);
+                // LoadReg(a), LoadReg(b), <alu64>, StoreReg(d)
+                if let (Some(StackOp::LoadReg(b)), Some(alu), Some(StackOp::StoreReg(d))) =
+                    (n1, n2, n3)
+                {
+                    if let Some(f) = alu64_fn(alu) {
+                        let (x, y) = (host.load_reg(a).await, host.load_reg(*b).await);
+                        host.store_reg(*d, f(x, y)).await;
+                        ip += 4;
+                        continue;
+                    }
+                }
+                // LoadReg(a), PushImm(i), <alu64>, StoreReg(d)
+                if let (Some(StackOp::PushImm(i)), Some(alu), Some(StackOp::StoreReg(d))) =
+                    (n1, n2, n3)
+                {
+                    if let Some(f) = alu64_fn(alu) {
+                        let x = host.load_reg(a).await;
+                        host.store_reg(*d, f(x, *i)).await;
+                        ip += 4;
+                        continue;
+                    }
+                }
+                // LoadReg(b), PushImm(o), Add64, LoadMem{w,s}, StoreReg(d)
+                if let (
+                    Some(StackOp::PushImm(o)),
+                    Some(StackOp::Add64),
+                    Some(StackOp::LoadMem { width, signed }),
+                    Some(StackOp::StoreReg(d)),
+                ) = (n1, n2, n3, ops.get(ip + 4))
+                {
+                    let addr = host.load_reg(a).await.wrapping_add(*o);
+                    let v = host.load_mem(addr, *width, *signed).await;
+                    host.store_reg(*d, v).await;
+                    ip += 5;
+                    continue;
+                }
+                // LoadReg(b), PushImm(o), Add64, LoadReg(s), StoreMem{w}
+                if let (
+                    Some(StackOp::PushImm(o)),
+                    Some(StackOp::Add64),
+                    Some(StackOp::LoadReg(s)),
+                    Some(StackOp::StoreMem { width }),
+                ) = (n1, n2, n3, ops.get(ip + 4))
+                {
+                    let addr = host.load_reg(a).await.wrapping_add(*o);
+                    let v = host.load_reg(*s).await;
+                    host.store_mem(addr, *width, v).await;
+                    ip += 5;
+                    continue;
+                }
+                val.push(if a == 0 { 0 } else { host.load_reg(a).await });
                 ip += 1;
             }
             StackOp::StoreReg(r) => {
@@ -1452,6 +1511,34 @@ pub async fn interpret_async_fueled(
 
 fn sext32(v: u32) -> u64 {
     v as i32 as i64 as u64
+}
+
+/// Map a 64/32-bit integer ALU `StackOp` to its function, for interpret-time
+/// superinstruction fusion. Returns None for non-ALU ops. Semantics must
+/// match the interpreter arms exactly (operand order: x = first-pushed/deeper,
+/// y = second-pushed/top).
+fn alu64_fn(op: &StackOp) -> Option<fn(u64, u64) -> u64> {
+    Some(match op {
+        StackOp::Add64 => |x, y| x.wrapping_add(y),
+        StackOp::Sub64 => |x, y| x.wrapping_sub(y),
+        StackOp::Mul64 => |x, y| x.wrapping_mul(y),
+        StackOp::And64 => |x, y| x & y,
+        StackOp::Or64 => |x, y| x | y,
+        StackOp::Xor64 => |x, y| x ^ y,
+        StackOp::Shl64 => |x, y| x.wrapping_shl((y & 63) as u32),
+        StackOp::ShrU64 => |x, y| x.wrapping_shr((y & 63) as u32),
+        StackOp::ShrS64 => |x, y| ((x as i64).wrapping_shr((y & 63) as u32)) as u64,
+        StackOp::DivU64 => |x, y| if y == 0 { u64::MAX } else { x / y },
+        StackOp::DivS64 => |x, y| if y == 0 { u64::MAX } else { (x as i64).wrapping_div(y as i64) as u64 },
+        StackOp::RemU64 => |x, y| if y == 0 { x } else { x % y },
+        StackOp::RemS64 => |x, y| if y == 0 { x } else { (x as i64).wrapping_rem(y as i64) as u64 },
+        StackOp::MulHU64 => |x, y| ((x as u128 * y as u128) >> 64) as u64,
+        StackOp::MulHS64 => |x, y| (((x as i64 as i128) * (y as i64 as i128)) >> 64) as u64,
+        StackOp::MulHSU64 => |x, y| (((x as i64 as i128) * (y as u128 as i128)) >> 64) as u64,
+        StackOp::Add32 => |x, y| sext32((x as u32).wrapping_add(y as u32)),
+        StackOp::Sub32 => |x, y| sext32((x as u32).wrapping_sub(y as u32)),
+        _ => return None,
+    })
 }
 
 /// From an `IfBegin` at `idx`, find the index of its matching `IfElse`

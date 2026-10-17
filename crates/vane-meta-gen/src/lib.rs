@@ -303,11 +303,38 @@ macro_rules! vane_meta {
                                 lock.code_dirty = false;
                             }
                         }
-                        let ops = if let Some(ops) =
-                            self.core.lock().trace_cache.borrow().get(&pc).cloned()
-                        {
+                        // A cached trace is always non-privileged: privileged
+                        // instructions are stepped (below) and never compiled,
+                        // so a cache hit lets us skip the per-instruction peek
+                        // and only deliver pending interrupts (cheap).
+                        let cached_ops =
+                            self.core.lock().trace_cache.borrow().get(&pc).cloned();
+                        // Fresh undo log for this trace (trap atomicity).
+                        host.undo_log.clear();
+                        host.undo_mark = 0;
+                        // The stepper reads/writes the reactor's registers, so
+                        // flush the register cache first.
+                        host.flush_regs();
+                        let ops = if let Some(ops) = cached_ops {
+                            // Deliver any pending interrupt before running the
+                            // cached (non-privileged) trace — no peek needed.
+                            if let Some(np) = self.deliver_pending_interrupt(host.pc)? {
+                                host.load_regs();
+                                host.pc = np;
+                                continue;
+                            }
                             ops
                         } else {
+                            // Uncached pc: full privileged step (interrupts +
+                            // instruction peek). Privileged instructions step
+                            // here and are never compiled/cached.
+                            if let Some(np) = $step(self, host.pc, false)? {
+                                host.load_regs();
+                                host.pc = np;
+                                continue;
+                            }
+                            // Non-privileged: compile the trace and cache it.
+                            
                             let f = $flate;
                             let lock = self.core.lock();
                             let test_mode = lock.test_mode;
@@ -360,23 +387,8 @@ macro_rules! vane_meta {
                                 .borrow_mut()
                                 .insert(pc, ops.clone());
                             ops
+                        
                         };
-                        // Fresh undo log for this trace (trap atomicity).
-                        host.undo_log.clear();
-                        host.undo_mark = 0;
-                        // Before running the trace: deliver pending
-                        // interrupts and step privileged instructions. This
-                        // must happen at the *top* of the dispatch — doing it
-                        // only at the TailCall would run a whole inlined
-                        // region before the interrupt is noticed. The stepper
-                        // reads/writes the reactor's registers, so flush the
-                        // cache first; if it stepped, reload the cache.
-                        host.flush_regs();
-                        if let Some(np) = $step(self, host.pc, false)? {
-                            host.load_regs();
-                            host.pc = np;
-                            continue;
-                        }
                         let pc = host.pc;
                         let exit = {
                             // Per-trace op budget: bounds how long a trace
