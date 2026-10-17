@@ -15,7 +15,7 @@
 //! - `0x1000_0000` — ns16550a UART (PLIC source 10)
 //! - `0x8000_0000` — RAM base
 
-use super::hart::{Trap, CAUSE_LOAD_PAGE_FAULT, CAUSE_STORE_PAGE_FAULT};
+use super::hart::{CAUSE_LOAD_PAGE_FAULT, CAUSE_STORE_PAGE_FAULT, Trap};
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
@@ -354,10 +354,9 @@ impl Plic {
                             (self.threshold[ctx] & !mask) | ((byte << shift) & mask);
                     }
                     // claim/complete write: complete source `value`
-                    0x4..=7
-                        if sub == 4 => {
-                            let _ = value; // complete: nothing to do in our level model
-                        }
+                    0x4..=7 if sub == 4 => {
+                        let _ = value; // complete: nothing to do in our level model
+                    }
                     _ => {}
                 }
             }
@@ -474,9 +473,9 @@ impl Machine {
                 a if (UART_BASE..UART_BASE + 0x100).contains(&a) => {
                     self.uart.write(a - UART_BASE, byte)
                 }
-                a if (ACLINT_MTIMER_BASE..ACLINT_MTIMER_BASE + 0x10000).contains(&a) => {
-                    self.aclint.write(false, a - ACLINT_MTIMER_BASE, byte as u64)
-                }
+                a if (ACLINT_MTIMER_BASE..ACLINT_MTIMER_BASE + 0x10000).contains(&a) => self
+                    .aclint
+                    .write(false, a - ACLINT_MTIMER_BASE, byte as u64),
                 a if (ACLINT_MSWI_BASE..ACLINT_MSWI_BASE + 0x10000).contains(&a) => {
                     self.aclint.write(true, a - ACLINT_MSWI_BASE, byte as u64)
                 }

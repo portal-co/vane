@@ -57,6 +57,8 @@ jobs:
         run: harness/run-priv-gate.sh
       - name: M4 machine gate (native + WASI)
         run: harness/run-machine-gate.sh
+      - name: M5 swap gate (native + WASI)
+        run: harness/run-swap-gate.sh
       # The Linux boot gate (harness/run-linux-boot-gate.sh) takes tens of
       # minutes on the interpreter and needs the fetched artifacts; run it
       # manually/nightly, not per-commit.

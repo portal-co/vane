@@ -343,7 +343,7 @@ dispatch into an unconditional call chain.
 | M2 | Decoder | §7.1 in rv-utils; exhaustive tests green | rv-asm release pinned in Cargo.toml |
 | M3 | Privilege core | §7.2 + §7.3: CSRs, traps, Sv39, TLB; riscv-tests `-p`/`-v` green; Spike differential green | M3 test suite green |
 | M4 | Devices & boot | §7.4–7.5: UART/ACLINT/PLIC/virtio-mmio-blk/rng, DTB, OpenSBI→Linux | B1–B3 in CI |
-| M5 | Swap | §6: PageCache/SwapStore/crypto + File backend (WASI/native first) | S4 + S5 on native & wasmtime |
+| M5 | Swap | §6: PageCache/SwapStore/crypto + File backend (WASI/native first) — **DONE** | S4 + S5 on native & WASI (swap gate) |
 | M6 | Browser productize | OPFS backend, xterm.js demo page, storage.persist, browser E2E | S3 + S4 in browser |
 | M7 | WASIX productize | cargo-wasix build, threaded IO loop, wasmer CI | S6 |
 

@@ -10,7 +10,7 @@
 //!   comparisons/conversions); Linux does not depend on finer fidelity.
 
 use crate::hart::HartState;
-use libm::{ceil, floor, sqrt, trunc};
+use libm::{ceil, floor, trunc};
 use rv_asm::{FReg, Inst, RoundingMode};
 
 /// fflags bits.
@@ -83,11 +83,7 @@ fn fclass_f64(v: f64) -> u64 {
     if (bits >> 52) & 0x7FF == 0 {
         return if sign { 1 << 2 } else { 1 << 5 }; // subnormal
     }
-    if sign {
-        1 << 1
-    } else {
-        1 << 6
-    }
+    if sign { 1 << 1 } else { 1 << 6 }
 }
 
 fn fclass_f32(v: f32) -> u64 {
@@ -105,11 +101,7 @@ fn fclass_f32(v: f32) -> u64 {
     if (bits >> 23) & 0xFF == 0 {
         return if sign { 1 << 2 } else { 1 << 5 };
     }
-    if sign {
-        1 << 1
-    } else {
-        1 << 6
-    }
+    if sign { 1 << 1 } else { 1 << 6 }
 }
 
 /// float → signed integer with the spec's saturation behavior.
@@ -137,11 +129,7 @@ fn f64_to_u64(v: f64, rm: RoundingMode) -> u64 {
         RoundingMode::RoundUp => ceil(v),
         _ => libm::roundeven(v),
     };
-    if v <= 0.0 {
-        0
-    } else {
-        v as u64
-    }
+    if v <= 0.0 { 0 } else { v as u64 }
 }
 
 /// Execute a decoded F/D instruction. Returns the integer-register writeback
@@ -159,27 +147,31 @@ pub enum FpOutcome {
     NotFp,
 }
 
-pub fn exec_fp(
-    hart: &mut HartState,
-    iregs: &[u64; 32],
-    inst: &Inst,
-) -> FpOutcome {
+pub fn exec_fp(hart: &mut HartState, iregs: &[u64; 32], inst: &Inst) -> FpOutcome {
     use Inst::*;
     match *inst {
         // ── S arithmetic ────────────────────────────────────────────────
-        FaddS { src1, src2, dest, .. } => {
+        FaddS {
+            src1, src2, dest, ..
+        } => {
             let v = hart.read_f32(src1) + hart.read_f32(src2);
             hart.write_f32(dest, v);
         }
-        FsubS { src1, src2, dest, .. } => {
+        FsubS {
+            src1, src2, dest, ..
+        } => {
             let v = hart.read_f32(src1) - hart.read_f32(src2);
             hart.write_f32(dest, v);
         }
-        FmulS { src1, src2, dest, .. } => {
+        FmulS {
+            src1, src2, dest, ..
+        } => {
             let v = hart.read_f32(src1) * hart.read_f32(src2);
             hart.write_f32(dest, v);
         }
-        FdivS { src1, src2, dest, .. } => {
+        FdivS {
+            src1, src2, dest, ..
+        } => {
             let v = hart.read_f32(src1) / hart.read_f32(src2);
             hart.write_f32(dest, v);
         }
@@ -188,19 +180,27 @@ pub fn exec_fp(
             hart.write_f32(dest, v);
         }
         // ── D arithmetic ────────────────────────────────────────────────
-        FaddD { src1, src2, dest, .. } => {
+        FaddD {
+            src1, src2, dest, ..
+        } => {
             let v = hart.read_f64(src1) + hart.read_f64(src2);
             hart.write_f64(dest, v);
         }
-        FsubD { src1, src2, dest, .. } => {
+        FsubD {
+            src1, src2, dest, ..
+        } => {
             let v = hart.read_f64(src1) - hart.read_f64(src2);
             hart.write_f64(dest, v);
         }
-        FmulD { src1, src2, dest, .. } => {
+        FmulD {
+            src1, src2, dest, ..
+        } => {
             let v = hart.read_f64(src1) * hart.read_f64(src2);
             hart.write_f64(dest, v);
         }
-        FdivD { src1, src2, dest, .. } => {
+        FdivD {
+            src1, src2, dest, ..
+        } => {
             let v = hart.read_f64(src1) / hart.read_f64(src2);
             hart.write_f64(dest, v);
         }
@@ -209,36 +209,116 @@ pub fn exec_fp(
             hart.write_f64(dest, v);
         }
         // ── Fused multiply-add (single rounding via mul_add) ────────────
-        FmaddS { src1, src2, src3, dest, .. } => {
-            let v = libm::fmaf(hart.read_f32(src1), hart.read_f32(src2), hart.read_f32(src3));
+        FmaddS {
+            src1,
+            src2,
+            src3,
+            dest,
+            ..
+        } => {
+            let v = libm::fmaf(
+                hart.read_f32(src1),
+                hart.read_f32(src2),
+                hart.read_f32(src3),
+            );
             hart.write_f32(dest, v);
         }
-        FmsubS { src1, src2, src3, dest, .. } => {
-            let v = libm::fmaf(hart.read_f32(src1), hart.read_f32(src2), -hart.read_f32(src3));
+        FmsubS {
+            src1,
+            src2,
+            src3,
+            dest,
+            ..
+        } => {
+            let v = libm::fmaf(
+                hart.read_f32(src1),
+                hart.read_f32(src2),
+                -hart.read_f32(src3),
+            );
             hart.write_f32(dest, v);
         }
-        FnmsubS { src1, src2, src3, dest, .. } => {
-            let v = libm::fmaf((-hart.read_f32(src1)), hart.read_f32(src2), hart.read_f32(src3));
+        FnmsubS {
+            src1,
+            src2,
+            src3,
+            dest,
+            ..
+        } => {
+            let v = libm::fmaf(
+                -hart.read_f32(src1),
+                hart.read_f32(src2),
+                hart.read_f32(src3),
+            );
             hart.write_f32(dest, v);
         }
-        FnmaddS { src1, src2, src3, dest, .. } => {
-            let v = libm::fmaf((-hart.read_f32(src1)), hart.read_f32(src2), -hart.read_f32(src3));
+        FnmaddS {
+            src1,
+            src2,
+            src3,
+            dest,
+            ..
+        } => {
+            let v = libm::fmaf(
+                -hart.read_f32(src1),
+                hart.read_f32(src2),
+                -hart.read_f32(src3),
+            );
             hart.write_f32(dest, v);
         }
-        FmaddD { src1, src2, src3, dest, .. } => {
-            let v = libm::fma(hart.read_f64(src1), hart.read_f64(src2), hart.read_f64(src3));
+        FmaddD {
+            src1,
+            src2,
+            src3,
+            dest,
+            ..
+        } => {
+            let v = libm::fma(
+                hart.read_f64(src1),
+                hart.read_f64(src2),
+                hart.read_f64(src3),
+            );
             hart.write_f64(dest, v);
         }
-        FmsubD { src1, src2, src3, dest, .. } => {
-            let v = libm::fma(hart.read_f64(src1), hart.read_f64(src2), -hart.read_f64(src3));
+        FmsubD {
+            src1,
+            src2,
+            src3,
+            dest,
+            ..
+        } => {
+            let v = libm::fma(
+                hart.read_f64(src1),
+                hart.read_f64(src2),
+                -hart.read_f64(src3),
+            );
             hart.write_f64(dest, v);
         }
-        FnmsubD { src1, src2, src3, dest, .. } => {
-            let v = libm::fma((-hart.read_f64(src1)), hart.read_f64(src2), hart.read_f64(src3));
+        FnmsubD {
+            src1,
+            src2,
+            src3,
+            dest,
+            ..
+        } => {
+            let v = libm::fma(
+                -hart.read_f64(src1),
+                hart.read_f64(src2),
+                hart.read_f64(src3),
+            );
             hart.write_f64(dest, v);
         }
-        FnmaddD { src1, src2, src3, dest, .. } => {
-            let v = libm::fma((-hart.read_f64(src1)), hart.read_f64(src2), -hart.read_f64(src3));
+        FnmaddD {
+            src1,
+            src2,
+            src3,
+            dest,
+            ..
+        } => {
+            let v = libm::fma(
+                -hart.read_f64(src1),
+                hart.read_f64(src2),
+                -hart.read_f64(src3),
+            );
             hart.write_f64(dest, v);
         }
         // ── Sign injection (S) ──────────────────────────────────────────
@@ -248,7 +328,10 @@ pub fn exec_fp(
         }
         FsgnjnS { dest, src1, src2 } => {
             let (a, b) = (hart.read_f32(src1).to_bits(), hart.read_f32(src2).to_bits());
-            hart.write_f32(dest, f32::from_bits((a & !0x8000_0000) | (!b & 0x8000_0000)));
+            hart.write_f32(
+                dest,
+                f32::from_bits((a & !0x8000_0000) | (!b & 0x8000_0000)),
+            );
         }
         FsgnjxS { dest, src1, src2 } => {
             let (a, b) = (hart.read_f32(src1).to_bits(), hart.read_f32(src2).to_bits());
@@ -348,10 +431,16 @@ pub fn exec_fp(
             return FpOutcome::Writeback(dest, v as i32 as i64 as u64);
         }
         FcvtLS { dest, src, rm } => {
-            return FpOutcome::Writeback(dest, f64_to_i64(hart.read_f32(src) as f64, hart.active_rm(rm)));
+            return FpOutcome::Writeback(
+                dest,
+                f64_to_i64(hart.read_f32(src) as f64, hart.active_rm(rm)),
+            );
         }
         FcvtLuS { dest, src, rm } => {
-            return FpOutcome::Writeback(dest, f64_to_u64(hart.read_f32(src) as f64, hart.active_rm(rm)));
+            return FpOutcome::Writeback(
+                dest,
+                f64_to_u64(hart.read_f32(src) as f64, hart.active_rm(rm)),
+            );
         }
         FcvtWD { dest, src, rm } => {
             let v = f64_to_i64(hart.read_f64(src), hart.active_rm(rm)) as i32;
@@ -401,7 +490,10 @@ pub fn exec_fp(
         }
         // ── Moves ───────────────────────────────────────────────────────
         FmvXW { dest, src } => {
-            return FpOutcome::Writeback(dest, hart.fregs[src.0 as usize] as u32 as i32 as i64 as u64);
+            return FpOutcome::Writeback(
+                dest,
+                hart.fregs[src.0 as usize] as u32 as i32 as i64 as u64,
+            );
         }
         FmvXD { dest, src } => {
             return FpOutcome::Writeback(dest, hart.fregs[src.0 as usize]);

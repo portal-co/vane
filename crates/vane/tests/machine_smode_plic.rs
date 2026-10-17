@@ -19,20 +19,59 @@ fn w(r: &Reactor, pc: u64, inst: &Inst) {
 /// when bit 31 is set — RAM starts at 0x8000_0000).
 fn emit_li(r: &Reactor, pc: &mut u64, dest: Reg, value: u64) {
     if (value as i32 as u64) == value && value < 2048 {
-        w(r, *pc, &Inst::Addi { imm: Imm::new_i32(value as i32), dest, src1: Reg(0) });
+        w(
+            r,
+            *pc,
+            &Inst::Addi {
+                imm: Imm::new_i32(value as i32),
+                dest,
+                src1: Reg(0),
+            },
+        );
         *pc += 4;
         return;
     }
     // lui %hi; addiw %lo; then clear the sign-extended top half.
     let lo = value as u32 as i32 as i64; // sign-extended low half
     let hi = ((value >> 12) + ((value >> 11) & 1)) as u32; // carry-adjusted
-    w(r, *pc, &Inst::Lui { uimm: Imm::new_u32(hi << 12), dest });
+    w(
+        r,
+        *pc,
+        &Inst::Lui {
+            uimm: Imm::new_u32(hi << 12),
+            dest,
+        },
+    );
     *pc += 4;
-    w(r, *pc, &Inst::AddiW { imm: Imm::new_i32(lo as i32 & 0xfff), dest, src1: dest });
+    w(
+        r,
+        *pc,
+        &Inst::AddiW {
+            imm: Imm::new_i32(lo as i32 & 0xfff),
+            dest,
+            src1: dest,
+        },
+    );
     *pc += 4;
-    w(r, *pc, &Inst::Slli { imm: Imm::new_u32(32), dest, src1: dest });
+    w(
+        r,
+        *pc,
+        &Inst::Slli {
+            imm: Imm::new_u32(32),
+            dest,
+            src1: dest,
+        },
+    );
     *pc += 4;
-    w(r, *pc, &Inst::Srli { imm: Imm::new_u32(32), dest, src1: dest });
+    w(
+        r,
+        *pc,
+        &Inst::Srli {
+            imm: Imm::new_u32(32),
+            dest,
+            src1: dest,
+        },
+    );
     *pc += 4;
 }
 
@@ -61,19 +100,55 @@ fn uart_irq_reaches_s_mode_via_plic_ctx1() {
         }};
     }
     // mideleg |= SEIP (bit 9)
-    emit!(Inst::Addi { imm: Imm::new_i32(1), dest: Reg(5), src1: Reg(0) });
-    emit!(Inst::Slli { imm: Imm::new_u32(9), dest: Reg(5), src1: Reg(5) });
-    emit!(Inst::Csrrs { csr: Csr::MIDELEG, dest: Reg(0), src: Reg(5) });
+    emit!(Inst::Addi {
+        imm: Imm::new_i32(1),
+        dest: Reg(5),
+        src1: Reg(0)
+    });
+    emit!(Inst::Slli {
+        imm: Imm::new_u32(9),
+        dest: Reg(5),
+        src1: Reg(5)
+    });
+    emit!(Inst::Csrrs {
+        csr: Csr::MIDELEG,
+        dest: Reg(0),
+        src: Reg(5)
+    });
     // UART IER = RDA (offset 1) = 1
     emit_li(&r, &mut pc, Reg(6), UART);
-    emit!(Inst::Addi { imm: Imm::new_i32(1), dest: Reg(5), src1: Reg(0) });
-    emit!(Inst::Sb { offset: Imm::new_i32(1), src: Reg(5), base: Reg(6) });
+    emit!(Inst::Addi {
+        imm: Imm::new_i32(1),
+        dest: Reg(5),
+        src1: Reg(0)
+    });
+    emit!(Inst::Sb {
+        offset: Imm::new_i32(1),
+        src: Reg(5),
+        base: Reg(6)
+    });
     // mepc = SENTRY; mstatus.MPP = S; mret
     emit_li(&r, &mut pc, Reg(5), 0x8000_1000);
-    emit!(Inst::Csrrw { csr: Csr::MEPC, dest: Reg(0), src: Reg(5) });
-    emit!(Inst::Addi { imm: Imm::new_i32(1), dest: Reg(5), src1: Reg(0) });
-    emit!(Inst::Slli { imm: Imm::new_u32(11), dest: Reg(5), src1: Reg(5) });
-    emit!(Inst::Csrrs { csr: Csr::MSTATUS, dest: Reg(0), src: Reg(5) });
+    emit!(Inst::Csrrw {
+        csr: Csr::MEPC,
+        dest: Reg(0),
+        src: Reg(5)
+    });
+    emit!(Inst::Addi {
+        imm: Imm::new_i32(1),
+        dest: Reg(5),
+        src1: Reg(0)
+    });
+    emit!(Inst::Slli {
+        imm: Imm::new_u32(11),
+        dest: Reg(5),
+        src1: Reg(5)
+    });
+    emit!(Inst::Csrrs {
+        csr: Csr::MSTATUS,
+        dest: Reg(0),
+        src: Reg(5)
+    });
     emit!(Inst::Mret);
 
     // PLIC setup via the host (same MMIO register interface).
@@ -96,14 +171,45 @@ fn uart_irq_reaches_s_mode_via_plic_ctx1() {
         }};
     }
     emit_li(&r, &mut pc, Reg(5), 0x8000_2000);
-    emit!(Inst::Csrrw { csr: Csr::STVEC, dest: Reg(0), src: Reg(5) });
-    emit!(Inst::Addi { imm: Imm::new_i32(1), dest: Reg(5), src1: Reg(0) });
-    emit!(Inst::Slli { imm: Imm::new_u32(9), dest: Reg(5), src1: Reg(5) });
-    emit!(Inst::Csrrs { csr: Csr::SIE, dest: Reg(0), src: Reg(5) }); // SEIE
-    emit!(Inst::Addi { imm: Imm::new_i32(1), dest: Reg(5), src1: Reg(0) });
-    emit!(Inst::Slli { imm: Imm::new_u32(1), dest: Reg(5), src1: Reg(5) });
-    emit!(Inst::Csrrs { csr: Csr::SSTATUS, dest: Reg(0), src: Reg(5) }); // SIE
-    emit!(Inst::Jal { offset: Imm::new_i32(0), dest: Reg(0) }); // spin
+    emit!(Inst::Csrrw {
+        csr: Csr::STVEC,
+        dest: Reg(0),
+        src: Reg(5)
+    });
+    emit!(Inst::Addi {
+        imm: Imm::new_i32(1),
+        dest: Reg(5),
+        src1: Reg(0)
+    });
+    emit!(Inst::Slli {
+        imm: Imm::new_u32(9),
+        dest: Reg(5),
+        src1: Reg(5)
+    });
+    emit!(Inst::Csrrs {
+        csr: Csr::SIE,
+        dest: Reg(0),
+        src: Reg(5)
+    }); // SEIE
+    emit!(Inst::Addi {
+        imm: Imm::new_i32(1),
+        dest: Reg(5),
+        src1: Reg(0)
+    });
+    emit!(Inst::Slli {
+        imm: Imm::new_u32(1),
+        dest: Reg(5),
+        src1: Reg(5)
+    });
+    emit!(Inst::Csrrs {
+        csr: Csr::SSTATUS,
+        dest: Reg(0),
+        src: Reg(5)
+    }); // SIE
+    emit!(Inst::Jal {
+        offset: Imm::new_i32(0),
+        dest: Reg(0)
+    }); // spin
 
     // S-mode handler at 0x80002000: claim via PLIC ctx1, store the claim at
     // 0x80003000, write 'D' to the UART, spin.
@@ -116,13 +222,32 @@ fn uart_irq_reaches_s_mode_via_plic_ctx1() {
     }
     // PLIC ctx1 claim/complete = base + 0x200000 + ctx*0x1000 + 4
     emit_li(&r, &mut pc, Reg(5), 0x0C00_0000 + 0x20_1004);
-    emit!(Inst::Lw { offset: Imm::new_i32(0), dest: Reg(6), base: Reg(5) });
+    emit!(Inst::Lw {
+        offset: Imm::new_i32(0),
+        dest: Reg(6),
+        base: Reg(5)
+    });
     emit_li(&r, &mut pc, Reg(7), 0x8000_3000);
-    emit!(Inst::Sd { offset: Imm::new_i32(0), src: Reg(6), base: Reg(7) });
-    emit!(Inst::Addi { imm: Imm::new_i32(0x44), dest: Reg(5), src1: Reg(0) }); // 'D'
+    emit!(Inst::Sd {
+        offset: Imm::new_i32(0),
+        src: Reg(6),
+        base: Reg(7)
+    });
+    emit!(Inst::Addi {
+        imm: Imm::new_i32(0x44),
+        dest: Reg(5),
+        src1: Reg(0)
+    }); // 'D'
     emit_li(&r, &mut pc, Reg(6), UART);
-    emit!(Inst::Sb { offset: Imm::new_i32(0), src: Reg(5), base: Reg(6) });
-    emit!(Inst::Jal { offset: Imm::new_i32(0), dest: Reg(0) }); // spin
+    emit!(Inst::Sb {
+        offset: Imm::new_i32(0),
+        src: Reg(5),
+        base: Reg(6)
+    });
+    emit!(Inst::Jal {
+        offset: Imm::new_i32(0),
+        dest: Reg(0)
+    }); // spin
 
     let mut regs = [0u64; 32];
     let mut pc = CODE;
@@ -138,21 +263,28 @@ fn uart_irq_reaches_s_mode_via_plic_ctx1() {
         }
     }
 
-    let claim = (0..8).fold(0u64, |acc, i| acc | (r.read_guest_byte(0x8000_3000 + i) as u64) << (8 * i));
+    let claim = (0..8).fold(0u64, |acc, i| {
+        acc | (r.read_guest_byte(0x8000_3000 + i) as u64) << (8 * i)
+    });
     r.with_hart(|h| {
         println!(
             "after: priv={:?} mip={:#x} mie={:#x} mideleg={:#x} mcause={:#x} mstatus={:#x}",
             h.priv_mode, h.mip, h.mie, h.mideleg, h.mcause, h.mstatus
         );
     });
-    let (e0, e1, p, pend) = r.with_machine(|m| {
-        (m.plic.eip(0), m.plic.eip(1), m.uart.irq_pending(), {
-            // peek pending via a claim on ctx1? no — read pending register
-            m.plic.read(0x1000)
+    let (e0, e1, p, pend) = r
+        .with_machine(|m| {
+            (m.plic.eip(0), m.plic.eip(1), m.uart.irq_pending(), {
+                // peek pending via a claim on ctx1? no — read pending register
+                m.plic.read(0x1000)
+            })
         })
-    }).unwrap_or_default();
+        .unwrap_or_default();
     println!("plic: eip0={e0} eip1={e1} uart_irq={p} pending={pend:#x}");
     assert_eq!(claim, 10, "S-mode handler should have claimed UART IRQ 10");
     let tx = r.with_machine(|m| m.uart.drain_tx()).unwrap_or_default();
-    assert!(tx.contains(&b'D'), "S-mode handler should have written 'D' to the UART");
+    assert!(
+        tx.contains(&b'D'),
+        "S-mode handler should have written 'D' to the UART"
+    );
 }

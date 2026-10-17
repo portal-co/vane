@@ -31,26 +31,67 @@ fn wq(r: &Reactor, addr: u64, v: u64) {
     r.write_bytes(addr, &v.to_le_bytes());
 }
 fn rq(r: &Reactor, addr: u64) -> u64 {
-    (0..8).fold(0u64, |acc, i| acc | (r.read_guest_byte(addr + i) as u64) << (8 * i))
+    (0..8).fold(0u64, |acc, i| {
+        acc | (r.read_guest_byte(addr + i) as u64) << (8 * i)
+    })
 }
 
 /// li/sd helpers using a known-good lui+addiw+slli/srli sequence for 64-bit
 /// constants (bit31-safe).
 fn emit_li(r: &Reactor, pc: &mut u64, dest: Reg, value: u64) {
     if (value as i32 as u64) == value && value < 2048 {
-        w(r, *pc, &Inst::Addi { imm: Imm::new_i32(value as i32), dest, src1: Reg(0) });
+        w(
+            r,
+            *pc,
+            &Inst::Addi {
+                imm: Imm::new_i32(value as i32),
+                dest,
+                src1: Reg(0),
+            },
+        );
         *pc += 4;
         return;
     }
     let hi = ((value >> 12) + ((value >> 11) & 1)) as u32;
     let lo = (value as u32 as i32) & 0xfff;
-    w(r, *pc, &Inst::Lui { uimm: Imm::new_u32(hi << 12), dest });
+    w(
+        r,
+        *pc,
+        &Inst::Lui {
+            uimm: Imm::new_u32(hi << 12),
+            dest,
+        },
+    );
     *pc += 4;
-    w(r, *pc, &Inst::AddiW { imm: Imm::new_i32(lo), dest, src1: dest });
+    w(
+        r,
+        *pc,
+        &Inst::AddiW {
+            imm: Imm::new_i32(lo),
+            dest,
+            src1: dest,
+        },
+    );
     *pc += 4;
-    w(r, *pc, &Inst::Slli { imm: Imm::new_u32(32), dest, src1: dest });
+    w(
+        r,
+        *pc,
+        &Inst::Slli {
+            imm: Imm::new_u32(32),
+            dest,
+            src1: dest,
+        },
+    );
     *pc += 4;
-    w(r, *pc, &Inst::Srli { imm: Imm::new_u32(32), dest, src1: dest });
+    w(
+        r,
+        *pc,
+        &Inst::Srli {
+            imm: Imm::new_u32(32),
+            dest,
+            src1: dest,
+        },
+    );
     *pc += 4;
 }
 
@@ -58,10 +99,18 @@ fn setup(r: &Reactor) {
     r.set_hart_enabled(true);
     // Sv39 tables: identity megapage for code (0x8000_0000..), MAP_VA →
     // DATA_PA (RW, no X, no U), nothing else.
-    wq(r, ROOT + 2 * 8, (0x8000_0000 >> 12 << 10) | PTE_A | PTE_D | PTE_X | PTE_W | PTE_R | PTE_V);
+    wq(
+        r,
+        ROOT + 2 * 8,
+        (0x8000_0000 >> 12 << 10) | PTE_A | PTE_D | PTE_X | PTE_W | PTE_R | PTE_V,
+    );
     wq(r, ROOT + 8, (L2 >> 12 << 10) | PTE_V);
     wq(r, L2, (L3 >> 12 << 10) | PTE_V);
-    wq(r, L3, (DATA_PA >> 12 << 10) | PTE_A | PTE_D | PTE_W | PTE_R | PTE_V);
+    wq(
+        r,
+        L3,
+        (DATA_PA >> 12 << 10) | PTE_A | PTE_D | PTE_W | PTE_R | PTE_V,
+    );
     wq(r, DATA_PA, 0x1111_2222_3333_4444);
 
     r.with_hart(|h| {
@@ -88,22 +137,64 @@ fn build_program(r: &Reactor) {
             pc += 4;
         }};
     }
-    emit!(Inst::Addi { imm: Imm::new_i32(0), dest: Reg(10), src1: Reg(0) });
-    emit!(Inst::Addi { imm: Imm::new_i32(3), dest: Reg(11), src1: Reg(0) });
+    emit!(Inst::Addi {
+        imm: Imm::new_i32(0),
+        dest: Reg(10),
+        src1: Reg(0)
+    });
+    emit!(Inst::Addi {
+        imm: Imm::new_i32(3),
+        dest: Reg(11),
+        src1: Reg(0)
+    });
     emit_li(r, &mut pc, Reg(1), MAP_VA); // x1 = MAP_VA
     let loop_pc = pc;
-    emit!(Inst::Ld { offset: Imm::new_i32(0), dest: Reg(2), base: Reg(1) }); // x2 = *x1
-    emit!(Inst::Add { src2: Reg(2), dest: Reg(10), src1: Reg(10) }); // x10 += x2
-    emit!(Inst::Sd { offset: Imm::new_i32(8), src: Reg(10), base: Reg(1) }); // *(x1+8) = x10
-    emit!(Inst::Addi { imm: Imm::new_i32(-1), dest: Reg(11), src1: Reg(11) }); // x11--
-    emit!(Inst::Bne { offset: Imm::new_i32(loop_pc.wrapping_sub(pc) as i64 as i32), src1: Reg(11), src2: Reg(0) });
+    emit!(Inst::Ld {
+        offset: Imm::new_i32(0),
+        dest: Reg(2),
+        base: Reg(1)
+    }); // x2 = *x1
+    emit!(Inst::Add {
+        src2: Reg(2),
+        dest: Reg(10),
+        src1: Reg(10)
+    }); // x10 += x2
+    emit!(Inst::Sd {
+        offset: Imm::new_i32(8),
+        src: Reg(10),
+        base: Reg(1)
+    }); // *(x1+8) = x10
+    emit!(Inst::Addi {
+        imm: Imm::new_i32(-1),
+        dest: Reg(11),
+        src1: Reg(11)
+    }); // x11--
+    emit!(Inst::Bne {
+        offset: Imm::new_i32(loop_pc.wrapping_sub(pc) as i64 as i32),
+        src1: Reg(11),
+        src2: Reg(0)
+    });
     // Faulting store to an unmapped VA.
     emit_li(r, &mut pc, Reg(3), FAULT_VA);
-    emit!(Inst::Sd { offset: Imm::new_i32(0), src: Reg(0), base: Reg(3) });
+    emit!(Inst::Sd {
+        offset: Imm::new_i32(0),
+        src: Reg(0),
+        base: Reg(3)
+    });
     // After the handler srets back here: jump to the spin loop.
-    emit!(Inst::Jal { offset: Imm::new_i32(SPIN.wrapping_sub(pc) as i64 as i32), dest: Reg(0) });
+    emit!(Inst::Jal {
+        offset: Imm::new_i32(SPIN.wrapping_sub(pc) as i64 as i32),
+        dest: Reg(0)
+    });
     // The spin loop lives AT SPIN.
-    w(r, SPIN, &Inst::Jal { offset: Imm::new_i32(0), dest: Reg(0) });
+    w(
+        r,
+        SPIN,
+        &Inst::Jal {
+            offset: Imm::new_i32(0),
+            dest: Reg(0),
+        },
+    );
 
     // S-mode fault handler at STVEC: record sepc, sepc += 4, sret.
     let mut pc = 0x9100_0000u64;
@@ -113,10 +204,26 @@ fn build_program(r: &Reactor) {
             pc += 4;
         }};
     }
-    emit!(Inst::Csrrs { csr: Csr::SEPC, dest: Reg(12), src: Reg(0) });
-    emit!(Inst::Csrrs { csr: Csr::SEPC, dest: Reg(13), src: Reg(0) });
-    emit!(Inst::Addi { imm: Imm::new_i32(4), dest: Reg(13), src1: Reg(13) });
-    emit!(Inst::Csrrw { csr: Csr::SEPC, dest: Reg(0), src: Reg(13) });
+    emit!(Inst::Csrrs {
+        csr: Csr::SEPC,
+        dest: Reg(12),
+        src: Reg(0)
+    });
+    emit!(Inst::Csrrs {
+        csr: Csr::SEPC,
+        dest: Reg(13),
+        src: Reg(0)
+    });
+    emit!(Inst::Addi {
+        imm: Imm::new_i32(4),
+        dest: Reg(13),
+        src1: Reg(13)
+    });
+    emit!(Inst::Csrrw {
+        csr: Csr::SEPC,
+        dest: Reg(0),
+        src: Reg(13)
+    });
     emit!(Inst::Sret);
 }
 

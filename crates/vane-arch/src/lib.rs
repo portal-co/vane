@@ -130,6 +130,23 @@ pub struct Mem {
 
     /// Use multi-level (3-level) page tables instead of single-level
     pub use_multilevel_paging: bool,
+
+    /// Encrypted swap layer for the machine-mode RAM region (M5,
+    /// PLAN_LINUX_WASM.md §6). When `Some`, accesses whose physical address
+    /// lies in `[swap_base, swap_base + swap_len)` route through the
+    /// [`vane_swap::PageCache`] (bounded resident set + encrypted backing
+    /// store) instead of `pages`. A `spin::Mutex` (not `RefCell`) so `Mem`
+    /// stays `Sync` (`seed_memory` in vane-wsdom holds `&Mem` across awaits);
+    /// swap fault servicing needs `&mut`, and the store never calls back into
+    /// `Mem`, so locks never nest.
+    pub swap: Option<spin::Mutex<vane_swap::PageCache>>,
+
+    /// Physical address of the first swap-backed byte (machine RAM base).
+    pub swap_base: u64,
+
+    /// Size in bytes of the swap-backed RAM region.
+    pub swap_len: u64,
+
 }
 impl Mem {
     /// Get a pointer to a specific address in memory (legacy system)
@@ -381,6 +398,17 @@ impl Mem {
             let _ = shared.write(addr, os_page::AccessWidth::W8, value as u64);
             return;
         }
+        if self.in_swap_region(addr) {
+            // The store never touches `Mem`, so this lock never nests.
+            let swap = self.swap.as_ref().unwrap();
+            let page_no = (addr - self.swap_base) >> 16;
+            let off = (addr & 0xffff) as usize;
+            let mut g = swap.lock();
+            if let Err(e) = g.write_byte(page_no, off, value) {
+                g.record_error(e);
+            }
+            return;
+        }
         let page = self
             .pages
             .entry(addr >> 16)
@@ -394,10 +422,43 @@ impl Mem {
         if let Some(shared) = &self.shared {
             return shared.read(addr, os_page::AccessWidth::W8).unwrap_or(0) as u8;
         }
+        if self.in_swap_region(addr) {
+            let swap = self.swap.as_ref().unwrap();
+            let page_no = (addr - self.swap_base) >> 16;
+            let off = (addr & 0xffff) as usize;
+            let mut g = swap.lock();
+            return match g.read_byte(page_no, off) {
+                Ok(b) => b,
+                Err(e) => {
+                    g.record_error(e);
+                    0
+                }
+            };
+        }
         self.pages
             .get(&(addr >> 16))
             .map(|page| page[(addr & 0xffff) as usize])
             .unwrap_or(0)
+    }
+
+    /// True if `addr` is in the swap-backed RAM region (swap enabled).
+    #[inline]
+    fn in_swap_region(&self, addr: u64) -> bool {
+        self.swap.is_some() && addr >= self.swap_base && addr < self.swap_base + self.swap_len
+    }
+
+    /// Whether the swap layer is active. When true, the `get_page` fast path
+    /// must not be used for RAM (the resident frame may be evicted); callers
+    /// must use the swap-aware byte path.
+    #[inline]
+    pub fn swap_active(&self) -> bool {
+        self.swap.is_some()
+    }
+
+    /// Take a pending swap error (integrity/IO), if any. The host checks this
+    /// each quantum and reports it as a hard VM error (S5).
+    pub fn take_swap_error(&self) -> Option<vane_swap::SwapError> {
+        self.swap.as_ref().and_then(|s| s.lock().take_error())
     }
 }
 

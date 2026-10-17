@@ -95,6 +95,16 @@ impl Reactor {
     /// Bulk-write guest memory (e.g. loading an ELF segment). Chunks the
     /// copy across `Mem`'s 64 KiB pages via `get_page`.
     pub fn write_bytes(&self, mut addr: u64, mut data: &[u8]) {
+        // Swap-backed RAM (M5) must be written via the swap-aware byte path,
+        // not the `get_page` raw pointer (the resident frame may be evicted
+        // and the data must land in the PageCache).
+        if self.core.lock().mem.swap_active() {
+            let mut lock = self.core.lock();
+            for (i, b) in data.iter().enumerate() {
+                lock.mem.write_byte(addr.wrapping_add(i as u64), *b);
+            }
+            return;
+        }
         while !data.is_empty() {
             let page_offset = (addr & 0xffff) as usize;
             let n = (65536 - page_offset).min(data.len());
@@ -182,7 +192,10 @@ impl Reactor {
 
     /// Access the machine (None when not attached) — for hosts feeding
     /// console input and draining output.
-    pub fn with_machine<R>(&self, f: impl FnOnce(&mut vane_riscv::machine::Machine) -> R) -> Option<R> {
+    pub fn with_machine<R>(
+        &self,
+        f: impl FnOnce(&mut vane_riscv::machine::Machine) -> R,
+    ) -> Option<R> {
         let mut lock = self.core.lock();
         lock.hart.machine.as_mut().map(f)
     }
@@ -191,6 +204,49 @@ impl Reactor {
     /// satp) — used by device models, tests, and host drivers.
     pub fn with_hart<R>(&self, f: impl FnOnce(&mut vane_riscv::hart::HartState) -> R) -> R {
         f(&mut self.core.lock().hart)
+    }
+
+    /// Enable encrypted swap for the machine-mode RAM region (M5,
+    /// PLAN_LINUX_WASM.md §6). `swap_base`/`swap_len` delimit the physical
+    /// RAM range routed through the [`vane_swap::PageCache`]. Call before
+    /// loading guest images so they land in the swap-backed store.
+    pub fn enable_swap(&self, swap_base: u64, swap_len: u64, cache: vane_swap::PageCache) {
+        let mut lock = self.core.lock();
+        lock.mem.swap_base = swap_base;
+        lock.mem.swap_len = swap_len;
+        lock.mem.swap = Some(spin::Mutex::new(cache));
+    }
+
+    /// Whether encrypted swap is active.
+    pub fn swap_active(&self) -> bool {
+        self.core.lock().mem.swap_active()
+    }
+
+    /// Swap accounting (resident set, faults, evictions, crypto/IO bytes) —
+    /// S4 report + browser UI. None when swap is disabled.
+    pub fn swap_stats(&self) -> Option<vane_swap::MemStats> {
+        let lock = self.core.lock();
+        lock.mem.swap.as_ref().map(|s| s.lock().stats())
+    }
+
+    /// Take a pending swap error (integrity/IO), if any. The host checks this
+    /// each quantum and reports it as a hard VM error (S5).
+    pub fn take_swap_error(&self) -> Option<vane_swap::SwapError> {
+        self.core.lock().mem.take_swap_error()
+    }
+
+    /// Pin the physical RAM pages covering `[base, base + len)` so they are
+    /// never evicted (kernel image, DTB, OpenSBI — §6.2 item 2).
+    pub fn pin_swap_range(&self, base: u64, len: u64) {
+        let lock = self.core.lock();
+        if let Some(swap) = &lock.mem.swap {
+            let mut s = swap.lock();
+            let start = base.saturating_sub(lock.mem.swap_base) >> 16;
+            let end = (base + len).saturating_sub(lock.mem.swap_base).div_ceil(0x1_0000);
+            for page_no in start..end {
+                s.pin(page_no);
+            }
+        }
     }
 
     /// Execute exactly one instruction at `pc` (synchronous).
@@ -271,7 +327,7 @@ impl Reactor {
         // 2 mod 4, and a raw aligned deref is both UB in Rust and broken
         // on backends that honor the alignment hint (wasm2js lowers an
         // align=4 load to HEAP32[addr >> 2], reading the wrong word).
-        let code = if (fetch_pa & 0xFFFF) > 0xFFFC {
+        let code = if (fetch_pa & 0xFFFF) > 0xFFFC || mem.swap_active() {
             // Fetch crosses a 64 KiB Mem page boundary: read byte-wise.
             (0..4).fold(0u32, |acc, i| {
                 acc | (mem.read_byte(fetch_pa.wrapping_add(i)) as u32) << (8 * i)
@@ -281,7 +337,9 @@ impl Reactor {
         };
         // Decode memoization (pure function of the instruction word).
         let cache_idx = (code as usize) & 1023;
-        let cached = hart.decode_cache[cache_idx].as_ref().filter(|(w, _, _)| *w == code);
+        let cached = hart.decode_cache[cache_idx]
+            .as_ref()
+            .filter(|(w, _, _)| *w == code);
         let i = match cached {
             Some((_, inst, comp)) => Ok((*inst, *comp)),
             None => {
@@ -339,13 +397,19 @@ impl Reactor {
                 let pa = $pa;
                 let width: u64 = $width;
                 if hart.machine.is_some() && vane_riscv::machine::Machine::is_mmio(pa) {
-                    match hart.machine.as_mut().unwrap().load(pa, width as u8, $signed) {
+                    match hart
+                        .machine
+                        .as_mut()
+                        .unwrap()
+                        .load(pa, width as u8, $signed)
+                    {
                         Ok(v) => v,
                         Err(t) => return Ok(StepOutcome::Next(hart.raise(t, pc))),
                     }
-                } else if (pa & 0xFFFF) + width > 0x1_0000 {
-                    // Page-crossing access: the 64 KiB Mem pages are separate
-                    // allocations, so read byte-wise across the boundary.
+                } else if (pa & 0xFFFF) + width > 0x1_0000 || mem.swap_active() {
+                    // Page-crossing access (or swap-backed RAM, M5: the
+                    // get_page fast path is unsafe with an evictable resident
+                    // set): read byte-wise via the swap-aware path.
                     let mut v = 0u64;
                     for i in 0..width {
                         v |= (mem.read_byte(pa.wrapping_add(i)) as u64) << (8 * i);
@@ -384,8 +448,9 @@ impl Reactor {
                     if let Err(t) = hart.machine.as_mut().unwrap().store(pa, width as u8, v) {
                         return Ok(StepOutcome::Next(hart.raise(t, pc)));
                     }
-                } else if (pa & 0xFFFF) + width > 0x1_0000 {
-                    // Page-crossing store: byte-wise across the boundary.
+                } else if (pa & 0xFFFF) + width > 0x1_0000 || mem.swap_active() {
+                    // Page-crossing store (or swap-backed RAM, M5): byte-wise
+                    // via the swap-aware path.
                     for i in 0..width {
                         mem.write_byte(pa.wrapping_add(i), (v >> (8 * i)) as u8);
                     }
@@ -759,7 +824,9 @@ impl Reactor {
                 hart.reservation = Some(pa);
                 set_reg!(dest => loadv!(pa, 4, true));
             }
-            Inst::ScW { dest, addr, src, .. } => {
+            Inst::ScW {
+                dest, addr, src, ..
+            } => {
                 let va = reg!(addr);
                 let pa = xlate!(va, Access::Store);
                 if pa % 4 != 0 {
@@ -777,7 +844,13 @@ impl Reactor {
                 }
                 set_reg!(dest => if ok { 0 } else { 1 });
             }
-            Inst::AmoW { op, dest, addr, src, .. } => {
+            Inst::AmoW {
+                op,
+                dest,
+                addr,
+                src,
+                ..
+            } => {
                 let va = reg!(addr);
                 let pa = xlate!(va, Access::Store);
                 if pa % 4 != 0 {
@@ -818,7 +891,9 @@ impl Reactor {
                 hart.reservation = Some(pa);
                 set_reg!(dest => loadv!(pa, 8, false));
             }
-            Inst::ScD { dest, addr, src, .. } => {
+            Inst::ScD {
+                dest, addr, src, ..
+            } => {
                 let va = reg!(addr);
                 let pa = xlate!(va, Access::Store);
                 if pa % 8 != 0 {
@@ -836,7 +911,13 @@ impl Reactor {
                 }
                 set_reg!(dest => if ok { 0 } else { 1 });
             }
-            Inst::AmoD { op, dest, addr, src, .. } => {
+            Inst::AmoD {
+                op,
+                dest,
+                addr,
+                src,
+                ..
+            } => {
                 let va = reg!(addr);
                 let pa = xlate!(va, Access::Store);
                 if pa % 8 != 0 {

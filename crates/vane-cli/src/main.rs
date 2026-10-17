@@ -61,6 +61,14 @@ struct Args {
     /// Execution engine: `trace` (StackOp traces, the default — the StackOp
     /// port) or `step` (per-instruction step_one reference).
     engine: String,
+    /// Encrypted swap backing-store file (M5). Requires --machine.
+    swap: Option<String>,
+    /// Resident RAM cap in bytes (decimal or 0x-hex) when --swap is set.
+    resident: Option<u64>,
+    /// Optional 32-byte swap key file; otherwise a per-session random key is
+    /// drawn from the host CSPRNG (a fresh key trivially invalidates old
+    /// swap — by design, PLAN §6.2 item 3).
+    swap_key: Option<String>,
 }
 
 const RAM_BASE: u64 = 0x8000_0000;
@@ -84,6 +92,9 @@ fn parse_args() -> Result<Args, String> {
     let mut ram_size = 128 * 1024 * 1024; // 128 MiB bring-up default
     let mut uart_rx: Option<Vec<u8>> = None;
     let mut engine: Option<String> = None;
+    let mut swap = None;
+    let mut resident = None;
+    let mut swap_key = None;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -115,6 +126,16 @@ fn parse_args() -> Result<Args, String> {
             "--engine" => {
                 engine = Some(it.next().ok_or("--engine needs a value")?);
             }
+            "--swap" => swap = Some(it.next().ok_or("--swap needs a value")?),
+            "--swap-key" => swap_key = Some(it.next().ok_or("--swap-key needs a value")?),
+            "--resident" => {
+                let v = it.next().ok_or("--resident needs a value")?;
+                resident = Some(if let Some(h) = v.strip_prefix("0x") {
+                    u64::from_str_radix(h, 16).map_err(|e| format!("--resident: {e}"))?
+                } else {
+                    v.parse().map_err(|e| format!("--resident: {e}"))?
+                });
+            }
             "--ram-size" => {
                 let v = it.next().ok_or("--ram-size needs a value")?;
                 ram_size = if let Some(h) = v.strip_prefix("0x") {
@@ -140,6 +161,9 @@ fn parse_args() -> Result<Args, String> {
         ram_size,
         engine: engine.unwrap_or_else(|| "trace".into()),
         uart_rx,
+        swap,
+        resident,
+        swap_key,
     })
 }
 
@@ -161,7 +185,10 @@ fn load_image(reactor: &Reactor, path: &str, flat_addr: u64) -> u64 {
         Err(_) => {
             // Flat binary at the fixed address.
             reactor.write_bytes(flat_addr, &bytes);
-            eprintln!("vane-cli: {path}: flat, {} bytes at {flat_addr:#x}", bytes.len());
+            eprintln!(
+                "vane-cli: {path}: flat, {} bytes at {flat_addr:#x}",
+                bytes.len()
+            );
             flat_addr
         }
     }
@@ -172,7 +199,9 @@ fn main() {
         Ok(a) => a,
         Err(e) => {
             eprintln!("vane-cli: {e}");
-            eprintln!("usage: vane-cli --elf <path> [--hart] [--tohost 0xADDR] | --machine --opensbi F --kernel K [--initrd I] [--append CMDLINE]");
+            eprintln!(
+                "usage: vane-cli --elf <path> [--hart] [--tohost 0xADDR] | --machine --opensbi F --kernel K [--initrd I] [--append CMDLINE]"
+            );
             std::process::exit(2);
         }
     };
@@ -185,6 +214,53 @@ fn main() {
         reactor.set_machine_enabled(true);
         if let Some(rx) = &args.uart_rx {
             reactor.with_machine(|m| m.uart.push_rx(rx));
+        }
+
+        // M5: encrypted swap for the RAM region. Set up BEFORE loading images
+        // so they land in the swap-backed store.
+        if let Some(swap_path) = &args.swap {
+            let resident = args.resident.unwrap_or(args.ram_size / 2).max(0x1_0000);
+            let frames = (resident / 0x1_0000).max(1) as usize;
+            let slots = args.ram_size / 0x1_0000; // one slot per RAM page
+            let store = vane_swap::FileSwap::create(std::path::Path::new(swap_path), slots)
+                .unwrap_or_else(|e| {
+                    eprintln!("vane-cli: cannot create swap file {swap_path}: {e}");
+                    std::process::exit(2);
+                });
+            let key: [u8; 32] = match &args.swap_key {
+                Some(kf) => {
+                    let b = std::fs::read(kf).expect("swap key file");
+                    if b.len() != 32 {
+                        eprintln!("vane-cli: swap key file must be exactly 32 bytes");
+                        std::process::exit(2);
+                    }
+                    let mut k = [0u8; 32];
+                    k.copy_from_slice(&b);
+                    k
+                }
+                None => {
+                    let mut k = [0u8; 32];
+                    getrandom::fill(&mut k).expect("CSPRNG for swap key");
+                    k
+                }
+            };
+            let cache = vane_swap::PageCache::new(
+                frames,
+                Box::new(store),
+                key,
+                Box::new(|| {
+                    let mut n = [0u8; vane_swap::NONCE_BYTES];
+                    getrandom::fill(&mut n).expect("CSPRNG for swap nonce");
+                    n
+                }),
+            );
+            reactor.enable_swap(RAM_BASE, args.ram_size, cache);
+            eprintln!(
+                "vane-cli: swap on {swap_path} (resident {} MiB of {} MiB RAM, {} frames)",
+                resident / (1024 * 1024),
+                args.ram_size / (1024 * 1024),
+                frames
+            );
         }
 
         let mut next_addr = RAM_BASE;
@@ -208,14 +284,7 @@ fn main() {
         // options 0, boot_hart 0.
         if args.opensbi.is_some() {
             let kernel_entry = KERNEL_ADDR;
-            let info: [u64; 6] = [
-                0x4942_534F,
-                2,
-                kernel_entry,
-                1,
-                0,
-                0,
-            ];
+            let info: [u64; 6] = [0x4942_534F, 2, kernel_entry, 1, 0, 0];
             let mut bytes = Vec::new();
             for w in info {
                 bytes.extend_from_slice(&w.to_le_bytes());
@@ -225,6 +294,22 @@ fn main() {
         let bootargs = args.append.as_deref().unwrap_or("console=ttyS0");
         let dtb = vane::vane_riscv::machine::virt_dtb(args.ram_size, initrd_range, bootargs);
         reactor.write_bytes(DTB_ADDR, &dtb);
+
+        // Pin the boot artifacts so they are never evicted (§6.2 item 2):
+        // OpenSBI, kernel image, initrd, fw_dynamic_info, DTB. With swap on,
+        // these are the always-resident working set.
+        if reactor.swap_active() {
+            reactor.pin_swap_range(RAM_BASE, KERNEL_ADDR - RAM_BASE); // OpenSBI
+            if let Some(p) = &args.kernel {
+                let klen = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+                reactor.pin_swap_range(KERNEL_ADDR, klen);
+            }
+            if let Some((s, e)) = initrd_range {
+                reactor.pin_swap_range(s, e - s);
+            }
+            reactor.pin_swap_range(FW_DYNAMIC_INFO_ADDR, 0x1_0000);
+            reactor.pin_swap_range(DTB_ADDR, dtb.len() as u64);
+        }
 
         // A bare-metal payload (ELF) may take the place of firmware+kernel
         // (used by the machine-model gate).
@@ -302,20 +387,25 @@ fn main() {
                 // The StackOp trace engine (the port): traces run translated
                 // and MMIO-aware code with trap-atomic bails; privileged
                 // instructions and interrupts dispatch through the stepper.
-                let mut noop =
-                    async |_: &mut vane::vane_riscv::interp::LocalStackHost<vane::Reactor>| -> bool {
-                        false
-                    };
-                let result = futures::executor::block_on(
-                    reactor.trace_run_fueled(pc, &mut noop, Some(FUEL_TRACE)),
-                );
+                let mut noop = async |_: &mut vane::vane_riscv::interp::LocalStackHost<
+                    vane::Reactor,
+                >|
+                       -> bool { false };
+                let result = futures::executor::block_on(reactor.trace_run_fueled(
+                    pc,
+                    &mut noop,
+                    Some(FUEL_TRACE),
+                ));
                 drop(noop);
                 result.map_err(vane::InterpError::Unsupported)
             } else {
                 let mut noop = async |_: &mut [u64; 32]| -> bool { false };
-                let result = futures::executor::block_on(
-                    reactor.interp_core_fueled(pc, &mut regs, &mut noop, Some(FUEL)),
-                );
+                let result = futures::executor::block_on(reactor.interp_core_fueled(
+                    pc,
+                    &mut regs,
+                    &mut noop,
+                    Some(FUEL),
+                ));
                 drop(noop);
                 result
             };
@@ -335,7 +425,9 @@ fn main() {
                 let (mtime, mtimecmp) = reactor
                     .with_machine(|m| (m.aclint.mtime(), m.aclint.mtimecmp))
                     .unwrap_or((0, 0));
-                eprintln!("[{total}M] pc={pc:#x} priv={privm:?} mcause={mcause:#x} mip={mip:#x} mtime={mtime} mtimecmp={mtimecmp:#x}");
+                eprintln!(
+                    "[{total}M] pc={pc:#x} priv={privm:?} mcause={mcause:#x} mip={mip:#x} mtime={mtime} mtimecmp={mtimecmp:#x}"
+                );
             }
 
             // Device tick: real time, drain UART TX to stdout.
@@ -359,10 +451,17 @@ fn main() {
                 }
             }
             if let Some(max) = args.max_insns
-                && total >= max {
-                    eprintln!("vane-cli: instruction cap reached ({max})");
-                    std::process::exit(3);
-                }
+                && total >= max
+            {
+                eprintln!("vane-cli: instruction cap reached ({max})");
+                std::process::exit(3);
+            }
+            // S5: a swap integrity/IO failure is a hard VM error, not silent
+            // corruption. Halt and report.
+            if let Some(se) = reactor.take_swap_error() {
+                eprintln!("vane-cli: swap integrity/IO error: {se:?} (backing store tampered or failed; halting)");
+                std::process::exit(4);
+            }
             if let Some(tohost) = args.tohost {
                 let mut v = 0u64;
                 for i in 0..8 {

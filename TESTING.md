@@ -23,6 +23,19 @@ harness/run-machine-gate.sh       # devices: UART/ACLINT/PLIC/syscon (fast)
 harness/run-linux-boot-gate.sh    # full OpenSBI+Linux+initramfs boot (slow)
 ```
 
+### M5 gate: encrypted swap
+
+```sh
+harness/run-swap-gate.sh          # encrypted RAM paging (fast)
+```
+
+`run-swap-gate.sh` runs `harness/payload-swap-stress` (a bare-metal guest that
+writes/verifies a per-page pattern across a 6 MiB region) under a 512 KiB
+resident cap with an encrypted backing store (`--swap`/`--resident`), on
+native and WASI, asserting the `S4:<checksum>:OK` marker. S5 (tamper
+detection) is covered by `cargo test -p vane-swap --features std`. See
+[PAGING_SWAP.md](PAGING_SWAP.md).
+
 `run-machine-gate.sh` runs `harness/payload-machine` (M-mode device
 exerciser) under `vane-cli --machine` natively and under WASI; expect
 `M1:TTTK`.

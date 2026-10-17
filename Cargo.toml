@@ -8,6 +8,7 @@ members = [
     "crates/vane-target-wasm",
     "crates/vane-arch",
     "crates/vane-riscv", "crates/vane-target-core",
+    "crates/vane-swap",
     "crates/vane-aarch64",
     "crates/vane-wsdom",
 ]

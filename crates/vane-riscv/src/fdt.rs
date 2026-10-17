@@ -74,7 +74,8 @@ impl FdtBuilder {
     /// Raw property bytes (already serialized, big-endian inside).
     pub fn prop_raw(&mut self, name: &str, data: &[u8]) {
         self.token(FDT_PROP);
-        self.body.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        self.body
+            .extend_from_slice(&(data.len() as u32).to_be_bytes());
         let off = self.string_offset(name);
         self.body.extend_from_slice(&off.to_be_bytes());
         self.body.extend_from_slice(data);
@@ -97,7 +98,12 @@ impl FdtBuilder {
     /// A (addr, size) pair as four cells (#address-cells = 2, #size-cells = 2).
     pub fn prop_reg(&mut self, name: &str, addr: u64, size: u64) {
         let mut d = Vec::with_capacity(16);
-        for cell in [(addr >> 32) as u32, addr as u32, (size >> 32) as u32, size as u32] {
+        for cell in [
+            (addr >> 32) as u32,
+            addr as u32,
+            (size >> 32) as u32,
+            size as u32,
+        ] {
             d.extend_from_slice(&cell.to_be_bytes());
         }
         self.prop_raw(name, &d);

@@ -22,6 +22,8 @@ async-host = ["dep:os-async"]
 vane-target-js = { path = "../vane-target-js", optional = true }
 vane-target-wasm = { path = "../vane-target-wasm", optional = true }
 vane-target-core = { path = "../vane-target-core" }
+vane-swap = { path = "../vane-swap" }
+spin = { workspace = true }
 os-page = { git = "https://github.com/portal-co/os-emulation.git" }
 paste = "1.0.15"
 os-async = { git = "https://github.com/portal-co/os-emulation.git", optional = true }

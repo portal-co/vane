@@ -1,0 +1,12 @@
+[package]
+name = "payload-swap-stress"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Detached from the vane workspace: builds for riscv64gc-unknown-none-elf.
+[workspace]
+
+[profile.release]
+opt-level = "z"
+lto = true

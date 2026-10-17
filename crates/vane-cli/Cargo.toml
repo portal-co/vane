@@ -17,3 +17,5 @@ js = ["vane/js-host"]
 vane = { path = "../vane", default-features = false }
 vane-host = { path = "../vane-host" }
 futures = { version = "0.3", default-features = false, features = ["executor"] }
+vane-swap = { path = "../vane-swap", features = ["std"] }
+getrandom = { version = "0.3", default-features = false }

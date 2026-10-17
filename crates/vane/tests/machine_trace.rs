@@ -25,8 +25,7 @@ fn machine_payload_via_traces() {
     .unwrap();
     let r = Reactor::new();
     // minimal ELF64 load
-    let u64le =
-        |o: usize| -> u64 { u64::from_le_bytes(bytes[o..o + 8].try_into().unwrap()) };
+    let u64le = |o: usize| -> u64 { u64::from_le_bytes(bytes[o..o + 8].try_into().unwrap()) };
     let entry = u64le(24);
     let phoff = u64le(32) as usize;
     let phentsize = u16::from_le_bytes([bytes[54], bytes[55]]) as usize;
@@ -69,5 +68,8 @@ fn machine_payload_via_traces() {
         Some(vane::vane_riscv::machine::PowerAction::PowerOff { code: 0 }),
         "the machine payload should power off cleanly; UART output: {out:?}"
     );
-    assert!(out.contains("M1:TTTK"), "expected the full marker sequence, got {out:?}");
+    assert!(
+        out.contains("M1:TTTK"),
+        "expected the full marker sequence, got {out:?}"
+    );
 }

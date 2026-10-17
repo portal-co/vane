@@ -579,12 +579,8 @@ impl HartState {
             // time: the machine's ACLINT mtime (host-driven); 0 without a
             // machine. Linux's rdtime-based calibration loops need this to
             // advance.
-            0xC01 => self
-                .machine
-                .as_ref()
-                .map(|m| m.aclint.mtime())
-                .unwrap_or(0),
-            0xC02 => self.minstret, // instret
+            0xC01 => self.machine.as_ref().map(|m| m.aclint.mtime()).unwrap_or(0),
+            0xC02 => self.minstret,        // instret
             0x001 => self.fcsr & 0x1F,     // fflags
             0x002 => (self.fcsr >> 5) & 7, // frm
             0x003 => self.fcsr & 0xFF,     // fcsr
@@ -690,10 +686,7 @@ impl HartState {
     /// Host tick for the machine (devices): drive time, feed UART RX,
     /// fold device-driven interrupt lines into `mip`. Returns a power
     /// action if the syscon fired.
-    pub fn machine_tick(
-        &mut self,
-        rx: &[u8],
-    ) -> Option<crate::machine::PowerAction> {
+    pub fn machine_tick(&mut self, rx: &[u8]) -> Option<crate::machine::PowerAction> {
         let m = self.machine.as_mut()?;
         let (set, clear) = m.tick(rx);
         self.mip = (self.mip | set) & !clear;
