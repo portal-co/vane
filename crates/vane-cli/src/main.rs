@@ -452,12 +452,13 @@ fn main() {
             // Heartbeat for boot debugging: VANE_HEARTBEAT=1 prints
             // pc/priv/mcause each round.
             if std::env::var_os("VANE_HEARTBEAT").is_some() {
-                let (privm, mcause, mip) = reactor.with_hart(|h| (h.priv_mode, h.mcause, h.mip));
+                let (privm, mcause, mip, mepc, mtval, stvec) = reactor
+                    .with_hart(|h| (h.priv_mode, h.mcause, h.mip, h.mepc, h.mtval, h.stvec));
                 let (mtime, mtimecmp) = reactor
                     .with_machine(|m| (m.aclint.mtime(), m.aclint.mtimecmp))
                     .unwrap_or((0, 0));
                 eprintln!(
-                    "[{total}M] pc={pc:#x} priv={privm:?} mcause={mcause:#x} mip={mip:#x} mtime={mtime} mtimecmp={mtimecmp:#x}"
+                    "[{total}M] pc={pc:#x} priv={privm:?} mcause={mcause:#x} mepc={mepc:#x} mtval={mtval:#x} stvec={stvec:#x} mip={mip:#x} mtime={mtime} mtimecmp={mtimecmp:#x}"
                 );
             }
 
