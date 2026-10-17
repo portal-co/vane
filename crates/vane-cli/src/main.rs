@@ -371,6 +371,37 @@ fn main() {
     let mut insns: u64 = 0;
     let mut pc = entry;
 
+    // M7 (`wasix` feature): pump stdin on a background thread into a channel
+    // so the interpreter loop never blocks on console input (and, under
+    // WASIX, uses a real thread). The loop drains the channel each quantum.
+    #[cfg(feature = "wasix")]
+    let stdin_rx = {
+        let (tx, rx) = std::sync::mpsc::channel::<u8>();
+        if args.machine {
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut stdin = std::io::stdin();
+                let mut buf = [0u8; 256];
+                loop {
+                    match stdin.read(&mut buf) {
+                        Ok(0) => break,        // EOF
+                        Ok(n) => {
+                            for &b in &buf[..n] {
+                                if tx.send(b).is_err() {
+                                    return; // receiver gone
+                                }
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+        Some(rx)
+    };
+    #[cfg(not(feature = "wasix"))]
+    let stdin_rx: Option<std::sync::mpsc::Receiver<u8>> = None;
+
     let fueled = args.hart || args.machine;
     if fueled {
         // Privileged/machine mode: ecall traps in-guest; completion is
@@ -433,7 +464,18 @@ fn main() {
             // Device tick: real time, drain UART TX to stdout.
             if args.machine {
                 let _ = t0;
-                let power = reactor.with_hart(|h| h.machine_tick(&[]));
+                // Drain any console input the stdin pump thread delivered
+                // (empty when the `wasix` feature is off).
+                let mut rx_bytes: Vec<u8> = Vec::new();
+                if let Some(rx) = &stdin_rx {
+                    while let Ok(b) = rx.try_recv() {
+                        if std::env::var_os("VANE_DEBUG_STDIN").is_some() {
+                            eprintln!("[stdin-pump] got byte {b:#x}");
+                        }
+                        rx_bytes.push(b);
+                    }
+                }
+                let power = reactor.with_hart(|h| h.machine_tick(&rx_bytes));
                 if let Some(tx) = reactor.with_machine(|m| m.uart.drain_tx()) {
                     for b in tx {
                         host.uart_write(b);

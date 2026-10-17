@@ -345,7 +345,7 @@ dispatch into an unconditional call chain.
 | M4 | Devices & boot | §7.4–7.5: UART/ACLINT/PLIC/virtio-mmio-blk/rng, DTB, OpenSBI→Linux | B1–B3 in CI |
 | M5 | Swap | §6: PageCache/SwapStore/crypto + File backend (WASI/native first) — **DONE** | S4 + S5 on native & WASI (swap gate) |
 | M6 | Browser productize | vane-web crate (wasm-bindgen machine+swap), OPFS bridge, demo page (worker + console), storage.persist — **offline core DONE**; Playwright E2E + xterm.js are network-gated | S4 in-browser via Node smoke gate; S3 (full browser shell) network-gated |
-| M7 | WASIX productize | cargo-wasix build, threaded IO loop, wasmer CI | S6 |
+| M7 | WASIX productize | `wasix` feature: stdin-pump thread (channel → UART) instead of cooperative polling — **offline core DONE** (validated natively via payload-echo); cargo-wasix/wasmer build + S6 CI are network-gated | S6 (network-gated) |
 
 (M3 depends on M1 only lightly; M2→M3 is the hard dependency. M5 can start after M0 and run parallel to M3/M4 with a stub Mem. Suggested staffing: one thread M2→M3→M4, one thread M0→M1→M5→M6/M7.)
 

@@ -23,6 +23,36 @@ harness/run-machine-gate.sh       # devices: UART/ACLINT/PLIC/syscon (fast)
 harness/run-linux-boot-gate.sh    # full OpenSBI+Linux+initramfs boot (slow)
 ```
 
+### M6 gate: browser (offline core)
+
+```sh
+harness/run-web-smoke-gate.sh     # vane-web wasm + OPFS-shape swap bridge in Node (fast)
+```
+
+Builds the `vane-web` wasm package (`wasm-pack --target nodejs`) and runs the
+swap-stress guest through it with a JS-provided swap store (the same shape
+the OPFS bridge uses in a browser worker). The full browser demo lives in
+`demo/browser/` (see its README); the Playwright E2E needs npm + a browser
+download (network) and is a nightly job.
+
+### M7: WASIX threaded host IO
+
+The `wasix` cargo feature on `vane-cli` runs the UART stdin pump on a
+background thread (a `std::sync::mpsc` channel feeds the interpreter loop)
+instead of cooperative polling between quanta. Time is virtual
+(instruction-counted), so the thread only moves console input off the
+interpreter's critical path. Validated natively by `harness/payload-echo`
+(a guest polls the UART and echoes a byte delivered via the stdin-pump
+thread): `printf V | vane-cli --features wasix --elf payload-echo --machine`
+→ `ECHO:V:OK`.
+
+**WASIX build/run (network-gated)**: needs `cargo install cargo-wasix`,
+`cargo wasix download-toolchain`, and the `wasmer` runtime. Then:
+`cargo wasix build -p vane-cli --no-default-features --features wasix` and
+boot under wasmer. The plain `wasm32-wasip1` build already runs under wasmer
+(WASIX is a wasip1 superset); the `wasix` feature additionally uses a real
+thread for console IO (S6).
+
 ### M5 gate: encrypted swap
 
 ```sh

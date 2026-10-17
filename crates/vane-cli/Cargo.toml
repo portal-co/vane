@@ -12,6 +12,11 @@ publish = false
 # for wasm32-wasip1 / WASIX builds (`--no-default-features`).
 default = ["js"]
 js = ["vane/js-host"]
+# `wasix` enables the threaded host-IO path: a background thread pumps stdin
+# into the emulated UART (instead of cooperative polling between quanta).
+# WASIX supports real threads; the same code also runs on native. There is no
+# WASIX-specific API here — threads + channels suffice (PLAN §8 / M7).
+wasix = []
 
 [dependencies]
 vane = { path = "../vane", default-features = false }

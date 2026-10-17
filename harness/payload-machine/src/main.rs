@@ -169,9 +169,16 @@ extern "C" fn main_entry() -> ! {
             out("t0") _,
         );
     }
-    unsafe { core::arch::asm!("nop") };
-    if unsafe { core::ptr::read_volatile(&raw const PLIC_HITS) } != 1 {
-        poweroff(45);
+    // Wait for the external interrupt. It may arrive after this point when
+    // the RX byte is fed at runtime (e.g. the M7 stdin pump) rather than
+    // pre-staged via --uart-rx, so spin (bounded) instead of a single nop.
+    let mut spins = 0u32;
+    while unsafe { core::ptr::read_volatile(&raw const PLIC_HITS) } != 1 {
+        spins += 1;
+        if spins > 20_000_000 {
+            poweroff(45);
+        }
+        unsafe { core::arch::asm!("nop") };
     }
     if unsafe { core::ptr::read_volatile(&raw const CLAIMED) } != 10 {
         poweroff(46);

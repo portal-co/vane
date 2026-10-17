@@ -514,6 +514,9 @@ impl Machine {
         // only feeds console input and refreshes IRQ lines.
         if !rx.is_empty() {
             self.uart.push_rx(rx);
+            // An RX push can newly pend the UART interrupt, so the PLIC scan
+            // must run (matching the irq_dirty contract in `new`).
+            self.irq_dirty = true;
         }
         self.step_irqs()
     }
