@@ -242,7 +242,9 @@ impl Reactor {
         if let Some(swap) = &lock.mem.swap {
             let mut s = swap.lock();
             let start = base.saturating_sub(lock.mem.swap_base) >> 16;
-            let end = (base + len).saturating_sub(lock.mem.swap_base).div_ceil(0x1_0000);
+            let end = (base + len)
+                .saturating_sub(lock.mem.swap_base)
+                .div_ceil(0x1_0000);
             for page_no in start..end {
                 s.pin(page_no);
             }

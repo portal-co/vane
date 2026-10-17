@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>vane — Linux on RISC-V in the browser</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; font-family: system-ui, sans-serif; background: #0b0e14; color: #d6deeb; }
+    header { padding: 0.6rem 1rem; display: flex; gap: 1rem; align-items: baseline; border-bottom: 1px solid #1f2430; }
+    header h1 { font-size: 1rem; margin: 0; font-weight: 600; }
+    header .meta { font-size: 0.8rem; color: #8b98ab; }
+    #console {
+      box-sizing: border-box; width: 100%; height: 70vh; overflow-y: auto;
+      background: #000; color: #d6ffb0; padding: 0.75rem; margin: 0;
+      font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+      white-space: pre-wrap; word-break: break-word;
+    }
+    #input {
+      box-sizing: border-box; width: 100%; padding: 0.6rem 0.75rem;
+      background: #10141c; color: #d6deeb; border: 0; border-top: 1px solid #1f2430;
+      font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; outline: none;
+    }
+    #stats { padding: 0.4rem 1rem; font-size: 0.78rem; color: #8b98ab; border-top: 1px solid #1f2430; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>vane</h1>
+    <span class="meta">RISC-V Linux in a worker, RAM paged to encrypted OPFS swap</span>
+    <span class="meta" id="status">starting…</span>
+  </header>
+  <pre id="console"></pre>
+  <input id="input" placeholder="type a command and press Enter" autocomplete="off" spellcheck="false" />
+  <div id="stats"></div>
+  <script type="module" src="main.js"></script>
+</body>
+</html>

@@ -61,11 +61,17 @@ fn file_swap_records_are_ciphertext() {
             run = 1;
         }
     }
-    assert!(max_run < 64, "swap record has a {max_run}-byte plaintext run — not encrypted");
+    assert!(
+        max_run < 64,
+        "swap record has a {max_run}-byte plaintext run — not encrypted"
+    );
     // And the record's ciphertext body must not be all-zero (it isn't the
     // plaintext 0xA1, and it isn't untouched sparse space).
     let body = &record[NONCE_BYTES..NONCE_BYTES + PAGE_BYTES];
-    assert!(body.iter().any(|&b| b != 0), "record body is unexpectedly zero");
+    assert!(
+        body.iter().any(|&b| b != 0),
+        "record body is unexpectedly zero"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

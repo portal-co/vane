@@ -146,7 +146,6 @@ pub struct Mem {
 
     /// Size in bytes of the swap-backed RAM region.
     pub swap_len: u64,
-
 }
 impl Mem {
     /// Get a pointer to a specific address in memory (legacy system)

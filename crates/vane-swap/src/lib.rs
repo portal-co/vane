@@ -132,7 +132,13 @@ impl Crypter {
     /// Encrypt `page` into `out` as `[ nonce | ciphertext | tag ]`, binding
     /// `slot` as AAD. `nonce` must be fresh-random per write (the caller
     /// draws it from the host CSPRNG).
-    pub fn seal(&self, slot: u64, nonce: &[u8; NONCE_BYTES], page: &[u8; PAGE_BYTES], out: &mut [u8; RECORD_BYTES]) {
+    pub fn seal(
+        &self,
+        slot: u64,
+        nonce: &[u8; NONCE_BYTES],
+        page: &[u8; PAGE_BYTES],
+        out: &mut [u8; RECORD_BYTES],
+    ) {
         out[..NONCE_BYTES].copy_from_slice(nonce);
         out[NONCE_BYTES..NONCE_BYTES + PAGE_BYTES].copy_from_slice(page);
         let aad = slot.to_le_bytes();
@@ -149,18 +155,18 @@ impl Crypter {
 
     /// Verify the tag (with `slot` as AAD) and decrypt into `out`. Returns
     /// `SwapError::Integrity` on any tampering.
-    pub fn open(&self, slot: u64, record: &[u8; RECORD_BYTES], out: &mut [u8; PAGE_BYTES]) -> Result<(), SwapError> {
+    pub fn open(
+        &self,
+        slot: u64,
+        record: &[u8; RECORD_BYTES],
+        out: &mut [u8; PAGE_BYTES],
+    ) -> Result<(), SwapError> {
         let nonce = &record[..NONCE_BYTES];
         let tag = &record[NONCE_BYTES + PAGE_BYTES..];
         out.copy_from_slice(&record[NONCE_BYTES..NONCE_BYTES + PAGE_BYTES]);
         let aad = slot.to_le_bytes();
         self.cipher
-            .decrypt_in_place_detached(
-                XNonce::from_slice(nonce),
-                &aad,
-                out,
-                tag.into(),
-            )
+            .decrypt_in_place_detached(XNonce::from_slice(nonce), &aad, out, tag.into())
             .map_err(|_| SwapError::Integrity)
     }
 }

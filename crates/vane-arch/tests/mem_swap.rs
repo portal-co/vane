@@ -49,7 +49,10 @@ fn swap_region_read_write_roundtrip() {
     }
     assert!(m.take_swap_error().is_none());
     let st = m.swap.as_ref().unwrap().lock().stats();
-    assert!(st.faults > 0 && st.evictions > 0, "expected swap activity: {st:?}");
+    assert!(
+        st.faults > 0 && st.evictions > 0,
+        "expected swap activity: {st:?}"
+    );
     assert!(st.swap_bytes_written > 0, "expected writebacks: {st:?}");
 }
 

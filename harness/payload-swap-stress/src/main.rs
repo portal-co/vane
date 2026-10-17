@@ -15,7 +15,7 @@
 #![no_std]
 #![no_main]
 
-use core::arch::{asm, naked_asm};
+use core::arch::naked_asm;
 
 const UART: usize = 0x1000_0000;
 const SYSCON: usize = 0x10_0000;
@@ -40,7 +40,11 @@ fn uart_hex(mut v: u64) {
     let mut buf = [0u8; 16];
     for i in 0..16 {
         let nib = (v >> 60) & 0xF;
-        buf[i] = if nib < 10 { b'0' + nib as u8 } else { b'a' + (nib as u8 - 10) };
+        buf[i] = if nib < 10 {
+            b'0' + nib as u8
+        } else {
+            b'a' + (nib as u8 - 10)
+        };
         v <<= 4;
     }
     for b in buf {
@@ -52,7 +56,11 @@ fn poweroff(code: u32) -> ! {
     unsafe {
         core::ptr::write_volatile(
             SYSCON as *mut u32,
-            if code == 0 { 0x5555 } else { (code << 16) | 0x3333 },
+            if code == 0 {
+                0x5555
+            } else {
+                (code << 16) | 0x3333
+            },
         )
     };
     loop {}
@@ -63,7 +71,9 @@ struct Rng(u64);
 impl Rng {
     fn for_page(page: usize) -> Self {
         // Nonzero, page-derived seed.
-        Rng((page as u64).wrapping_add(1).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+        Rng((page as u64)
+            .wrapping_add(1)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15))
     }
     fn next(&mut self) -> u64 {
         let mut x = self.0;

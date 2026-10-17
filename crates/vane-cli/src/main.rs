@@ -459,7 +459,9 @@ fn main() {
             // S5: a swap integrity/IO failure is a hard VM error, not silent
             // corruption. Halt and report.
             if let Some(se) = reactor.take_swap_error() {
-                eprintln!("vane-cli: swap integrity/IO error: {se:?} (backing store tampered or failed; halting)");
+                eprintln!(
+                    "vane-cli: swap integrity/IO error: {se:?} (backing store tampered or failed; halting)"
+                );
                 std::process::exit(4);
             }
             if let Some(tohost) = args.tohost {

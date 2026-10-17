@@ -1,0 +1,21 @@
+[package]
+name = "vane-web"
+edition = "2021"
+version.workspace = true
+license.workspace = true
+description = "wasm-bindgen browser surface for vane machine mode + encrypted swap (PLAN_LINUX_WASM.md §6/M6)"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+vane = { path = "../vane", default-features = false }
+vane-swap = { path = "../vane-swap" }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
