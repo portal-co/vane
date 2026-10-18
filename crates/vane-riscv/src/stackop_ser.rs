@@ -330,12 +330,15 @@ pub fn decode_op(r: &mut Reader) -> Result<StackOp, SerError> {
     })
 }
 
-/// Serialize a trace cache: a set of (guest pc, StackOp trace) pairs.
-pub fn serialize_trace_cache(traces: &[(u64, Vec<StackOp>)]) -> Vec<u8> {
+/// Serialize a trace cache: a set of (guest pc, StackOp trace) pairs. Takes
+/// references (`StackOp` isn't `Clone`), so a cache of `Rc<Vec<StackOp>>` can
+/// be serialized without cloning.
+pub fn serialize_trace_cache<'a>(traces: impl Iterator<Item = (u64, &'a [StackOp])>) -> Vec<u8> {
+    let collected: Vec<(u64, &'a [StackOp])> = traces.collect();
     let mut w = Writer::new();
-    w.u32(traces.len() as u32);
-    for (pc, ops) in traces {
-        w.u64(*pc);
+    w.u32(collected.len() as u32);
+    for (pc, ops) in collected {
+        w.u64(pc);
         w.u32(ops.len() as u32);
         for op in ops {
             encode_op(op, &mut w);
