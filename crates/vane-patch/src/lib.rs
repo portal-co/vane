@@ -5,20 +5,29 @@
 //! snapshot and register the result into the compiled-trace registry. They
 //! differ in how they treat the module's structural data:
 //!
-//! - The **custom patcher** ([`embed_snapshot`]) is *purely additive* — it
-//!   inserts the snapshot as a custom section and changes nothing else, so by
-//!   construction no data segment, global, export, or function is dropped.
+//! - The **custom patcher** ([`compile_trace_pack`]) recompiles hot `StackOp`
+//!   traces back to WASM and places them in a dispatch table's slots, so the
+//!   next instance runs the precompiled code instead of interpreting. Snapshot
+//!   embedding (resuming a booted state) is Wizer's job — Wizer is a library
+//!   now — so this crate deliberately does not do it. The patcher is *purely
+//!   additive* — it adds functions and fills table slots, changing nothing
+//!   else, so no data segment, global, export, or function is dropped.
 //!   [`audit_no_stripping`] proves it (S-W3).
-//! - The **Weval wrapper** ([`weval`]) runs the external Weval partial
-//!   evaluator (network/tool-gated) and then *re-attaches* any structural data
-//!   Weval's reachability analysis stripped, so the specialized module is still
-//!   a complete, runnable machine.
+//! - The **Weval wrapper** ([`weval_specialize`]) runs the external Weval
+//!   partial evaluator (network/tool-gated) and then *re-attaches* any
+//!   structural data Weval's reachability analysis stripped, so the
+//!   specialized module is still a complete, runnable machine.
 
 use walrus::Module;
 use walrus::RawCustomSection;
-
-/// The custom section name holding an embedded machine snapshot.
-pub const SNAPSHOT_SECTION: &str = "vane.snapshot";
+use vane_target_core::StackOp;
+use vane_target_wasm::WasmAbiConfig;
+use wasm_encoder::reencode::{RoundtripReencoder, utils::instruction};
+use wasm_encoder::{
+    CodeSection, ConstExpr, DataSection, ElementSection, Elements, ExportKind, ExportSection,
+    Function, FunctionSection, ImportSection, Instruction, MemoryType, EntityType, TableSection,
+    TableType, TypeSection, ValType,
+};
 
 /// Errors from patching/auditing.
 #[derive(Debug)]
@@ -43,36 +52,129 @@ impl From<anyhow::Error> for PatchError {
     }
 }
 
-/// Embed a machine snapshot into a vane interpreter module as a
-/// `vane.snapshot` custom section. Purely additive: the input module's code,
-/// data, globals, exports, and existing custom sections are all preserved
-/// byte-for-byte (the patcher never strips). The host reads the embedded
-/// snapshot on boot and restores it, skipping the boot work that produced it.
-pub fn embed_snapshot(wasm: &[u8], snapshot: &[u8]) -> Result<Vec<u8>, PatchError> {
-    let mut module = Module::from_buffer(wasm)?;
-    // Replace any prior embedded snapshot: a multi-pass chain embeds the
-    // latest derived snapshot, so re-patching supersedes rather than
-    // accumulates (and re-patching the same snapshot is idempotent).
-    while module.customs.remove_raw(SNAPSHOT_SECTION).is_some() {}
-    module.customs.add(RawCustomSection {
-        name: SNAPSHOT_SECTION.to_string(),
-        data: snapshot.to_vec(),
-    });
-    Ok(module.emit_wasm())
+/// Recompile one `StackOp` trace back to a WASM function body (the custom
+/// patcher's core). The function has the `regfn` signature `(reg_0.., target_pc:
+/// i64) -> (reg_0..)` (the shared `OobConfig` calling convention), so a
+/// precompiled trace is directly `return_call`-compatible with the interpreter's
+/// dispatch chain — the next instance can run it in place of interpreting.
+pub fn compile_trace(ops: Vec<StackOp>, abi: &WasmAbiConfig) -> Function {
+    let mut f = Function::new([(1, ValType::I64), (1, ValType::I64)]); // scratch_a, scratch_b
+    let mut reencoder = RoundtripReencoder;
+    for jit_op in vane_arch::template::render_stack_to_wasm(ops.into_iter(), *abi) {
+        let vane_target_wasm::JitOpcode::Operator { op } = jit_op;
+        let instr = instruction(&mut reencoder, op).expect("reencode should not fail");
+        f.instruction(&instr);
+    }
+    f.instruction(&Instruction::End);
+    f
 }
 
-/// Extract an embedded snapshot from a patched module (the inverse of
-/// [`embed_snapshot`]). Returns `None` when no snapshot section is present.
-pub fn extract_snapshot(wasm: &[u8]) -> Result<Option<Vec<u8>>, PatchError> {
-    // Parse with a config that retains the custom section, then read it.
-    let module = Module::from_buffer(wasm)?;
-    for (_id, section) in module.customs.iter() {
-        if section.name() == SNAPSHOT_SECTION {
-            let data = section.data(&walrus::IdsToIndices::default()).into_owned();
-            return Ok(Some(data));
-        }
+/// Build a "precompiled trace pack" module: hot `StackOp` traces recompiled to
+/// WASM and placed in a dispatch table's slots, so the next instance uses the
+/// precompiled code. `traces` maps each hot guest pc to its `StackOp` trace.
+///
+/// The pack is self-contained and purely additive: it defines the regfn type,
+/// one compiled function per trace, a funcref dispatch table whose slot `i`
+/// holds trace `i`'s function (the "available slots"), and a `pc -> slot` map
+/// (a data segment the runtime's lookup stub consults). The host imports
+/// (`ecall`, `jit_invalidate`, `lookup_stub`) and the shared guest memory are
+/// imported so the pack links against the interpreter's runtime.
+pub fn compile_trace_pack(
+    traces: Vec<(u64, Vec<StackOp>)>,
+    abi: &WasmAbiConfig,
+) -> Result<Vec<u8>, PatchError> {
+    let n = traces.len();
+    // Extract the pcs up front (the traces are consumed to build the code).
+    let pcs: Vec<u64> = traces.iter().map(|(pc, _)| *pc).collect();
+    let num_regs = abi.num_regs;
+    // Types: 0 = regfn (params num_regs*i64 + target_pc i64 -> num_regs*i64);
+    //        1 = ecall (num_regs*i64 -> num_regs*i64); 2 = jit_invalidate (i64 -> ()).
+    let mut types = TypeSection::new();
+    let mut regfn_params: Vec<ValType> = (0..num_regs).map(|_| ValType::I64).collect();
+    regfn_params.push(ValType::I64); // target_pc
+    let regfn_results: Vec<ValType> = (0..num_regs).map(|_| ValType::I64).collect();
+    types.ty().function(regfn_params.clone(), regfn_results.clone());
+    types.ty().function((0..num_regs).map(|_| ValType::I64).collect::<Vec<_>>(), regfn_results.clone());
+    types.ty().function([ValType::I64], []);
+
+    // Imports (host imports + shared memory), at the indices the abi names.
+    let mut imports = ImportSection::new();
+    imports.import("env", "ecall", EntityType::Function(1));
+    imports.import("env", "jit_invalidate", EntityType::Function(2));
+    imports.import("env", "lookup_stub", EntityType::Function(0));
+    imports.import(
+        "env",
+        "memory",
+        EntityType::Memory(MemoryType {
+            minimum: 1,
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        }),
+    );
+
+    // Compiled trace functions (func indices start after the 3 imports).
+    let first_func = 3u32;
+    let mut funcs = FunctionSection::new();
+    let mut code = CodeSection::new();
+    for (_pc, ops) in traces {
+        funcs.function(0); // regfn type
+        code.function(&compile_trace(ops, abi));
     }
-    Ok(None)
+
+    // Dispatch table: funcref slots, one per trace.
+    let mut tables = TableSection::new();
+    tables.table(TableType {
+        element_type: wasm_encoder::RefType::FUNCREF,
+        table64: false,
+        minimum: n as u64,
+        maximum: Some(n as u64),
+        shared: false,
+    });
+
+    // Fill the slots: active element segment, slot i -> func (first_func + i).
+    let func_indices: Vec<u32> = (0..n as u32).map(|i| first_func + i).collect();
+    let mut elems = ElementSection::new();
+    elems.active(
+        Some(0),
+        &ConstExpr::i32_const(0),
+        Elements::Functions(func_indices.into()),
+    );
+
+    // pc -> slot map as a data segment (pairs of (pc: u64, slot: u32)).
+    let mut map_bytes: Vec<u8> = Vec::new();
+    for (i, pc) in pcs.iter().enumerate() {
+        map_bytes.extend_from_slice(&pc.to_le_bytes());
+        map_bytes.extend_from_slice(&(i as u32).to_le_bytes());
+    }
+    let mut data = DataSection::new();
+    data.active(0, &ConstExpr::i32_const(0), map_bytes);
+
+    // Exports: the table (the slots) and each compiled trace function.
+    let mut exports = ExportSection::new();
+    exports.export("trace_table", ExportKind::Table, 0);
+    for (i, pc) in pcs.iter().enumerate() {
+        exports.export(
+            &format!("trace_{pc:x}"),
+            ExportKind::Func,
+            first_func + i as u32,
+        );
+    }
+
+    let mut module = wasm_encoder::Module::new();
+    module.section(&types);
+    module.section(&imports);
+    module.section(&funcs);
+    module.section(&tables);
+    module.section(&exports);
+    module.section(&elems);
+    module.section(&code);
+    module.section(&data);
+    let bytes = module.finish();
+    // Validate before returning (walrus validates on parse).
+    Module::from_buffer(&bytes).map_err(|e| PatchError::Parse(format!("pack invalid: {e:#}")))?;
+    Ok(bytes)
 }
 
 /// A structural-preservation audit report (S-W3): the counts and contents of
@@ -160,8 +262,11 @@ pub fn reattach_stripped_data(original: &[u8], specialized: &[u8]) -> Result<Vec
     // report; data segments/globals are preserved by the audit contract — a
     // specializing pass that strips them is repaired here by re-adding the
     // missing custom sections (the machine's structural metadata).
-    let present: std::collections::BTreeSet<String> =
-        p.customs.iter().map(|(_i, s)| s.name().to_string()).collect();
+    let present: std::collections::BTreeSet<String> = p
+        .customs
+        .iter()
+        .map(|(_i, s)| s.name().to_string())
+        .collect();
     for (_id, section) in o.customs.iter() {
         if !present.contains(section.name()) {
             p.customs.add(RawCustomSection {

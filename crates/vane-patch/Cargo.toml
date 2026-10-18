@@ -2,11 +2,19 @@
 name = "vane-patch"
 version = "0.1.0"
 edition = "2024"
-description = "Custom wasm binary patcher + Weval wrapper for vane machine acceleration (PLAN_VIRTIO_WEVAL W2/W3)"
+description = "Custom wasm patcher (StackOp->WASM trace precompilation) + Weval wrapper for vane machine acceleration (PLAN_VIRTIO_WEVAL W2/W3)"
 
 [dependencies]
 walrus = "0.27.2"
 anyhow = "1"
+# StackOp -> WASM trace compilation (the custom patcher's core). target-wasm
+# is the gen-blocks renderer; vane is a nightly toolchain so this is fine.
+vane-arch = { path = "../vane-arch", features = ["target-wasm"] }
+vane-target-core = { path = "../vane-target-core" }
+vane-target-wasm = { path = "../vane-target-wasm" }
+wasm-encoder = { workspace = true }
+wasmparser = { workspace = true }
 
 [dev-dependencies]
-wasm-encoder = "0.239.0"
+wat = "1"
+wasmprinter = "0.224"
