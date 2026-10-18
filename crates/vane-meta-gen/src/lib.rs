@@ -122,6 +122,11 @@ macro_rules! vane_meta {
                     lock.regs = *regs;
                     lock.regs[0] = 0; // x0 is hardwired to zero
                 }
+                // The plain-Rust reactor keeps the register file in
+                // `Core.regs`, so the trace engine may cache it.
+                fn lr_has_local_regfile(&self) -> bool {
+                    true
+                }
                 fn lr_read_byte(&self, addr: u64) -> u8 {
                     // Fetch validation (CheckCode): translate as exec.
                     let mut lock = self.core.lock();
@@ -276,6 +281,9 @@ macro_rules! vane_meta {
                         // trace-invalidation contract covers self-modifying
                         // code, so CheckCode need not re-read code bytes.
                         check_code_integrity: !hart_enabled0,
+                        // Cache the register file only when it's locally
+                        // resident (not under js-host, where regs live in JS).
+                        reg_cache: $crate::vane_arch::interp::LocalReactor::lr_has_local_regfile(self),
                     };
                     loop {
                         if let Some(f) = &mut fuel {
@@ -334,7 +342,7 @@ macro_rules! vane_meta {
                                 continue;
                             }
                             // Non-privileged: compile the trace and cache it.
-                            
+
                             let f = $flate;
                             let lock = self.core.lock();
                             let test_mode = lock.test_mode;
@@ -387,7 +395,7 @@ macro_rules! vane_meta {
                                 .borrow_mut()
                                 .insert(pc, ops.clone());
                             ops
-                        
+
                         };
                         let pc = host.pc;
                         let exit = {

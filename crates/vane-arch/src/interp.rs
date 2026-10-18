@@ -741,10 +741,16 @@ pub struct LocalStackHost<R> {
     /// this instead of going through the reactor (which locks per access).
     /// Loaded from the reactor via [`load_regs`](Self::load_regs) and synced
     /// back via [`flush_regs`](Self::flush_regs) at privileged-step
-    /// boundaries and on exit. Authoritative while a trace runs.
+    /// boundaries and on exit. Authoritative while a trace runs. Only used
+    /// when `reg_cache` is set (the reactor has a local register file).
     pub regs: [u64; 32],
     /// Whether the cache has writes not yet flushed to the reactor.
     pub regs_dirty: bool,
+    /// Whether to use the register cache. True when the reactor has a local
+    /// register file (`LocalReactor::lr_has_local_regfile`); false when the
+    /// registers live behind the host (e.g. JS `get$`/`set_reg` under
+    /// js-host), where a cache would diverge from the JIT/syscall view.
+    pub reg_cache: bool,
     /// Whether `CheckCode` re-reads code bytes each execution. False when
     /// the privileged hart is active (the fence.i/satp trace-invalidation
     /// contract covers self-modifying code); the read is then skipped.
@@ -752,14 +758,17 @@ pub struct LocalStackHost<R> {
 }
 
 impl<R: LocalReactor> LocalStackHost<R> {
-    /// Load the register cache from the reactor (one bulk read).
+    /// Load the register cache from the reactor (one bulk read). No-op when
+    /// the register cache is disabled.
     pub fn load_regs(&mut self) {
-        self.regs = self.reactor.lr_load_all_regs();
-        self.regs_dirty = false;
+        if self.reg_cache {
+            self.regs = self.reactor.lr_load_all_regs();
+            self.regs_dirty = false;
+        }
     }
     /// Flush the register cache to the reactor if it has unflushed writes.
     pub fn flush_regs(&mut self) {
-        if self.regs_dirty {
+        if self.reg_cache && self.regs_dirty {
             self.reactor.lr_store_all_regs(&self.regs);
             self.regs_dirty = false;
         }
@@ -786,6 +795,14 @@ pub trait LocalReactor {
     /// A device (MMIO) access ran since the last call — an interrupt may
     /// newly be pending. Default: never.
     fn lr_take_irq_check(&self) -> bool {
+        false
+    }
+    /// Whether the register file is locally resident (so [`LocalStackHost`]
+    /// may cache it). Default false. The plain-Rust reactor keeps registers
+    /// in `Core.regs` and returns true; a js-host reactor keeps them in JS
+    /// (`get$`/`set_reg`) and returns false — caching those would diverge
+    /// from the JS register file the JIT and syscall shim read.
+    fn lr_has_local_regfile(&self) -> bool {
         false
     }
     /// Byte width of a [`MemWidth`].
@@ -842,22 +859,31 @@ pub trait LocalReactor {
 #[cfg(feature = "async-host")]
 impl<R: LocalReactor> AsyncStackHost for LocalStackHost<R> {
     async fn load_reg(&mut self, r: u8) -> u64 {
-        // Register cache: no reactor lock on the hot path.
+        // Register cache when the reactor has a local regfile; otherwise pass
+        // through to the reactor (js-host keeps registers in JS).
         if r == 0 {
             0
-        } else {
+        } else if self.reg_cache {
             self.regs[(r % 32) as usize]
+        } else {
+            self.reactor.lr_load_reg(r)
         }
     }
     async fn store_reg(&mut self, r: u8, v: u64) {
         if r == 0 {
             return; // x0 is hardwired to zero
         }
-        // Log the old value for trap-atomic undo (see undo_pending_inst).
-        let idx = (r % 32) as usize;
-        self.undo_log.push((r, self.regs[idx]));
-        self.regs[idx] = v;
-        self.regs_dirty = true;
+        if self.reg_cache {
+            // Log the old value for trap-atomic undo (see undo_pending_inst).
+            let idx = (r % 32) as usize;
+            self.undo_log.push((r, self.regs[idx]));
+            self.regs[idx] = v;
+            self.regs_dirty = true;
+        } else {
+            let old = self.reactor.lr_load_reg(r);
+            self.undo_log.push((r, old));
+            self.reactor.lr_store_reg(r, v);
+        }
     }
     // load_state/store_state keep the trait defaults (RISC-V traces do not
     // use StateSlot; aarch64 harnesses override them).
@@ -902,9 +928,13 @@ impl<R: LocalReactor> LocalStackHost<R> {
         let entries: alloc::vec::Vec<_> = self.undo_log.drain(self.undo_mark..).collect();
         let had_entries = !entries.is_empty();
         for (r, v) in entries.into_iter().rev() {
-            // Revert the register cache; the dispatch loop flushes before the
-            // re-step, so the reactor observes the undone state.
-            self.regs[(r % 32) as usize] = v;
+            if self.reg_cache {
+                // Revert the register cache; the dispatch loop flushes before
+                // the re-step, so the reactor observes the undone state.
+                self.regs[(r % 32) as usize] = v;
+            } else {
+                self.reactor.lr_store_reg(r, v);
+            }
         }
         if had_entries {
             self.regs_dirty = true;
@@ -1529,9 +1559,21 @@ fn alu64_fn(op: &StackOp) -> Option<fn(u64, u64) -> u64> {
         StackOp::ShrU64 => |x, y| x.wrapping_shr((y & 63) as u32),
         StackOp::ShrS64 => |x, y| ((x as i64).wrapping_shr((y & 63) as u32)) as u64,
         StackOp::DivU64 => |x, y| if y == 0 { u64::MAX } else { x / y },
-        StackOp::DivS64 => |x, y| if y == 0 { u64::MAX } else { (x as i64).wrapping_div(y as i64) as u64 },
+        StackOp::DivS64 => |x, y| {
+            if y == 0 {
+                u64::MAX
+            } else {
+                (x as i64).wrapping_div(y as i64) as u64
+            }
+        },
         StackOp::RemU64 => |x, y| if y == 0 { x } else { x % y },
-        StackOp::RemS64 => |x, y| if y == 0 { x } else { (x as i64).wrapping_rem(y as i64) as u64 },
+        StackOp::RemS64 => |x, y| {
+            if y == 0 {
+                x
+            } else {
+                (x as i64).wrapping_rem(y as i64) as u64
+            }
+        },
         StackOp::MulHU64 => |x, y| ((x as u128 * y as u128) >> 64) as u64,
         StackOp::MulHS64 => |x, y| (((x as i64 as i128) * (y as i64 as i128)) >> 64) as u64,
         StackOp::MulHSU64 => |x, y| (((x as i64 as i128) * (y as u128 as i128)) >> 64) as u64,

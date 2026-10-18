@@ -201,9 +201,24 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
 
     // ── Instruction → StackOp mapping ────────────────────────────────────────
 
+    // Cap on the fallthrough inline-chain length. rv_emit inlines reachable
+    // code recursively; without a bound, a single trace can inline a huge
+    // region and the per-level `Labels` clone makes compilation O(N^2).
+    // Capping the chain at MAX_INLINE bounds each trace's compile cost; the
+    // dispatch loop follows the emitted TailCall to the next trace.
+    const MAX_INLINE: u32 = 128;
+    let emit_next = |ops: &mut alloc::vec::Vec<StackOp>, target: u64, labels: Labels| {
+        if nd >= MAX_INLINE {
+            ops.push(StackOp::PushImm(target));
+            ops.push(StackOp::TailCall);
+        } else {
+            emit_to(ops, this.params, target, labels, nd);
+        }
+    };
+
     // Shorthand: emit fallthrough to next sequential PC.
     let ft = |ops: &mut alloc::vec::Vec<StackOp>, labels: Labels| {
-        emit_to(ops, this.params, next_pc, labels, nd);
+        emit_next(ops, next_pc, labels);
     };
 
     // Shorthand: emit a conditional branch (taken = branch_target, not-taken = next_pc).
@@ -211,9 +226,9 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
         |ops: &mut alloc::vec::Vec<StackOp>, cmp: StackOp, branch_target: u64, labels: Labels| {
             ops.push(cmp);
             ops.push(StackOp::IfBegin);
-            emit_to(ops, this.params, branch_target, labels.clone(), nd);
+            emit_next(ops, branch_target, labels.clone());
             ops.push(StackOp::IfElse);
-            emit_to(ops, this.params, next_pc, labels, nd);
+            emit_next(ops, next_pc, labels);
             ops.push(StackOp::IfEnd);
         };
 

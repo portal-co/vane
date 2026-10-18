@@ -5,14 +5,30 @@
 use core::arch::naked_asm;
 const UART: usize = 0x1000_0000;
 const SYSCON: usize = 0x10_0000;
-fn w8(a: usize, v: u8) { unsafe { core::ptr::write_volatile(a as *mut u8, v) } }
-fn uart(s: &str) { for b in s.bytes() { w8(UART, b) } }
-fn off(c: u32) -> ! { unsafe { core::ptr::write_volatile(SYSCON as *mut u32, if c==0 {0x5555} else {(c<<16)|0x3333}) }; loop {} }
+fn w8(a: usize, v: u8) {
+    unsafe { core::ptr::write_volatile(a as *mut u8, v) }
+}
+fn uart(s: &str) {
+    for b in s.bytes() {
+        w8(UART, b)
+    }
+}
+fn off(c: u32) -> ! {
+    unsafe {
+        core::ptr::write_volatile(
+            SYSCON as *mut u32,
+            if c == 0 { 0x5555 } else { (c << 16) | 0x3333 },
+        )
+    };
+    loop {}
+}
 
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text._start")]
-pub extern "C" fn _start() -> ! { naked_asm!("li sp, 0x80800000", "j main_entry") }
+pub extern "C" fn _start() -> ! {
+    naked_asm!("li sp, 0x80800000", "j main_entry")
+}
 
 #[inline(never)]
 fn compute(mut a: u64, mut b: u64, mut c: u64, mut d: u64) -> u64 {
@@ -39,4 +55,6 @@ extern "C" fn main_entry() -> ! {
     off(0);
 }
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! { off(15) }
+fn panic(_: &core::panic::PanicInfo) -> ! {
+    off(15)
+}

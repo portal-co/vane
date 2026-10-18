@@ -43,6 +43,7 @@ fn spin_loop_yields_on_fuel() {
             regs: [0; 32],
             regs_dirty: false,
             check_code_integrity: true,
+            reg_cache: true,
         };
         host.load_regs();
         // drive the async fn with a noop waker
