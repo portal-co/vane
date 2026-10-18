@@ -3,3 +3,5 @@
 /linux
 /initrd.gz
 /alpine-minirootfs-*.tar.gz
+/linux-modules-*.deb
+/modules/
