@@ -476,7 +476,9 @@ fn main() {
                         rx_bytes.push(b);
                     }
                 }
-                let power = reactor.with_hart(|h| h.machine_tick(&rx_bytes));
+                // machine_io_tick processes virtio queues (needs guest-memory
+                // access) in addition to feeding UART RX and folding IRQs.
+                let power = reactor.machine_io_tick(&rx_bytes);
                 if let Some(tx) = reactor.with_machine(|m| m.uart.drain_tx()) {
                     for b in tx {
                         host.uart_write(b);

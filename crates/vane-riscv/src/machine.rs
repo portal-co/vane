@@ -27,12 +27,16 @@ pub const ACLINT_MTIMER_BASE: u64 = 0x0200_0000;
 pub const ACLINT_MSWI_BASE: u64 = 0x02F0_0000;
 pub const PLIC_BASE: u64 = 0x0C00_0000;
 pub const UART_BASE: u64 = 0x1000_0000;
+/// First virtio-mmio slot; each device occupies 0x1000 bytes
+/// (`VIRTIO_MMIO_BASE + slot*0x1000`), PLIC source `1 + slot`.
+pub const VIRTIO_MMIO_BASE: u64 = 0x1000_1000;
 
 pub const UART_IRQ: u32 = 10;
 
 /// ns16550a UART. TX accumulates in `tx`; RX bytes arrive via `push_rx`.
 /// Interrupt (PLIC source [`UART_IRQ`]) is raised when RX data is pending
 /// and enabled in IER.
+#[derive(Clone)]
 pub struct Uart16550 {
     ier: u8,
     lcr: u8,
@@ -151,6 +155,7 @@ impl Default for Uart16550 {
 /// ACLINT: mswi (MSIP) + mtimer (mtime/mtimecmp, MTIP). Time is driven by
 /// the host via [`Aclint::set_time_nanos`]; the compare check runs on every
 /// step through [`Aclint::mtip`].
+#[derive(Clone)]
 pub struct Aclint {
     pub msip: bool,
     pub mtimecmp: u64,
@@ -237,6 +242,7 @@ impl Default for Aclint {
 
 /// Minimal PLIC (QEMU virt wiring: context 0 = M-mode hart 0, context 1 =
 /// S-mode hart 0). 32 sources (we use 1..=8 for virtio, 10 for UART).
+#[derive(Clone)]
 pub struct Plic {
     priority: [u32; 32],
     pending: u32,
@@ -373,7 +379,7 @@ impl Default for Plic {
 
 /// SiFive test finisher: write 0x5555 = poweroff (pass), 0x7777 = reboot,
 /// (code<<16)|0x3333 = poweroff with failure code.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Syscon {
     pub power: Option<PowerAction>,
 }
@@ -384,12 +390,30 @@ pub enum PowerAction {
     Reboot,
 }
 
+/// Snapshot of the machine's device state (PLAN_VIRTIO_WEVAL workstream E;
+/// spday full-virtualization plan item C). Guest RAM and hart state travel
+/// separately (the reactor's memory snapshot + [`crate::hart::HartSnapshot`]);
+/// virtio device *backends* (host files, sockets) are not serialized — the
+/// host re-binds them after restore.
+#[derive(Clone)]
+pub struct MachineSnapshot {
+    pub uart: Uart16550,
+    pub aclint: Aclint,
+    pub plic: Plic,
+    pub syscon: Syscon,
+    pub virtio: alloc::vec::Vec<crate::virtio::VirtioMmioSnapshot>,
+    pub irq_dirty: bool,
+}
+
 /// The machine: devices + physical-address dispatch.
 pub struct Machine {
     pub uart: Uart16550,
     pub aclint: Aclint,
     pub plic: Plic,
     pub syscon: Syscon,
+    /// virtio-mmio devices (PLAN_VIRTIO_WEVAL workstream A); slot `i` is at
+    /// `VIRTIO_MMIO_BASE + i*0x1000` with PLIC source `1 + i`.
+    pub virtio: alloc::vec::Vec<crate::virtio::VirtioMmio>,
     /// Set whenever device state that can change an IRQ line changed
     /// (device store, UART RX push). `step_irqs` skips the PLIC scan while
     /// clear — per-step cost matters to the interpreter's hot loop.
@@ -405,6 +429,7 @@ impl Machine {
             aclint: Aclint::new(),
             plic: Plic::new(),
             syscon: Syscon::default(),
+            virtio: alloc::vec::Vec::new(),
             irq_dirty: true,
             cached_eip: [false; 2],
         }
@@ -415,9 +440,132 @@ impl Machine {
         pa < RAM_BASE
     }
 
+    /// Register a virtio-mmio device at the next free slot
+    /// (`VIRTIO_MMIO_BASE + slot*0x1000`, PLIC source `1 + slot`). Returns the
+    /// slot index.
+    pub fn add_virtio(&mut self, device: alloc::boxed::Box<dyn crate::virtio::VirtioDevice>) -> usize {
+        let slot = self.virtio.len();
+        let irq = 1 + slot as u32;
+        self.virtio
+            .push(crate::virtio::VirtioMmio::new(device, irq));
+        slot
+    }
+
+    /// Capture the device state for a machine snapshot.
+    pub fn save(&self) -> MachineSnapshot {
+        MachineSnapshot {
+            uart: self.uart.clone(),
+            aclint: self.aclint.clone(),
+            plic: self.plic.clone(),
+            syscon: self.syscon.clone(),
+            virtio: self.virtio.iter().map(|v| v.save()).collect(),
+            irq_dirty: self.irq_dirty,
+        }
+    }
+
+    /// Restore device state from a snapshot. Device topology (count and ids)
+    /// is fixed at machine construction; a mismatch fails visibly.
+    pub fn restore(
+        &mut self,
+        snap: &MachineSnapshot,
+    ) -> Result<(), crate::virtio::SnapshotError> {
+        if snap.virtio.len() != self.virtio.len() {
+            return Err(crate::virtio::SnapshotError::VirtioCountMismatch {
+                expected: snap.virtio.len(),
+                got: self.virtio.len(),
+            });
+        }
+        self.uart = snap.uart.clone();
+        self.aclint = snap.aclint.clone();
+        self.plic = snap.plic.clone();
+        self.syscon = snap.syscon.clone();
+        for (dev, dsnap) in self.virtio.iter_mut().zip(snap.virtio.iter()) {
+            dev.restore(dsnap)?;
+        }
+        self.irq_dirty = snap.irq_dirty;
+        Ok(())
+    }
+
+    /// Drain notified virtio queues with guest-memory access, raising device
+    /// IRQs. Called by the host each quantum (the trace loop's tick point),
+    /// since queue processing reads/writes guest RAM which the MMIO path
+    /// doesn't have. Returns true if any device raised its interrupt line.
+    pub fn process_virtio(&mut self, mem: &mut dyn crate::virtio::QueueMem) -> bool {
+        let mut any = false;
+        for dev in &mut self.virtio {
+            if dev.process(mem) {
+                self.plic.set_pending(dev.irq(), true);
+                self.irq_dirty = true;
+                any = true;
+            }
+        }
+        any
+    }
+
+    /// virtio-mmio load, width-aware (registers are 32-bit). `None` when
+    /// `addr` is not in the virtio range.
+    fn virtio_load(&mut self, addr: u64, width: u8, signed: bool) -> Option<u64> {
+        if !(VIRTIO_MMIO_BASE..VIRTIO_MMIO_BASE + 0x8000).contains(&addr) {
+            return None;
+        }
+        let rel = addr - VIRTIO_MMIO_BASE;
+        let slot = (rel / 0x1000) as usize;
+        let off = rel % 0x1000;
+        let dev = self.virtio.get_mut(slot)?;
+        // Extract `width` bytes starting at `off`, reading the containing
+        // 32-bit register(s). `read` is side-effect-free so re-reads are safe.
+        let mut v: u64 = 0;
+        for i in 0..width as u64 {
+            let bo = off + i;
+            let reg = dev.read(bo & !3);
+            v |= (((reg >> (8 * (bo & 3))) & 0xFF) as u64) << (8 * i);
+        }
+        Some(if signed {
+            match width {
+                1 => v as u8 as i8 as i64 as u64,
+                2 => v as u16 as i16 as i64 as u64,
+                4 => v as u32 as i32 as i64 as u64,
+                _ => v,
+            }
+        } else {
+            v
+        })
+    }
+
+    /// virtio-mmio store, width-aware. `None` when `addr` is not in the range.
+    fn virtio_store(&mut self, addr: u64, width: u8, value: u64) -> Option<()> {
+        if !(VIRTIO_MMIO_BASE..VIRTIO_MMIO_BASE + 0x8000).contains(&addr) {
+            return None;
+        }
+        let rel = addr - VIRTIO_MMIO_BASE;
+        let slot = (rel / 0x1000) as usize;
+        let off = rel % 0x1000;
+        let dev = self.virtio.get_mut(slot)?;
+        self.irq_dirty = true;
+        if width == 4 && off & 3 == 0 {
+            // The register block's natural access: one aligned 32-bit write.
+            dev.write(off, value as u32);
+        } else {
+            // Config-space partial access: read-modify-write the containing
+            // word so the device sees a single write.
+            let reg_addr = off & !3;
+            let mut reg = dev.read(reg_addr);
+            for i in 0..width.min(4) as u64 {
+                let bo = off + i;
+                let shift = 8 * (bo & 3);
+                reg = (reg & !(0xFFu32 << shift)) | ((((value >> (8 * i)) & 0xFF) as u32) << shift);
+            }
+            dev.write(reg_addr, reg);
+        }
+        Some(())
+    }
+
     /// Device load. `width` is in bytes (1/2/4/8). Returns a
     /// zero/sign-extended value per `signed`.
     pub fn load(&mut self, addr: u64, width: u8, signed: bool) -> Result<u64, Trap> {
+        if let Some(v) = self.virtio_load(addr, width, signed) {
+            return Ok(v);
+        }
         let fault = || Trap::exception(CAUSE_LOAD_PAGE_FAULT, addr);
         // Byte-granular reads at each device; compose for wider accesses.
         let read_dev = |m: &mut Machine, addr: u64| -> Result<u64, Trap> {
@@ -463,6 +611,9 @@ impl Machine {
 
     /// Device store.
     pub fn store(&mut self, addr: u64, width: u8, value: u64) -> Result<(), Trap> {
+        if self.virtio_store(addr, width, value).is_some() {
+            return Ok(());
+        }
         self.irq_dirty = true;
         let fault = || Trap::exception(CAUSE_STORE_PAGE_FAULT, addr);
         // Width-1 decomposition for UART/ACLINT/PLIC byte-style registers.
@@ -530,6 +681,11 @@ impl Machine {
         // changed since the last scan.
         if self.irq_dirty {
             self.plic.set_pending(UART_IRQ, self.uart.irq_pending());
+            // virtio lines are level-triggered on the device's unacked
+            // interrupt status.
+            for dev in &self.virtio {
+                self.plic.set_pending(dev.irq(), dev.interrupt_pending());
+            }
             self.cached_eip = [self.plic.eip(0), self.plic.eip(1)];
             self.irq_dirty = false;
         }
@@ -571,6 +727,18 @@ impl Default for Machine {
 ///
 /// Interrupt controller phandles: 1 = per-CPU RISC-V intc, 2 = PLIC.
 pub fn virt_dtb(ram_size: u64, initrd: Option<(u64, u64)>, bootargs: &str) -> Vec<u8> {
+    virt_dtb_with_virtio(ram_size, initrd, bootargs, &[])
+}
+
+/// [`virt_dtb`] plus one `virtio,mmio` node per entry in `virtio_devs`
+/// (device IDs in slot order; slot `i` sits at `VIRTIO_MMIO_BASE + i*0x1000`
+/// with PLIC source `1 + i`).
+pub fn virt_dtb_with_virtio(
+    ram_size: u64,
+    initrd: Option<(u64, u64)>,
+    bootargs: &str,
+    virtio_devs: &[u32],
+) -> Vec<u8> {
     use crate::fdt::FdtBuilder;
     const PH_INTC: u32 = 1;
     const PH_PLIC: u32 = 2;
@@ -670,6 +838,18 @@ pub fn virt_dtb(ram_size: u64, initrd: Option<(u64, u64)>, bootargs: &str) -> Ve
     // +0xBFF8) — the exact shape QEMU's virt machine exposes, which this
     // kernel config is known to drive. (ACLINT is register-compatible; we
     // serve msip at both 0x200_0000 and 0x2F0_0000.)
+    // virtio-mmio devices @ 0x1000_1000 + slot*0x1000, PLIC source 1+slot.
+    for (slot, _dev_id) in virtio_devs.iter().enumerate() {
+        let base = VIRTIO_MMIO_BASE + slot as u64 * 0x1000;
+        let name = alloc::format!("virtio_mmio@{base:x}");
+        f.begin_node(&name);
+        f.prop_str_list("compatible", &["virtio,mmio"]);
+        f.prop_reg("reg", base, 0x1000);
+        f.prop_cells("interrupts", &[1 + slot as u32]);
+        f.prop_u32("interrupt-parent", PH_PLIC);
+        f.end_node();
+    }
+
     f.begin_node("clint@2000000");
     f.prop_str_list("compatible", &["sifive,clint0", "riscv,clint0"]);
     f.prop_reg("reg", ACLINT_MTIMER_BASE, 0x10000);

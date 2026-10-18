@@ -148,6 +148,8 @@ impl Reactor {
                 #[cfg(not(feature = "js-host"))]
                 regs: [0; 32],
                 hart: Default::default(),
+                hooks: Rc::new(vane_arch::hooks::HookSet::new()),
+                hook_events: Vec::new(),
             })),
         }
     }
@@ -205,6 +207,32 @@ impl Reactor {
     /// satp) — used by device models, tests, and host drivers.
     pub fn with_hart<R>(&self, f: impl FnOnce(&mut vane_riscv::hart::HartState) -> R) -> R {
         f(&mut self.core.lock().hart)
+    }
+
+    /// Host tick for a machine-enabled reactor (PLAN_VIRTIO_WEVAL §A): process
+    /// virtio device queues — which need guest-memory access the MMIO path
+    /// doesn't have — then feed console input and fold device-driven IRQ
+    /// lines. Call each quantum. Returns a power action if the guest powered
+    /// off or rebooted.
+    pub fn machine_io_tick(&self, rx: &[u8]) -> Option<vane_riscv::machine::PowerAction> {
+        let mut lock = self.core.lock();
+        let core = &mut *lock;
+        let Core { mem, hart, .. } = core;
+        if let Some(m) = hart.machine.as_mut() {
+            m.process_virtio(mem);
+        }
+        hart.machine_tick(rx)
+    }
+
+    /// Register a virtio-mmio device on the machine (next free slot, PLIC
+    /// source `1 + slot`). Returns the slot index; `None` if no machine is
+    /// attached. Register devices before generating the DTB so their nodes
+    /// are emitted.
+    pub fn add_virtio_device(
+        &self,
+        device: Box<dyn vane_riscv::virtio::VirtioDevice>,
+    ) -> Option<usize> {
+        self.with_machine(|m| m.add_virtio(device))
     }
 
     /// Register a compiled trace callable for the trace rooted at guest
@@ -1401,6 +1429,176 @@ impl Reactor {
     /// [`Reactor::interp_core`].
     pub fn new() -> Self {
         Self::new_with_mem(vane_riscv::Mem::default())
+    }
+}
+
+/// A full machine snapshot (PLAN_VIRTIO_WEVAL workstream E / W1; spday
+/// full-virtualization plan item C): sparse guest RAM (64KiB physical
+/// pages, zero pages omitted), the register file, pc, and the hart/device
+/// state. Snapshots form a lineage: `id` is a content hash over the state
+/// and the parent's id, so a *derived* snapshot names its parent — the
+/// substrate for trajectory forking (snapshot → restore into a second
+/// Reactor → both runs diverge independently).
+///
+/// Trace caches and the compiled-trace registry are NOT snapshotted: they
+/// are pure functions of guest memory and are re-derived on restore
+/// (`code_dirty` is set, forcing revalidation).
+///
+/// Host-side device backends (open files, sockets behind virtio) are not
+/// serialized either; the host re-binds them after restore.
+#[derive(Clone)]
+pub struct ReactorSnapshot {
+    /// Content-derived id (FNV-1a over parent id, pc, regs, and pages).
+    pub id: u64,
+    /// The snapshot this one derives from, if any.
+    pub parent: Option<u64>,
+    /// Sparse guest RAM: physical page number (`addr >> 16`) → page bytes.
+    pub pages: std::collections::BTreeMap<u64, Box<[u8; 65536]>>,
+    /// Integer register file at snapshot time.
+    pub regs: [u64; 32],
+    /// Guest pc at snapshot time.
+    pub pc: u64,
+    /// Privileged hart + device state.
+    pub hart: vane_riscv::hart::HartSnapshot,
+}
+
+/// FNV-1a over the snapshot's observable state, seeded with the parent id.
+fn snapshot_id(
+    parent: Option<u64>,
+    pc: u64,
+    regs: &[u64; 32],
+    pages: &std::collections::BTreeMap<u64, Box<[u8; 65536]>>,
+) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |b: u8| {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    for b in parent.unwrap_or(0).to_le_bytes() {
+        mix(b);
+    }
+    for b in pc.to_le_bytes() {
+        mix(b);
+    }
+    for r in regs {
+        for b in r.to_le_bytes() {
+            mix(b);
+        }
+    }
+    for (pn, page) in pages {
+        for b in pn.to_le_bytes() {
+            mix(b);
+        }
+        for b in page.iter() {
+            mix(*b);
+        }
+    }
+    h
+}
+
+impl Reactor {
+    /// Snapshot the whole machine. With encrypted swap active, paged-out
+    /// RAM is materialized through the swap layer (page-in on read), so the
+    /// snapshot is the complete guest state either way.
+    ///
+    /// `pc` is the guest pc the caller will resume at: the fueled trace
+    /// loop returns it to the driver without storing it in the reactor, so
+    /// it must be supplied explicitly (pass the value the last
+    /// `trace_run_fueled` returned).
+    pub fn snapshot(&self, parent: Option<&ReactorSnapshot>, pc: u64) -> ReactorSnapshot {
+        let mut lock = self.core.lock();
+        let mut pages: std::collections::BTreeMap<u64, Box<[u8; 65536]>> =
+            std::collections::BTreeMap::new();
+        if lock.mem.swap.is_some() {
+            // Swap-backed RAM: read every page of the region through the
+            // page cache (forces page-in), omitting zero pages.
+            let base = lock.mem.swap_base;
+            let len = lock.mem.swap_len;
+            let count = len >> 16;
+            for pn in 0..count {
+                let page = {
+                    let swap = lock.mem.swap.as_ref().expect("checked above");
+                    let mut g = swap.lock();
+                    match g.read_page(pn) {
+                        Ok(p) => *p,
+                        Err(e) => {
+                            g.record_error(e);
+                            [0u8; 65536]
+                        }
+                    }
+                };
+                if !vane_swap::is_zero_page(&page) {
+                    pages.insert((base >> 16) + pn, Box::new(page));
+                }
+            }
+        } else {
+            pages = lock.mem.pages.clone();
+        }
+        #[cfg(not(feature = "js-host"))]
+        let regs = lock.regs;
+        #[cfg(feature = "js-host")]
+        let regs = self.save_regs();
+        let hart = lock.hart.save();
+        let parent_id = parent.map(|p| p.id);
+        let id = snapshot_id(parent_id, pc, &regs, &pages);
+        ReactorSnapshot { id, parent: parent_id, pages, regs, pc, hart }
+    }
+
+    /// Restore a snapshot into this reactor, replacing all guest state.
+    /// Trace caches are invalidated (the same pc may now hold different
+    /// code under a different `satp`).
+    ///
+    /// With swap active, every page of the RAM region is rewritten
+    /// (snapshot page or a zero page), so no stale bytes survive. Without
+    /// swap, the page map is replaced outright.
+    pub fn restore(&self, snap: &ReactorSnapshot) -> Result<(), String> {
+        let mut lock = self.core.lock();
+        if lock.mem.swap.is_some() {
+            let len = lock.mem.swap_len;
+            let base = lock.mem.swap_base;
+            let count = len >> 16;
+            let zero = [0u8; 65536];
+            for pn in 0..count {
+                let key = (base >> 16) + pn;
+                let page: &[u8; 65536] = snap.pages.get(&key).map(|p| &**p).unwrap_or(&zero);
+                let swap = lock.mem.swap.as_ref().expect("checked above");
+                let mut g = swap.lock();
+                match g.write_page(pn) {
+                    Ok(dst) => *dst = *page,
+                    Err(e) => {
+                        g.record_error(e);
+                        return Err(format!("swap restore page {pn}: {e:?}"));
+                    }
+                }
+            }
+        } else {
+            lock.mem.pages = snap.pages.clone();
+        }
+        #[cfg(not(feature = "js-host"))]
+        {
+            lock.regs = snap.regs;
+        }
+        #[cfg(feature = "js-host")]
+        {
+            drop(lock);
+            self.restore_regs(&snap.regs);
+            lock = self.core.lock();
+        }
+        lock.pc = snap.pc;
+        lock.hart.restore(&snap.hart).map_err(|e| format!("{e:?}"))?;
+        // Re-derive caches: same pc may map to different code now.
+        lock.code_dirty = true;
+        Ok(())
+    }
+
+    /// Fork the machine: snapshot and restore into a fresh reactor. The two
+    /// reactors share no guest state; host-side device backends must be
+    /// re-bound on the fork (see [`ReactorSnapshot`]).
+    pub fn fork(&self, pc: u64) -> Result<Reactor, String> {
+        let snap = self.snapshot(None, pc);
+        let r = Reactor::new_with_mem(vane_riscv::Mem::default());
+        r.restore(&snap)?;
+        Ok(r)
     }
 }
 
