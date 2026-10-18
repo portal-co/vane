@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
-# R8 disk-rootfs gate (PLAN_PI_IN_VM.md §9/§13; PLAN_VIRTIO_WEVAL V2):
-# boot Linux with a virtio-blk disk as the rootfs (no initrd) and verify the
-# guest mounts it and runs /init.
+# R8 disk-rootfs gate (PLAN_PI_IN_VM.md §9/§13; PLAN_VIRTIO_WEVAL V2).
 #
-#   - builds a partitionless ext2 image (build-rootfs-ext2.py) holding
-#     /bin/busybox (from the Alpine minirootfs), /init, and /etc/gate-marker
-#   - boots vane-cli --machine --disk <img> with `root=/dev/vda rw rootfstype=ext2`
-#   - requires: virtio_mmio + virtio_blk probe, "VFS: Mounted root", the
-#     "=== VANE DISK-ROOTFS OK ===" marker, and a clean poweroff
+# SUPERSEDED as a runnable gate by t-26ef's initramfs-based version on the
+# vane-agent branch — kept here as the CONTRACT reference (the image format and
+# the marker assertions). Rationale: the Debian netboot kernel ships
+# VIRTIO_MMIO/VIRTIO_BLK as MODULES (and EXT2_FS is unset), so a direct
+# root=/dev/vda boot fails with unknown-block(0,0). The working flow boots the
+# netboot kernel + an initramfs that insmods the module set, mounts the ext2
+# image via the ext4 driver (EXT4_USE_FOR_EXT2=y), and switch_roots to the
+# disk /init.
+#
+# Contract this defines:
+#   - image: partitionless ext2 (build-rootfs-ext2.py), /init + /etc/gate-marker
+#     + /bin/busybox; mounts via rootfstype=ext4 (ext4 handles ext2)
+#   - cmdline: root=/dev/vda rw rootfstype=ext4 console=ttyS0 panic=-1
+#   - markers: "VFS: Mounted root" / the switch_root target, the
+#     "=== VANE DISK-ROOTFS OK ===" marker, the "vane-virtio-blk-rootfs"
+#     gate-marker readback, and a clean poweroff
 #
 # NOTE: the interpreter is slow; a full boot to /init takes tens of minutes.
 # This is a manual/nightly gate, not a per-commit CI job.
