@@ -13,9 +13,7 @@ set -euo pipefail
 cd "$(dirname "$0")/linux"
 
 rootfs=alpine-minirootfs-20230329-riscv64.tar.gz
-for f in "$rootfs" opensbi.bin linux; do
-  [[ -f "$f" ]] || { echo "missing harness/linux/$f — see harness/linux/README.md" >&2; exit 1; }
-done
+[[ -f "$rootfs" ]] || { echo "missing harness/linux/$rootfs — see harness/linux/README.md" >&2; exit 1; }
 [[ -f modules/virtio_blk.ko ]] || { echo "run fetch-virtio-modules.sh first" >&2; exit 1; }
 
 rm -rf rootfs-virtio

@@ -16,8 +16,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 artifacts=harness/linux
-for f in opensbi.bin linux; do
-  [[ -f "$artifacts/$f" ]] || { echo "missing $artifacts/$f — see harness/linux/README.md" >&2; exit 2; }
+# The disk gates need the *generic* sid kernel (virtio_blk/ext4 modules
+# available + version-matched); the netboot installer kernel does not work
+# here (see harness/linux/README.md).
+kernel="$artifacts/linux-generic"
+[[ -f "$kernel" ]] || kernel="$artifacts/linux"
+for f in opensbi.bin "$kernel"; do
+  [[ -f "$f" ]] || { echo "missing $f — see harness/linux/README.md" >&2; exit 2; }
 done
 [[ -f "$artifacts/initrd-virtio.gz" ]] || { echo "run harness/build-initramfs-virtio.sh first" >&2; exit 2; }
 
@@ -39,7 +44,7 @@ cargo build -q -p vane-cli --no-default-features
 echo "== booting Linux with --disk $img (tens of minutes) ==" >&2
 start=$(date +%s)
 out="$(cargo run -q -p vane-cli --no-default-features -- \
-  --machine --opensbi "$artifacts/opensbi.bin" --kernel "$artifacts/linux" \
+  --machine --opensbi "$artifacts/opensbi.bin" --kernel "$kernel" \
   --initrd "$artifacts/initrd-virtio.gz" --disk "$img" \
   --append "console=ttyS0 panic=-1 root=/dev/vda rw rootfstype=ext4 vane_epoch=$(date +%s)" 2>/dev/null)"
 end=$(date +%s)

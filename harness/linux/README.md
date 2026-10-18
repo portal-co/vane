@@ -22,3 +22,9 @@ cargo run -p vane-cli --no-default-features -- --machine \
 The interpreter is slow (~1M instr/s), so expect the boot to take tens of
 minutes. `VANE_HEARTBEAT=1` prints a per-round pc/priv/mcause/mip heartbeat
 to stderr.
+- `linux-generic` — the sid *generic* kernel (not the netboot installer
+  kernel): `./fetch-kernel-generic.sh`. Required for the disk-rootfs gates
+  (R8): the netboot installer kernel is a different version than sid's
+  module packages and its initrd lacks virtio_blk/ext4. The generic
+  linux-binary + linux-modules packages are the consistent pair;
+  `fetch-virtio-modules.sh ./linux-generic` extracts the matching modules.
