@@ -528,3 +528,7 @@ of M1–M5; M6 is on the PLAN_VIRTIO_WEVAL critical path owned by the `vane` dir
   capacity); module-set gap found + fixed (ext4 needs crc16.ko, added before
   ext4 in load-disk.sh, commit 544fa36); loaders tiered disk/net/9p to cut
   interpreter boot time (689f5c7).
+- 2026-10-19 — R8: crc16 gap fixed the ext4 load; new finding — the 128MiB
+  default RAM OOMs the initramfs /init ("sh: out of memory" → panic);
+  disk gate now uses --ram-size 0x20000000. Sizing guidance for the
+  agent-image gates (1-2 GiB) recorded in harness/lib-gate.sh.

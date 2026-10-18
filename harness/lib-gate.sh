@@ -26,6 +26,11 @@ gate_record() { # stage, started_at_epoch, pass(true|false), notes
 JSON
 }
 
+# RAM sizing note (learned from R8 boots): the 128MiB default OOMs even the
+# minimal initramfs flow; 512MiB works for the disk gate. The agent-image
+# gates (Node/npm/Pi) should start at 1-2 GiB (--ram-size 0x40000000+),
+# paired with --swap if the host working set matters.
+#
 # Boot the agent disk image under vane-cli with the tunnel attached, running
 # /opt/gates/<script> as init. Requires the built image and a kernel that can
 # mount the virtio-blk rootfs.

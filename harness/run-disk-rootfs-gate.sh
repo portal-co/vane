@@ -12,6 +12,8 @@
 #   one with e2fsprogs if available.
 #
 # NOTE: interpreter-speed boot — tens of minutes. Manual/nightly gate.
+# RAM is 512MiB: the 128MiB default OOMs the initramfs /init (kernel +
+# unpacked initramfs + module set).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -46,6 +48,7 @@ start=$(date +%s)
 out="$(cargo run -q -p vane-cli --no-default-features -- \
   --machine --opensbi "$artifacts/opensbi.bin" --kernel "$kernel" \
   --initrd "$artifacts/initrd-virtio.gz" --disk "$img" \
+  --ram-size 0x20000000 \
   --append "console=ttyS0 panic=-1 root=/dev/vda rw rootfstype=ext4 vane_epoch=$(date +%s)" 2>/dev/null)"
 end=$(date +%s)
 
