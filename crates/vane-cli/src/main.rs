@@ -85,6 +85,17 @@ struct Args {
     /// Static name mappings for the tunnel: `IP=hostname` (repeatable), for
     /// guests that hardcode addresses or to pin well-known services.
     net_map: Vec<String>,
+    /// Restore machine state from a VSNP snapshot file instead of booting
+    /// images (PLAN_PI_IN_VM M6). Host devices are re-bound from the usual
+    /// flags (--disk/--share/--net), so pass the same ones as at save time.
+    snapshot_restore: Option<String>,
+    /// Save a VSNP snapshot to this file when the UART output window
+    /// contains --snapshot-marker (once per run).
+    snapshot_save: Option<String>,
+    /// Marker string watched on the UART console; triggers --snapshot-save.
+    snapshot_marker: Option<String>,
+    /// Exit immediately after the marker-triggered snapshot is saved.
+    exit_after_snapshot: bool,
 }
 
 const RAM_BASE: u64 = 0x8000_0000;
@@ -254,6 +265,10 @@ fn parse_args() -> Result<Args, String> {
     let mut net = false;
     let mut net_pump = false;
     let mut net_map: Vec<String> = Vec::new();
+    let mut snapshot_restore = None;
+    let mut snapshot_save = None;
+    let mut snapshot_marker = None;
+    let mut exit_after_snapshot = false;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -293,6 +308,16 @@ fn parse_args() -> Result<Args, String> {
                 net = true;
                 net_pump = true;
             }
+            "--snapshot-restore" => {
+                snapshot_restore = Some(it.next().ok_or("--snapshot-restore needs a value")?)
+            }
+            "--snapshot-save" => {
+                snapshot_save = Some(it.next().ok_or("--snapshot-save needs a value")?)
+            }
+            "--snapshot-marker" => {
+                snapshot_marker = Some(it.next().ok_or("--snapshot-marker needs a value")?)
+            }
+            "--exit-after-snapshot" => exit_after_snapshot = true,
             "--net-map" => net_map.push(it.next().ok_or("--net-map needs a value")?),
             "--swap-key" => swap_key = Some(it.next().ok_or("--swap-key needs a value")?),
             "--resident" => {
@@ -313,6 +338,12 @@ fn parse_args() -> Result<Args, String> {
             }
             other => return Err(format!("unknown argument: {other}")),
         }
+    }
+    if snapshot_save.is_some() && snapshot_marker.is_none() {
+        return Err("--snapshot-save requires --snapshot-marker".into());
+    }
+    if exit_after_snapshot && snapshot_save.is_none() {
+        return Err("--exit-after-snapshot requires --snapshot-save".into());
     }
     Ok(Args {
         elf_path,
@@ -336,6 +367,10 @@ fn parse_args() -> Result<Args, String> {
         net,
         net_pump,
         net_map,
+        snapshot_restore,
+        snapshot_save,
+        snapshot_marker,
+        exit_after_snapshot,
     })
 }
 
@@ -498,79 +533,108 @@ fn main() {
             );
         }
 
-        let mut next_addr = RAM_BASE;
-        if let Some(p) = &args.opensbi {
-            load_image(&reactor, p, RAM_BASE);
-            next_addr = KERNEL_ADDR;
-        }
-        if let Some(p) = &args.kernel {
-            load_image(&reactor, p, next_addr.max(KERNEL_ADDR));
-        }
-        let initrd_range = if let Some(p) = &args.initrd {
-            let bytes = std::fs::read(p).expect("initrd");
-            reactor.write_bytes(INITRD_ADDR, &bytes);
-            Some((INITRD_ADDR, INITRD_ADDR + bytes.len() as u64))
+        // Snapshot restore (M6): skip image loading/DTB/boot regs entirely;
+        // guest RAM + hart + device state come from the VSNP file. Host
+        // devices above (disk/9p/net) were already re-bound from flags.
+        let restored_pc = if let Some(path) = &args.snapshot_restore {
+            let data = std::fs::read(path).unwrap_or_else(|e| {
+                eprintln!("vane-cli: cannot read snapshot {path}: {e}");
+                std::process::exit(2);
+            });
+            let snap = vane::Reactor::snapshot_from_bytes(&data).unwrap_or_else(|e| {
+                eprintln!("vane-cli: bad snapshot {path}: {e}");
+                std::process::exit(2);
+            });
+            let pc = snap.pc;
+            let id = snap.id;
+            reactor.restore(&snap).unwrap_or_else(|e| {
+                eprintln!("vane-cli: snapshot restore failed: {e}");
+                std::process::exit(2);
+            });
+            eprintln!("vane-cli: restored snapshot {path} (id {id:016x}, pc {pc:#x})");
+            Some(pc)
         } else {
             None
         };
-        // fw_dynamic_info for OpenSBI's fw_dynamic firmware
-        // (https://github.com/riscv-software-src/opensbi include/fw_dynamic.h):
-        // magic "OSBI" (0x4942534F), version 2, next_addr/next_mode (1=S),
-        // options 0, boot_hart 0.
-        if args.opensbi.is_some() {
-            let kernel_entry = KERNEL_ADDR;
-            let info: [u64; 6] = [0x4942_534F, 2, kernel_entry, 1, 0, 0];
-            let mut bytes = Vec::new();
-            for w in info {
-                bytes.extend_from_slice(&w.to_le_bytes());
+        if restored_pc.is_none() {
+            let mut next_addr = RAM_BASE;
+            if let Some(p) = &args.opensbi {
+                load_image(&reactor, p, RAM_BASE);
+                next_addr = KERNEL_ADDR;
             }
-            reactor.write_bytes(FW_DYNAMIC_INFO_ADDR, &bytes);
-        }
-        let bootargs = args.append.as_deref().unwrap_or("console=ttyS0");
-        let dtb = vane::vane_riscv::machine::virt_dtb_with_virtio(
-            args.ram_size,
-            initrd_range,
-            bootargs,
-            &virtio_dev_ids,
-        );
-        reactor.write_bytes(DTB_ADDR, &dtb);
-
-        // Pin the boot artifacts so they are never evicted (§6.2 item 2):
-        // OpenSBI, kernel image, initrd, fw_dynamic_info, DTB. With swap on,
-        // these are the always-resident working set.
-        if reactor.swap_active() {
-            reactor.pin_swap_range(RAM_BASE, KERNEL_ADDR - RAM_BASE); // OpenSBI
             if let Some(p) = &args.kernel {
-                let klen = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-                reactor.pin_swap_range(KERNEL_ADDR, klen);
+                load_image(&reactor, p, next_addr.max(KERNEL_ADDR));
             }
-            if let Some((s, e)) = initrd_range {
-                reactor.pin_swap_range(s, e - s);
-            }
-            reactor.pin_swap_range(FW_DYNAMIC_INFO_ADDR, 0x1_0000);
-            reactor.pin_swap_range(DTB_ADDR, dtb.len() as u64);
-        }
-
-        // A bare-metal payload (ELF) may take the place of firmware+kernel
-        // (used by the machine-model gate).
-        entry = if let Some(p) = &args.elf_path {
-            let bytes = std::fs::read(p).expect("elf payload");
-            match elf::load(&reactor, &bytes) {
-                Ok(e) => e,
-                Err(e) => {
-                    eprintln!("vane-cli: {p}: {e}");
-                    std::process::exit(2);
+            let initrd_range = if let Some(p) = &args.initrd {
+                let bytes = std::fs::read(p).expect("initrd");
+                reactor.write_bytes(INITRD_ADDR, &bytes);
+                Some((INITRD_ADDR, INITRD_ADDR + bytes.len() as u64))
+            } else {
+                None
+            };
+            // fw_dynamic_info for OpenSBI's fw_dynamic firmware
+            // (https://github.com/riscv-software-src/opensbi include/fw_dynamic.h):
+            // magic "OSBI" (0x4942534F), version 2, next_addr/next_mode (1=S),
+            // options 0, boot_hart 0.
+            if args.opensbi.is_some() {
+                let kernel_entry = KERNEL_ADDR;
+                let info: [u64; 6] = [0x4942_534F, 2, kernel_entry, 1, 0, 0];
+                let mut bytes = Vec::new();
+                for w in info {
+                    bytes.extend_from_slice(&w.to_le_bytes());
                 }
+                reactor.write_bytes(FW_DYNAMIC_INFO_ADDR, &bytes);
             }
+            let bootargs = args.append.as_deref().unwrap_or("console=ttyS0");
+            let dtb = vane::vane_riscv::machine::virt_dtb_with_virtio(
+                args.ram_size,
+                initrd_range,
+                bootargs,
+                &virtio_dev_ids,
+            );
+            reactor.write_bytes(DTB_ADDR, &dtb);
+
+            // Pin the boot artifacts so they are never evicted (§6.2 item 2):
+            // OpenSBI, kernel image, initrd, fw_dynamic_info, DTB. With swap on,
+            // these are the always-resident working set.
+            if reactor.swap_active() {
+                reactor.pin_swap_range(RAM_BASE, KERNEL_ADDR - RAM_BASE); // OpenSBI
+                if let Some(p) = &args.kernel {
+                    let klen = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+                    reactor.pin_swap_range(KERNEL_ADDR, klen);
+                }
+                if let Some((s, e)) = initrd_range {
+                    reactor.pin_swap_range(s, e - s);
+                }
+                reactor.pin_swap_range(FW_DYNAMIC_INFO_ADDR, 0x1_0000);
+                reactor.pin_swap_range(DTB_ADDR, dtb.len() as u64);
+            }
+
+            // A bare-metal payload (ELF) may take the place of firmware+kernel
+            // (used by the machine-model gate).
+            entry = if let Some(p) = &args.elf_path {
+                let bytes = std::fs::read(p).expect("elf payload");
+                match elf::load(&reactor, &bytes) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        eprintln!("vane-cli: {p}: {e}");
+                        std::process::exit(2);
+                    }
+                }
+            } else {
+                RAM_BASE
+            };
         } else {
-            RAM_BASE
-        };
+            entry = restored_pc.expect("checked above");
+        }
     } else {
         // Payload mode: a single ELF, ALWAYS under the privileged
         // architecture (the user-mode syscall-shim micro-OS was removed;
         // payloads complete via --tohost or the trap engine).
         if !args.hart {
-            eprintln!("vane-cli: payload mode requires --hart (the user-mode syscall shim was removed; use --machine for Linux)");
+            eprintln!(
+                "vane-cli: payload mode requires --hart (the user-mode syscall shim was removed; use --machine for Linux)"
+            );
             std::process::exit(2);
         }
         let elf_path = match &args.elf_path {
@@ -599,7 +663,7 @@ fn main() {
 
     // Boot register state for machine mode: a0 = hartid, a1 = dtb.
     let mut regs = [0u64; 32];
-    if args.machine {
+    if args.machine && args.snapshot_restore.is_none() {
         regs[10] = 0; // hartid
         regs[11] = DTB_ADDR;
         regs[12] = FW_DYNAMIC_INFO_ADDR; // a2 for OpenSBI fw_dynamic
@@ -655,6 +719,10 @@ fn main() {
         const FUEL_TRACE: u64 = 50_000;
         let mut total: u64 = 0;
         let t0 = std::time::Instant::now();
+        // Snapshot trigger state (M6): a rolling window over UART output in
+        // which --snapshot-marker is searched.
+        let mut uart_window: Vec<u8> = Vec::new();
+        let mut snapshot_taken = false;
         loop {
             let result = if args.engine == "trace" {
                 // The StackOp trace engine (the port): traces run translated
@@ -722,8 +790,38 @@ fn main() {
                 // access) in addition to feeding UART RX and folding IRQs.
                 let power = reactor.machine_io_tick(&rx_bytes);
                 if let Some(tx) = reactor.with_machine(|m| m.uart.drain_tx()) {
-                    for b in tx {
+                    for &b in &tx {
                         host.uart_write(b);
+                    }
+                    if let (Some(marker), Some(save_path)) =
+                        (&args.snapshot_marker, &args.snapshot_save)
+                        && !snapshot_taken
+                    {
+                        uart_window.extend_from_slice(&tx);
+                        // Keep the window bounded; markers are short.
+                        if uart_window.len() > 65_536 {
+                            let keep = uart_window.len() - 65_536;
+                            uart_window.drain(..keep);
+                        }
+                        if uart_window
+                            .windows(marker.len())
+                            .any(|w| w == marker.as_bytes())
+                        {
+                            let snap = reactor.snapshot(None, pc);
+                            let bytes = vane::Reactor::snapshot_to_bytes(&snap);
+                            std::fs::write(save_path, bytes).unwrap_or_else(|e| {
+                                eprintln!("vane-cli: cannot write snapshot {save_path}: {e}");
+                                std::process::exit(2);
+                            });
+                            eprintln!(
+                                "vane-cli: snapshot saved to {save_path} (id {:016x}, pc {pc:#x})",
+                                snap.id
+                            );
+                            snapshot_taken = true;
+                            if args.exit_after_snapshot {
+                                std::process::exit(0);
+                            }
+                        }
                     }
                 }
                 if let Some(p) = power {
@@ -762,5 +860,4 @@ fn main() {
             }
         }
     }
-
 }

@@ -362,10 +362,10 @@ Status column is kept current (`todo` / `doing` / `done` / `blocked(reason)`).
 | --- | --- | --- | --- |
 | M0 | This plan reviewed; harness dir structure + results conventions | — | done |
 | M1 | virtio-net device + smoltcp `NetBackend` guest-side (PLAN_VIRTIO_WEVAL D) | V1 transport | done (device by vane terminal; smoltcp tunnel landed with M2) |
-| M2 | `SocketBackend` trait + std/WASIX binding (`StdSockets`), smoltcp tunnel `vane-net`, loopback echo test; CLI wiring + echo gate P1 | M1 | doing |
-| M3 | I/O pump on WASIX thread; P2 | M2 | todo |
+| M2 | `SocketBackend` trait + std/WASIX binding (`StdSockets`), smoltcp tunnel `vane-net`, loopback echo tests, `--net`/`--net-map` CLI wiring, echo gate P1 authored (execution pending boot artifacts) | M1 | done (gate run pending) |
+| M3 | I/O pump on a thread: `PumpedTunnel` (std::thread = WASIX thread on wasm32-wasmer-wasi), `--net-pump`, pumped echo test | M2 | done (native; WASIX-target verification pending) |
 | M4 | Socket-extension binding + runtime probe; P3 | M2 | todo |
-| M5 | DNS forwarding | M2 | todo |
+| M5 | DNS forwarding (tunnel DNS responder at 10.0.2.3, host-side resolve, synthetic answers) | M2 | done |
 | M6 | Machine snapshots S0 (PLAN_VIRTIO_WEVAL E) + `--from-snapshot` in gates | boot gate | todo |
 | M7 | Agent disk image build (Node pinned) under QEMU; node gate P4 | M2(net not strictly req) | todo |
 | M8 | HTTPS gate P5 (+P6 MITM optional mode) | M2,M7 | todo |
