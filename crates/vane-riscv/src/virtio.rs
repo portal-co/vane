@@ -35,12 +35,14 @@ const R_DEVICE_ID: u64 = 0x008;
 const R_VENDOR_ID: u64 = 0x00c;
 const R_HOST_FEATURES: u64 = 0x010;
 const R_HOST_FEATURES_SEL: u64 = 0x014;
-const R_GUEST_PAGE_SIZE: u64 = 0x020; // legacy
-const R_QUEUE_SEL: u64 = 0x028;
-const R_QUEUE_NUM_MAX: u64 = 0x02c;
-const R_QUEUE_NUM: u64 = 0x030;
-const R_QUEUE_ALIGN: u64 = 0x034; // legacy
-const R_QUEUE_PFN: u64 = 0x038; // legacy
+const R_DRIVER_FEATURES: u64 = 0x020; // driver writes accepted features here
+const R_DRIVER_FEATURES_SEL: u64 = 0x024;
+const R_GUEST_PAGE_SIZE_LEGACY: u64 = 0x028; // legacy (v1) only
+const R_QUEUE_SEL: u64 = 0x030;
+const R_QUEUE_NUM_MAX: u64 = 0x034;
+const R_QUEUE_NUM: u64 = 0x038;
+const R_QUEUE_ALIGN: u64 = 0x03c; // legacy
+const R_QUEUE_PFN: u64 = 0x040; // legacy
 const R_QUEUE_NOTIFY: u64 = 0x050;
 const R_INTERRUPT_STATUS: u64 = 0x060;
 const R_INTERRUPT_ACK: u64 = 0x064;
@@ -370,7 +372,11 @@ impl VirtioMmio {
     pub fn write(&mut self, offset: u64, value: u32) {
         match offset {
             R_HOST_FEATURES_SEL => self.host_features_sel = value,
-            R_GUEST_PAGE_SIZE => {
+            // The driver writes its accepted features (DRIVER_FEATURES{,_SEL}).
+            // We offer no device features, so there's nothing to record, but
+            // the registers must exist at the correct offsets.
+            R_DRIVER_FEATURES | R_DRIVER_FEATURES_SEL => {}
+            R_GUEST_PAGE_SIZE_LEGACY => {
                 if let Some(q) = self.sel_queue() {
                     q.page_size = value.max(1);
                 }

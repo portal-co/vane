@@ -56,7 +56,7 @@ fn register_block() {
     assert_eq!(d.read(0x004), VERSION_LEGACY);
     assert_eq!(d.read(0x008), DEV_BLK);
     assert_eq!(d.read(0x00c), 0x76616E65); // "vane"
-    assert_eq!(d.read(0x02c), 128); // QueueNumMax
+    assert_eq!(d.read(0x34), 128); // QueueNumMax
     assert!(!d.interrupt_pending());
 }
 
@@ -66,12 +66,12 @@ fn queue_roundtrip() {
     let mut mem = TestMem(BTreeMap::new());
 
     // Legacy queue-setup handshake.
-    d.write(0x020, PAGE as u32); // GuestPageSize
-    d.write(0x028, 0); // QueueSel = 0
-    assert_eq!(d.read(0x02c), 128); // QueueNumMax
-    d.write(0x030, 4); // QueueNum = 4
-    d.write(0x034, PAGE as u32); // QueueAlign
-    d.write(0x038, 1); // QueuePFN = 1 -> base 4096
+    d.write(0x28, PAGE as u32); // GuestPageSize
+    d.write(0x30, 0); // QueueSel = 0
+    assert_eq!(d.read(0x34), 128); // QueueNumMax
+    d.write(0x38, 4); // QueueNum = 4
+    d.write(0x3c, PAGE as u32); // QueueAlign
+    d.write(0x40, 1); // QueuePFN = 1 -> base 4096
 
     // Queue layout: desc @ 4096, avail @ 4096+64=4160, used @ 8192.
     let desc = 4096u64;
@@ -164,11 +164,11 @@ fn blk_request(
     // Reset, then queue setup (reset clears the queue's last_avail/used_idx
     // so each request starts fresh; the device backend keeps its data).
     d.write(0x070, 0); // Status = 0 (reset)
-    d.write(0x020, PAGE as u32);
-    d.write(0x028, 0);
-    d.write(0x030, 4);
-    d.write(0x034, PAGE as u32);
-    d.write(0x038, 1);
+    d.write(0x28, PAGE as u32);
+    d.write(0x30, 0);
+    d.write(0x38, 4);
+    d.write(0x3c, PAGE as u32);
+    d.write(0x40, 1);
     let desc = 4096u64;
     let avail = 4160u64;
     let used = 8192u64;
@@ -309,11 +309,11 @@ mod ninep {
     fn rpc(d: &mut VirtioMmio, mem: &mut TestMem, req: &[u8]) -> Vec<u8> {
         // Reset + set up the queue.
         d.write(0x070, 0);
-        d.write(0x020, PAGE as u32);
-        d.write(0x028, 0);
-        d.write(0x030, 4);
-        d.write(0x034, PAGE as u32);
-        d.write(0x038, 1);
+        d.write(0x28, PAGE as u32);
+        d.write(0x30, 0);
+        d.write(0x38, 4);
+        d.write(0x3c, PAGE as u32);
+        d.write(0x40, 1);
         let desc = 4096u64;
         let avail = 4160u64;
         let reqb = 0x30000u64;
