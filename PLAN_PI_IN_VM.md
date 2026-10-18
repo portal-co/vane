@@ -419,7 +419,7 @@ of M1–M5; M6 is on the PLAN_VIRTIO_WEVAL critical path owned by the `vane` dir
 | R5 | Shared-memory requirements of wasi-threads conflict with `Mem`'s page store | M12 | keep page store hart-local; pass buffers across the channel | open |
 | R6 | smoltcp socket state on snapshot restore | G6 | quiesce-with-no-open-sockets rule (§6) | designed, unverified |
 | R7 | Guest TLS cert validation vs system time (no RTC) | stage 3 flake | set guest clock from host at boot (`date -s` in `/init` or an RTC device) | open |
-| R8 | Disk-rootfs boot flow: gates need the guest to mount the virtio-blk rootfs and run /opt/gates/* as init (the boot gates use initramfs only) | stages 2-5 blocked | kernel cmdline `root=/dev/vda rw init=/opt/gates/NN.sh`; needs virtio-blk in the kernel + an /opt/gates-aware init; tracked in `harness/lib-gate.sh::gate_boot_agent_image` | open |
+| R8 | Disk-rootfs boot flow: gates need the guest to mount the virtio-blk rootfs and run /opt/gates/* as init (the boot gates use initramfs only) | stages 2-5 blocked | kernel cmdline `root=/dev/vda rw rootfstype=ext2 console=ttyS0` for the minimal gate; `root=/dev/vda1` for the GPT-partitioned agent image; **owned by the vane terminal** (t-34d8) which is writing a minimal offline gate (partitionless ext2, --disk, /init marker + read-back) | doing (vane terminal) |
 | R9 | `WasixSockets` connect polls `sock_status` in a busy loop | wasm perf | bounded spin for now; use poll_oneoff when validated on a live runtime | open |
 
 ## 14. Open questions / decisions
@@ -476,3 +476,11 @@ of M1–M5; M6 is on the PLAN_VIRTIO_WEVAL critical path owned by the `vane` dir
   (vane-cli FileBlock is raw-only). Gates are wired but blocked on R8
   (disk-rootfs boot flow) and the fetched artifacts; they fail closed with
   the exact missing piece named.
+- 2026-10-19 — R8 handed to the vane terminal (t-34d8) with the confirmed
+  contract: minimal offline gate = partitionless ext2 raw image, `--disk`,
+  cmdline `root=/dev/vda rw rootfstype=ext2 console=ttyS0 panic=-1`, /init
+  prints `=== VANE DISK-ROOTFS OK ===`; agent-image stages will use
+  `root=/dev/vda1` (GPT) + /opt/gates/NN.sh; gate marker strings
+  (`=== GATE <STAGE> OK ===`) are the UART contract for --snapshot-marker.
+  Also confirmed on the link: VSNP format stable, virtio_net device model
+  owned by t-baab and unchanged.
