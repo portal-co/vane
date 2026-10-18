@@ -41,6 +41,7 @@ fi
 # Dependency order for insmod (paths relative to .../kernel/).
 WANT=(
   crypto/crc32c-cryptoapi.ko.xz        # ext4 metadata checksums
+  lib/crc/crc16.ko.xz                  # ext4 needs crc16 (found via R8 boot)
   drivers/virtio/virtio_mmio.ko.xz     # transport
   drivers/block/virtio_blk.ko.xz       # disk
   fs/mbcache.ko.xz fs/jbd2/jbd2.ko.xz fs/ext4/ext4.ko.xz
@@ -74,6 +75,7 @@ cat > modules/load-disk.sh <<'EOF'
 set -e
 cd /lib/modules
 insmod crc32c-cryptoapi.ko
+insmod crc16.ko
 insmod virtio_mmio.ko
 insmod virtio_blk.ko
 insmod mbcache.ko
