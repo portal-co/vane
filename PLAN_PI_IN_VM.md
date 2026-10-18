@@ -517,3 +517,10 @@ of M1–M5; M6 is on the PLAN_VIRTIO_WEVAL critical path owned by the `vane` dir
   from the kernel image, package located via the sid index, snapshot.d.o
   fallback note). Also fixed a silent-death pipefail+grep-SIGPIPE bug.
   t-34d8 re-running with matched modules.
+- 2026-10-19 — **Device-model bug found + fixed (vane 01ae931/7aa5f8a, ported
+  here)**: the legacy virtio-mmio register map lacked DRIVER_FEATURES{,_SEL}
+  (0x020/0x024), shifting the queue registers 8 bytes low — real kernels read
+  QueueNumMax=0 and bailed (-ENOENT). The unit tests were self-consistent
+  with the wrong map; only the real-kernel boot exposed it. Would equally
+  have broken virtio-9p and virtio-net — re-verify their gates when the boot
+  lands. Ported verbatim (files were identical to 01ae931^); all tests green.
