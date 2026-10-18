@@ -249,8 +249,8 @@ A shared `vane-virtio` crate (or `vane-riscv::virtio` module):
 | V4 | virtio-net | VirtioNet + NetBackend + RX chain deferral (t-baab, 901f9ec) | S-V3 | **DONE** (t-baab) |
 | W1 | Snapshots | HartSnapshot/MachineSnapshot/ReactorSnapshot save/restore/fork (t-baab, 901f9ec) | S-W1 | **DONE** (t-baab) |
 | W1.5 | Snapshot serialization | `snapshot_ser` (VSNP envelope) + encode/decode + snapshot_to/from_bytes (b84043f) | round-trip + checksum | **DONE** |
-| W2 | Weval | vane-patch `weval_specialize` + `reattach_stripped_data` (c0cd138) | S-W2 | **infra DONE**; real Weval tool network-gated |
-| W3 | Custom patcher | vane-patch `embed_snapshot`/`extract_snapshot`/`audit_no_stripping` (c0cd138) | S-W3 | **DONE** (offline, walrus) |
+| W2 | Weval | vane-patch `weval_specialize` + `reattach_stripped_data` (c0cd138) | S-W2 | **infra DONE**; real Weval tool network-gated. Snapshot embedding is Wizer's job (Wizer is a library now), not this crate's. |
+| W3 | Custom patcher | vane-patch: `compile_trace`/`compile_trace_pack`/`compile_trace_module` recompile StackOp traces → WASM, placed in the dispatch table's slots; `VaneWasmJit` is an os-jit-core `JitBackend` (bytes→trace→WASM artifact spliced into the wasmi table); `audit_no_stripping` (ff66ff1, ac21cf4) | S-W3 | **DONE** (offline, walrus + wasm-encoder) |
 | W4 | Multi-pass | vane-patch `multi_pass` snapshot-chain driver + per-pass audit (e3baf0b) | S-W4 | **DONE** |
 
 Ordering: V1→V2/V3/V4 (devices are independent after the framework); W1 is independent
