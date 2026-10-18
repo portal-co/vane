@@ -1,0 +1,8 @@
+# Machine snapshots are large and machine-local.
+/snapshots/
+# MITM CA + proxy state: dev-only, never committed (PLAN_PI_IN_VM §11 Sec-2).
+/mitm/
+# Downloaded Node tarballs and built disk images.
+/node/*.tar.gz
+/node/*.tgz
+/*.img
