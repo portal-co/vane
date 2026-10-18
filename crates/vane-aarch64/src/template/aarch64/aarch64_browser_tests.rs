@@ -50,6 +50,7 @@ async fn aarch64_integer_microcorpus_executes_in_browser() {
             flate: &flate,
             root: 0,
             flags: vane_arch::template::Flags::default(),
+            boundaries: None,
         },
         pc: 0,
         labels: Default::default(),
@@ -62,6 +63,7 @@ async fn aarch64_integer_microcorpus_executes_in_browser() {
             content: &body,
             flate: &flate,
             flags: vane_arch::template::Flags::default(),
+            boundaries: None,
         }
     );
     let memory = Uint8Array::new_with_length(64);

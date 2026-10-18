@@ -25,6 +25,7 @@ fn scalar_riscv_fp_ops_execute_through_shared_state() {
             flate: &vane_arch::DebugFlate {},
             root: 0,
             flags: vane_arch::template::Flags::default(),
+            boundaries: None,
         },
         pc: 0,
         labels: Default::default(),

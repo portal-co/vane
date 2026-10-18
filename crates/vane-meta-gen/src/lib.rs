@@ -109,6 +109,13 @@ macro_rules! vane_meta {
             /// type is the arch's `$hart` parameter (e.g.
             /// `vane_riscv::hart::HartState`).
             hart: $hart,
+            /// Hook system (vane-arch::hooks): observation points at real
+            /// guest symbol locations. `Rc` so the trace compiler can hold
+            /// the boundary predicate without keeping the core locked.
+            hooks: $crate::alloc::rc::Rc<$crate::vane_arch::hooks::HookSet>,
+            /// Recorded hook firings, oldest first; drained by
+            /// `take_hook_events`.
+            hook_events: $crate::alloc::vec::Vec<$crate::vane_arch::hooks::HookEvent>,
         }
 
         const _: () = {
@@ -365,6 +372,7 @@ macro_rules! vane_meta {
                             let mlp = lock.mem.use_multilevel_paging;
                             let cache_hit = lock.trace_cache.borrow().contains_key(&pc);
                             let hart_enabled = lock.hart.enabled;
+                            let hooks = lock.hooks.clone();
                             drop(lock);
                             let mut flags = $crate::vane_arch::template::Flags::with_paging(
                                 test_mode,
@@ -382,6 +390,10 @@ macro_rules! vane_meta {
                             // privileged instructions become trace
                             // boundaries handled by the dispatch stepper.
                             flags.privileged = hart_enabled;
+                            // Hook boundaries: hooked addresses must start
+                            // their own trace (vane-arch::hooks), so the
+                            // emitter consults the installed set.
+                            let boundary = |a: u64| hooks.is_boundary(a);
                             let jit = $crate::vane_arch::template::TemplateJit {
                                 params: Params {
                                     react: self,
@@ -395,6 +407,11 @@ macro_rules! vane_meta {
                                     root: pc,
                                     flate: &f,
                                     flags,
+                                    boundaries: if hooks.is_empty() {
+                                        None
+                                    } else {
+                                        Some(&boundary)
+                                    },
                                 },
                                 pc,
                                 labels: $crate::vane_arch::template::Labels::default(),
@@ -410,11 +427,30 @@ macro_rules! vane_meta {
 
                         };
                         let pc = host.pc;
+                        let mut lock = self.core.lock();
+                        // Hook system: a trace starting at a hooked address
+                        // fires an event carrying the live argument
+                        // registers (a0-a7 — the hook sits at a real symbol
+                        // location, so these are the real arguments). Under
+                        // `js-host` the register cache is not authoritative;
+                        // hook args there are best-effort.
+                        let hook = lock.hooks.at(pc).map(|h| (h.name.clone(), h.addr));
+                        if let Some((name, addr)) = hook {
+                            let mut args = [0u64; 8];
+                            args.copy_from_slice(&host.regs[10..18]);
+                            lock.hook_events.push($crate::vane_arch::hooks::HookEvent {
+                                name,
+                                addr,
+                                pc,
+                                args,
+                            });
+                        }
                         // Compiled-trace registry: a registered callable
                         // (Weval/JIT/patcher artifact, or the default compiled
                         // interpreter) runs the trace instead of interpreting
                         // the StackOps. The callable is synchronous.
-                        let compiled = self.core.lock().compiled.borrow().get(&pc).cloned();
+                        let compiled = lock.compiled.borrow().get(&pc).cloned();
+                        drop(lock);
                         let exit = if let Some(cf) = compiled {
                             cf(&mut host)
                         } else {
@@ -498,6 +534,30 @@ macro_rules! vane_meta {
                 /// Select the execution engine.
                 pub fn set_engine(&self, engine: $crate::vane_arch::ExecEngine) {
                     self.core.lock().engine = engine;
+                }
+
+                /// Install the hook set (vane-arch::hooks): observation
+                /// points at real guest symbol locations. Installing hooks
+                /// invalidates the trace caches — previously compiled
+                /// traces may span addresses that are boundaries now.
+                pub fn install_hooks(&self, hooks: $crate::vane_arch::hooks::HookSet) {
+                    let mut lock = self.core.lock();
+                    lock.hooks = $crate::alloc::rc::Rc::new(hooks);
+                    lock.trace_cache.borrow_mut().clear();
+                    lock.compiled.borrow_mut().clear();
+                    lock.code_dirty = false;
+                }
+
+                /// Number of installed hooks.
+                pub fn hooks_len(&self) -> usize {
+                    self.core.lock().hooks.len()
+                }
+
+                /// Drain the recorded hook events (oldest first).
+                pub fn take_hook_events(
+                    &self,
+                ) -> $crate::alloc::vec::Vec<$crate::vane_arch::hooks::HookEvent> {
+                    $crate::core::mem::take(&mut self.core.lock().hook_events)
                 }
             }
         };
@@ -615,6 +675,7 @@ macro_rules! vane_meta {
                             root: a,
                             flate: &f,
                             flags,
+                            boundaries: None,
                         },
                         pc: a,
                         labels: $crate::vane_arch::template::Labels::default(),
@@ -985,6 +1046,7 @@ macro_rules! vane_meta {
                                 root: a,
                                 flate: &f,
                                 flags,
+                                boundaries: None,
                             },
                             pc: a,
                             labels: $crate::vane_arch::template::Labels::default(),

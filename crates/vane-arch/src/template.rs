@@ -122,6 +122,17 @@ pub struct Params<'a> {
     pub flate: &'a (dyn Flate + 'a),
     pub root: u64,
     pub flags: Flags,
+    /// Emission-time hook boundary predicate (the hook system, see
+    /// `vane-riscv::hooks`): when set, an address for which this returns
+    /// `true` **must start its own trace** — the emitter cuts the
+    /// inlining chain with `PushImm(pc); TailCall` instead of falling
+    /// through, exactly like `Flags::ecall_boundary` cuts at syscalls.
+    /// This is what makes hooks at *real symbol locations* exact: a hooked
+    /// address can never be silently inlined into the middle of a trace,
+    /// so the dispatch loop observes every arrival at a hooked symbol.
+    /// `None` (every existing consumer) reproduces today's traces
+    /// byte-for-byte.
+    pub boundaries: Option<&'a (dyn Fn(u64) -> bool + 'a)>,
 }
 
 #[derive(Clone, Copy, Default)]

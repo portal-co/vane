@@ -21,6 +21,7 @@ pub fn emit_aarch64(mem: &mut Mem, pc: u64) -> Vec<StackOp> {
             trial: &|_| Heat::New,
             root: 0,
             flags: vane_arch::template::Flags::default(),
+            boundaries: None,
         },
         pc,
         labels: Default::default(),

@@ -46,6 +46,7 @@ fn scalar_fp_jit_source_is_valid_node_javascript() {
             flate: &flate,
             root: 0,
             flags: vane_arch::template::Flags::default(),
+            boundaries: None,
         },
         pc: 0,
         labels: Default::default(),

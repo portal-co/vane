@@ -40,6 +40,7 @@ pub use vane_target_js::flate::{DebugFlate, Flate, ReleaseFlate};
 pub use vane_target_wasm::{JitOpcode, WasmAbiConfig, WasmJit, WasmJitCtx};
 
 pub mod arch;
+pub mod hooks;
 pub mod interp;
 pub mod template;
 

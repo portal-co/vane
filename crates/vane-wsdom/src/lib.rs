@@ -173,6 +173,7 @@ fn compile_block(mem: &Mem, pc: u64, flags: Flags, abi: GuestAbi) -> String {
         flate: &flate,
         root: pc,
         flags,
+        boundaries: None,
     };
     let jit = TemplateJit {
         params,

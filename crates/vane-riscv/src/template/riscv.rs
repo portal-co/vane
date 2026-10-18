@@ -160,6 +160,20 @@ fn emit_to(
 fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<StackOp> {
     let mut ops: alloc::vec::Vec<StackOp> = alloc::vec::Vec::new();
 
+    // ── Hook boundary (vane-arch::hooks) ─────────────────────────────────────
+    // A hooked address must start its own trace: cut the inlining chain
+    // here so the dispatch loop observes the arrival. The trace root is
+    // exempt — it is already a trace start (checking it would loop
+    // forever: the boundary trace would re-trigger the predicate).
+    if this.pc != this.params.root
+        && let Some(boundaries) = this.params.boundaries
+        && boundaries(this.pc)
+    {
+        ops.push(StackOp::PushImm(this.pc));
+        ops.push(StackOp::TailCall);
+        return ops;
+    }
+
     // ── Instruction fetch & integrity check ──────────────────────────────────
     let inst_bytes: [u8; 4] = array::from_fn(|i| this.params.react.byte(this.pc + i as u64));
     ops.push(StackOp::CheckCode {
