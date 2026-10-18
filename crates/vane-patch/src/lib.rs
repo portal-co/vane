@@ -20,8 +20,7 @@
 
 use vane_target_core::StackOp;
 use vane_target_wasm::WasmAbiConfig;
-pub mod stackop_ser;
-pub use stackop_ser::{deserialize_trace_cache, serialize_trace_cache};
+pub use vane_riscv::stackop_ser::{deserialize_trace_cache, serialize_trace_cache};
 
 use walrus::Module;
 use walrus::RawCustomSection;
@@ -551,7 +550,7 @@ pub fn write_traces_section(
     while module.customs.remove_raw(TRACES_SECTION).is_some() {}
     module.customs.add(RawCustomSection {
         name: TRACES_SECTION.to_string(),
-        data: stackop_ser::serialize_trace_cache(traces),
+        data: serialize_trace_cache(traces),
     });
     Ok(module.emit_wasm())
 }
@@ -563,7 +562,7 @@ pub fn read_traces_section(wasm: &[u8]) -> Result<Vec<(u64, Vec<StackOp>)>, Patc
     for (_id, section) in module.customs.iter() {
         if section.name() == TRACES_SECTION {
             let data = section.data(&walrus::IdsToIndices::default()).into_owned();
-            return stackop_ser::deserialize_trace_cache(&data)
+            return deserialize_trace_cache(&data)
                 .map_err(|e| PatchError::Parse(format!("traces section: {e:?}")));
         }
     }

@@ -192,13 +192,30 @@ fn stackop_trace_cache_roundtrip() {
                 StackOp::LoadReg(1),
                 StackOp::Add64,
                 StackOp::StoreReg(2),
-                StackOp::LoopBegin { label: "x8000".into() },
-                StackOp::Br { relative_depth: 1, label: "x8000".into() },
+                StackOp::LoopBegin {
+                    label: "x8000".into(),
+                },
+                StackOp::Br {
+                    relative_depth: 1,
+                    label: "x8000".into(),
+                },
                 StackOp::LoopEnd,
-                StackOp::LoadMem { width: MemWidth::B4, signed: true },
-                StackOp::StoreMem { width: MemWidth::B8 },
-                StackOp::FloatBinary { width: FloatWidth::F64, op: FloatBinOp::Add },
-                StackOp::CheckCode { addr: 0x100, expected: vec![1, 2, 3].into(), miss_label: "m".into() },
+                StackOp::LoadMem {
+                    width: MemWidth::B4,
+                    signed: true,
+                },
+                StackOp::StoreMem {
+                    width: MemWidth::B8,
+                },
+                StackOp::FloatBinary {
+                    width: FloatWidth::F64,
+                    op: FloatBinOp::Add,
+                },
+                StackOp::CheckCode {
+                    addr: 0x100,
+                    expected: vec![1, 2, 3].into(),
+                    miss_label: "m".into(),
+                },
                 StackOp::Trap("boom".into()),
                 StackOp::PushImm(0x8000_0000),
                 StackOp::TailCall,
@@ -209,7 +226,11 @@ fn stackop_trace_cache_roundtrip() {
     let bytes = vane_patch::serialize_trace_cache(&traces);
     let back = vane_patch::deserialize_trace_cache(&bytes).expect("decode");
     // StackOp has no PartialEq, so compare by re-serializing.
-    assert_eq!(vane_patch::serialize_trace_cache(&back), bytes, "round-trip stable");
+    assert_eq!(
+        vane_patch::serialize_trace_cache(&back),
+        bytes,
+        "round-trip stable"
+    );
     assert_eq!(back.len(), 2);
     assert_eq!(back[0].0, 0x8000_0000);
     assert_eq!(back[0].1.len(), traces[0].1.len());
@@ -238,8 +259,14 @@ fn pack_has_a_start_function_registering_slots() {
     let text = wasmprinter::print_bytes(&pack).expect("printable");
     // A start function exists and fills the dispatch-table slots.
     assert!(text.contains("start"), "start function present: {text}");
-    assert!(text.contains("table.set"), "start fn fills slots via table.set");
-    assert!(text.contains("register_trace"), "start fn calls register_trace");
+    assert!(
+        text.contains("table.set"),
+        "start fn fills slots via table.set"
+    );
+    assert!(
+        text.contains("register_trace"),
+        "start fn calls register_trace"
+    );
     // The slot table is exported.
     assert!(text.contains("trace_table"), "slot table exported");
 }

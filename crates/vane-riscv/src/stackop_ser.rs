@@ -3,8 +3,9 @@
 //! its trace cache (pc → StackOp trace) into a custom section before Wizer
 //! snapshots; the patcher reads it back, recompiles, and fills the slots.
 
-use vane_riscv::snapshot_ser::{Reader, SerError, Writer};
-use vane_target_core::{FloatBinOp, FloatUnaryOp, FloatWidth, MemWidth, StackOp, StateSlot};
+use crate::snapshot_ser::{Reader, SerError, Writer};
+use alloc::vec::Vec;
+use vane_arch::{FloatBinOp, FloatUnaryOp, FloatWidth, MemWidth, StackOp, StateSlot};
 
 fn width(w: &FloatWidth) -> u8 {
     match w {
@@ -233,9 +234,7 @@ pub fn encode_op(op: &StackOp, w: &mut Writer) {
 pub fn decode_op(r: &mut Reader) -> Result<StackOp, SerError> {
     use StackOp::*;
     Ok(match r.u8()? {
-        0 => LoopBegin {
-            label: r.str()?,
-        },
+        0 => LoopBegin { label: r.str()? },
         1 => LoopEnd,
         2 => Br {
             relative_depth: r.u32()?,
