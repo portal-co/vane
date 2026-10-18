@@ -320,6 +320,22 @@ impl WebMachine {
         );
         Ok(o.into())
     }
+
+    /// Serialize the hot trace cache (guest pc → StackOp trace) to bytes. This
+    /// is the producer half of the wizen-then-register flow: the interpreter
+    /// dumps its traces, the bytes are embedded before Wizer snapshots, and
+    /// the patcher reads them from the snapshotted WASM to recompile and fill
+    /// the dispatch-table slots.
+    #[wasm_bindgen(js_name = "dumpTraceCache")]
+    pub fn dump_trace_cache(&self) -> Vec<u8> {
+        self.reactor.dump_trace_cache()
+    }
+
+    /// Number of traces currently cached (for the dump's size).
+    #[wasm_bindgen(js_name = "traceCacheLen")]
+    pub fn trace_cache_len(&self) -> usize {
+        self.reactor.trace_cache_len()
+    }
 }
 
 impl Default for WebMachine {

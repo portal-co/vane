@@ -248,6 +248,24 @@ impl Reactor {
         self.core.lock().compiled.borrow_mut().insert(pc, f);
     }
 
+    /// Serialize the hot trace cache (guest pc → `StackOp` trace) to bytes, so
+    /// it can be embedded in the module (via `vane_patch::write_traces_section`)
+    /// before Wizer snapshots — the patcher then reads the traces from the
+    /// snapshotted WASM, recompiles them, and fills the dispatch-table slots.
+    /// This is the producer half of the wizen-then-register flow.
+    pub fn dump_trace_cache(&self) -> Vec<u8> {
+        let lock = self.core.lock();
+        let cache = lock.trace_cache.borrow();
+        vane_riscv::stackop_ser::serialize_trace_cache(
+            cache.iter().map(|(pc, ops)| (*pc, ops.as_slice())),
+        )
+    }
+
+    /// Number of traces currently in the cache (for the dump's size).
+    pub fn trace_cache_len(&self) -> usize {
+        self.core.lock().trace_cache.borrow().len()
+    }
+
     /// Whether a compiled trace is registered for `pc`.
     pub fn has_compiled_trace(&self, pc: u64) -> bool {
         self.core.lock().compiled.borrow().contains_key(&pc)
@@ -1695,6 +1713,38 @@ impl Reactor {
             .translate(&mut lock.mem, vaddr, vane_riscv::hart::Access::Load)
             .unwrap_or(vaddr);
         lock.mem.read_byte(pa)
+    }
+
+    /// Bulk-read guest PHYSICAL memory (one lock, page-wise through the
+    /// swap layer if active). Used by host-side analysis (kallsyms scan)
+    /// that must not disturb the guest.
+    pub fn read_guest_bytes(&self, addr: u64, len: usize) -> Vec<u8> {
+        let mut out = vec![0u8; len];
+        let mut lock = self.core.lock();
+        let lock = &mut *lock;
+        let mut off = 0usize;
+        while off < len {
+            let a = addr.wrapping_add(off as u64);
+            let page_off = (a & 0xffff) as usize;
+            let n = (0x10000 - page_off).min(len - off);
+            // Fast path: resident legacy page, one memcpy. Swap-backed or
+            // absent pages go through read_byte (page-in / zero fill).
+            let in_swap = lock.mem.swap.is_some()
+                && a >= lock.mem.swap_base
+                && a < lock.mem.swap_base + lock.mem.swap_len;
+            if !in_swap && lock.mem.shared.is_none() {
+                if let Some(page) = lock.mem.pages.get(&(a >> 16)) {
+                    out[off..off + n].copy_from_slice(&page[page_off..page_off + n]);
+                    off += n;
+                    continue;
+                }
+            }
+            for i in 0..n {
+                out[off + i] = lock.mem.read_byte(a.wrapping_add(i as u64));
+            }
+            off += n;
+        }
+        out
     }
 
     /// Read a NUL-terminated string at a guest virtual address (capped at
