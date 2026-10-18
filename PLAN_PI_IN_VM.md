@@ -524,3 +524,7 @@ of M1–M5; M6 is on the PLAN_VIRTIO_WEVAL critical path owned by the `vane` dir
   with the wrong map; only the real-kernel boot exposed it. Would equally
   have broken virtio-9p and virtio-net — re-verify their gates when the boot
   lands. Ported verbatim (files were identical to 01ae931^); all tests green.
+- 2026-10-19 — R8: virtio_blk probe validated on the real boot (vda at image
+  capacity); module-set gap found + fixed (ext4 needs crc16.ko, added before
+  ext4 in load-disk.sh, commit 544fa36); loaders tiered disk/net/9p to cut
+  interpreter boot time (689f5c7).
