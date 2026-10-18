@@ -13,7 +13,7 @@
 //! Twrite, Treaddir, Tclunk, Tflush, Tmkdir. All paths are confined beneath
 //! the backend's root (no `..` escape).
 
-use crate::virtio::{DescriptorChain, QueueMem, VirtioDevice, DEV_9P};
+use crate::virtio::{DEV_9P, DescriptorChain, QueueMem, VirtioDevice};
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -138,7 +138,6 @@ impl<'a> Reader<'a> {
         v
     }
     fn u16(&mut self) -> u16 {
-        
         u16::from_le_bytes([self.u8(), self.u8()])
     }
     fn u32(&mut self) -> u32 {
@@ -278,11 +277,7 @@ impl<B: Host9p> Virtio9p<B> {
                     }
                 }
                 if !failed {
-                    let is_dir = self
-                        .backend
-                        .stat(&cur)
-                        .map(|m| m.is_dir)
-                        .unwrap_or(true);
+                    let is_dir = self.backend.stat(&cur).map(|m| m.is_dir).unwrap_or(true);
                     let qid = if names.is_empty() {
                         self.fids.get(&fid).map(|f| f.qid).unwrap_or(Qid {
                             qtype: QT_DIR,
@@ -504,9 +499,10 @@ impl<B: Host9p> Virtio9p<B> {
             T_CLUNK => {
                 let fid = r.u32();
                 if let Some(f) = self.fids.remove(&fid)
-                    && let Some(h) = f.handle {
-                        self.backend.close(h);
-                    }
+                    && let Some(h) = f.handle
+                {
+                    self.backend.close(h);
+                }
                 ok(&mut w);
             }
             _ => {

@@ -223,11 +223,11 @@ fn stackop_trace_cache_roundtrip() {
         ),
         (0x8000_0100, vec![StackOp::Ecall, StackOp::Log("hi".into())]),
     ];
-    let bytes = vane_patch::serialize_trace_cache(&traces);
+    let bytes = vane_patch::serialize_trace_cache(traces.iter().map(|(p, o)| (*p, o.as_slice())));
     let back = vane_patch::deserialize_trace_cache(&bytes).expect("decode");
     // StackOp has no PartialEq, so compare by re-serializing.
     assert_eq!(
-        vane_patch::serialize_trace_cache(&back),
+        vane_patch::serialize_trace_cache(back.iter().map(|(p, o)| (*p, o.as_slice()))),
         bytes,
         "round-trip stable"
     );

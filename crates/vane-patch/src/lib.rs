@@ -550,7 +550,7 @@ pub fn write_traces_section(
     while module.customs.remove_raw(TRACES_SECTION).is_some() {}
     module.customs.add(RawCustomSection {
         name: TRACES_SECTION.to_string(),
-        data: serialize_trace_cache(traces),
+        data: serialize_trace_cache(traces.iter().map(|(pc, ops)| (*pc, ops.as_slice()))),
     });
     Ok(module.emit_wasm())
 }
