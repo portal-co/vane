@@ -29,9 +29,14 @@ js-host = [
 [dependencies]
 wasm-bindgen = { workspace = true, optional = true }
 spin.workspace = true
-vane-riscv = {path="../vane-riscv",version = "^0.1.0"}
+vane-riscv = {path="../vane-riscv",version = "^0.1.0", default-features = false, features = ["target-js"]}
 vane-meta-gen = {path = "../vane-meta-gen",version = "^0.1.0", default-features = false}
-vane-arch = {path = "../vane-arch",version = "^0.1.0", features = ["async-host"]}
+# default-features = false: the default `gen-blocks` (nightly-only, for the
+# target-wasm renderer) must not leak into stable-toolchain consumers
+# (spday builds the plain-Rust twin with stable). `target-js` stays on
+# unconditionally: the trace loop's flag plumbing (`Flags::with_paging`) is
+# gated on it.
+vane-arch = {path = "../vane-arch",version = "^0.1.0", default-features = false, features = ["async-host", "target-js"]}
 vane-swap = {path = "../vane-swap", version = "^0.1.0"}
 
 # The `console_error_panic_hook` crate provides better debugging of panics by

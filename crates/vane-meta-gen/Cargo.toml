@@ -14,5 +14,7 @@ js-host = ["dep:wasm-bindgen"]
 
 [dependencies]
 wasm-bindgen = { workspace = true, optional = true }
-vane-arch = {path="../vane-arch",version = "^0.1.0", features = ["target-js", "target-wasm", "async-host"]}
+# No target-wasm: its `gen-blocks` nightly gate must not leak into
+# stable-toolchain consumers of the plain-Rust twin (spday).
+vane-arch = {path="../vane-arch",version = "^0.1.0", default-features = false, features = ["target-js", "async-host"]}
 spin.workspace = true

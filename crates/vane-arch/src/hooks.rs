@@ -106,6 +106,12 @@ impl HookSet {
         self.by_addr.get(&addr)
     }
 
+    /// The hook named `name`, if any (hooks are unique by address; names
+    /// usually are too).
+    pub fn at_by_name(&self, name: &str) -> Option<&Hook> {
+        self.by_addr.values().find(|h| h.name == name)
+    }
+
     /// Whether `addr` is a hook boundary (the emission-time predicate).
     pub fn is_boundary(&self, addr: u64) -> bool {
         self.by_addr.contains_key(&addr)
