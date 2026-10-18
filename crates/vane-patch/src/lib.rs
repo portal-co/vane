@@ -60,7 +60,15 @@ impl From<anyhow::Error> for PatchError {
 pub fn compile_trace(ops: Vec<StackOp>, abi: &WasmAbiConfig) -> Function {
     let mut f = Function::new([(1, ValType::I64), (1, ValType::I64)]); // scratch_a, scratch_b
     let mut reencoder = RoundtripReencoder;
-    for jit_op in vane_arch::template::render_stack_to_wasm(ops.into_iter(), *abi) {
+    // Every finite rv64 trace terminates in a nested TailCall inside the outer
+    // LoopBegin/LoopEnd; WASM validation resets reachability at a loop's `end`,
+    // so the function needs a trailing, unnested `unreachable` to satisfy its
+    // implicit final return (see the RISC-V target's own renderer).
+    for jit_op in vane_arch::template::render_stack_to_wasm(ops.into_iter(), *abi).chain(
+        core::iter::once(vane_target_wasm::JitOpcode::Operator {
+            op: wasmparser::Operator::Unreachable,
+        }),
+    ) {
         let vane_target_wasm::JitOpcode::Operator { op } = jit_op;
         let instr = instruction(&mut reencoder, op).expect("reencode should not fail");
         f.instruction(&instr);
@@ -340,4 +348,148 @@ pub fn multi_pass(
         current = specialized;
     }
     Ok(results)
+}
+
+// ── os-jit-core JitBackend: recompile a guest region to a WASM artifact ─────
+//
+// The custom patcher plugs into the os-emulation JIT dispatch: a hot guest
+// code region is decoded to a StackOp trace (the RISC-V frontend, `rv_emit`),
+// recompiled to WASM, and returned as a `JitArtifact::Wasm` module that the
+// runtime splices into its wasmi dispatch table — the "available slots".
+
+/// Build a standalone WASM module exporting one compiled trace function under
+/// `export_name`, conforming to `abi`'s regfn calling convention. This is the
+/// per-trace artifact the runtime splices into its dispatch table.
+pub fn compile_trace_module(
+    ops: Vec<StackOp>,
+    abi: &WasmAbiConfig,
+    export_name: &str,
+) -> Result<Vec<u8>, PatchError> {
+    let num_regs = abi.num_regs;
+    let mut types = TypeSection::new();
+    let mut params: Vec<ValType> = (0..num_regs).map(|_| ValType::I64).collect();
+    params.push(ValType::I64); // target_pc
+    let results: Vec<ValType> = (0..num_regs).map(|_| ValType::I64).collect();
+    types.ty().function(params, results);
+    // Host import types: ecall (num_regs -> num_regs), jit_invalidate (i64->()).
+    types.ty().function(
+        (0..num_regs).map(|_| ValType::I64).collect::<Vec<_>>(),
+        (0..num_regs).map(|_| ValType::I64).collect::<Vec<_>>(),
+    );
+    types.ty().function([ValType::I64], []);
+
+    let mut imports = ImportSection::new();
+    imports.import("env", "ecall", EntityType::Function(1));
+    imports.import("env", "jit_invalidate", EntityType::Function(2));
+    imports.import(
+        "env",
+        "memory",
+        EntityType::Memory(MemoryType {
+            minimum: 1,
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        }),
+    );
+
+    let mut funcs = FunctionSection::new();
+    funcs.function(0); // the trace function: regfn type
+
+    let mut exports = ExportSection::new();
+    // Compiled trace function is index 2 (after the two function imports).
+    exports.export(export_name, ExportKind::Func, 2);
+
+    let mut code = CodeSection::new();
+    code.function(&compile_trace(ops, abi));
+
+    let mut module = wasm_encoder::Module::new();
+    module.section(&types);
+    module.section(&imports);
+    module.section(&funcs);
+    module.section(&exports);
+    module.section(&code);
+    let bytes = module.finish();
+    Module::from_buffer(&bytes).map_err(|e| PatchError::Parse(format!("trace module: {e:#}")))?;
+    Ok(bytes)
+}
+
+/// A custom-patcher JIT backend: recompiles a hot guest code region to a WASM
+/// artifact. The region's raw bytes are decoded to a `StackOp` trace by the
+/// RISC-V frontend and recompiled; the artifact is a standalone module the
+/// runtime splices into its dispatch table (the available slots).
+pub struct VaneWasmJit {
+    abi: WasmAbiConfig,
+}
+
+impl VaneWasmJit {
+    /// Create a backend. The `abi`'s host-import indices (ecall,
+    /// jit_invalidate, memory) must match the runtime's import wiring; the
+    /// register layout is taken from each request.
+    pub fn new(abi: WasmAbiConfig) -> Self {
+        VaneWasmJit { abi }
+    }
+}
+
+/// A [`vane_arch::JitCtx`] serving a request's guest bytes (at `guest_pc`).
+struct BytesCtx<'a> {
+    base: u64,
+    bytes: &'a [u8],
+}
+impl vane_arch::JitCtx for BytesCtx<'_> {
+    fn bytes(&self, a: u64) -> Box<dyn Iterator<Item = u8> + '_> {
+        let off = a.saturating_sub(self.base) as usize;
+        Box::new(self.bytes.get(off..).unwrap_or(&[]).iter().copied())
+    }
+    fn byte(&self, a: u64) -> u8 {
+        let off = a.saturating_sub(self.base) as usize;
+        self.bytes.get(off).copied().unwrap_or(0)
+    }
+}
+
+impl os_jit_core::JitBackend for VaneWasmJit {
+    fn id(&self) -> os_jit_core::JitBackendId {
+        os_jit_core::JitBackendId("vane-wasm")
+    }
+
+    fn compile(
+        &mut self,
+        req: &os_jit_core::JitRequest,
+    ) -> Result<os_jit_core::JitArtifact, os_jit_core::JitError> {
+        use vane_arch::template::{Flags, Params, TemplateJit};
+        use vane_arch::{DebugFlate, Heat};
+        if req.guest_bytes.is_empty() {
+            return Err(os_jit_core::JitError::Decode("empty guest_bytes".into()));
+        }
+        let ctx = BytesCtx {
+            base: req.guest_pc,
+            bytes: &req.guest_bytes,
+        };
+        let flate = DebugFlate::default();
+        let abi = WasmAbiConfig {
+            num_regs: req.layout.num_regs,
+            ..self.abi
+        };
+        let params = Params {
+            react: &ctx,
+            trial: &|_| Heat::New,
+            flate: &flate,
+            root: req.guest_pc,
+            flags: Flags::default(),
+            boundaries: None,
+        };
+        let jit = TemplateJit {
+            params,
+            pc: req.guest_pc,
+            labels: Default::default(),
+            depth: 0,
+        };
+        let ops = vane_riscv::template::riscv::rv_emit(&jit);
+        if ops.is_empty() {
+            return Err(os_jit_core::JitError::Decode("no trace emitted".into()));
+        }
+        let module = compile_trace_module(ops, &abi, "trace")
+            .map_err(|e| os_jit_core::JitError::Unsupported(format!("{e:?}")))?;
+        Ok(os_jit_core::JitArtifact::Wasm(module))
+    }
 }

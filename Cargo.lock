@@ -813,6 +813,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "os-jit-core"
+version = "0.1.0"
+
+[[package]]
 name = "os-page"
 version = "0.1.0"
 dependencies = [
@@ -1556,7 +1560,9 @@ name = "vane-patch"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "os-jit-core",
  "vane-arch",
+ "vane-riscv",
  "vane-target-core",
  "vane-target-wasm",
  "walrus",
@@ -2354,10 +2360,6 @@ version = "0.1.0"
 
 [[patch.unused]]
 name = "os-interposer"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-jit-core"
 version = "0.1.0"
 
 [[patch.unused]]

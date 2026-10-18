@@ -12,6 +12,8 @@ anyhow = "1"
 vane-arch = { path = "../vane-arch", features = ["target-wasm"] }
 vane-target-core = { path = "../vane-target-core" }
 vane-target-wasm = { path = "../vane-target-wasm" }
+vane-riscv = { path = "../vane-riscv" }
+os-jit-core = { path = "../../../os-emulation/crates/daemon/os-jit-core" }
 wasm-encoder = { workspace = true }
 wasmparser = { workspace = true }
 

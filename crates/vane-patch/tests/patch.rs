@@ -122,3 +122,55 @@ fn multi_pass_composes_trace_specialization() {
         assert!(r.audit.is_clean(), "pass {} preserved structure", r.pass);
     }
 }
+
+// ── os-jit-core JitBackend integration ──────────────────────────────────────
+use os_jit_core::{JitBackend, JitArtifact, JitRequest, RegisterLayout};
+use vane_patch::VaneWasmJit;
+
+/// RISC-V has 32 GPRs (the compiled trace references all of them as locals);
+/// target_pc/scratches follow at 32/33/34.
+fn riscv_abi() -> WasmAbiConfig {
+    WasmAbiConfig {
+        reg_base: 0,
+        num_regs: 32,
+        target_pc_local: 32,
+        scratch_a: 33,
+        scratch_b: 34,
+        ..test_abi()
+    }
+}
+
+#[test]
+fn jit_backend_recompiles_guest_bytes_to_wasm() {
+    // Guest code at 0x8000_0000: `addi a0, a0, 1` then `ret`.
+    let guest_bytes: Vec<u8> = vec![
+        0x13, 0x05, 0x15, 0x00, // addi a0, a0, 1
+        0x67, 0x80, 0x00, 0x00, // jalr x0, 0(ra)  (ret)
+    ];
+    let mut backend = VaneWasmJit::new(riscv_abi());
+    let req = JitRequest {
+        guest_pc: 0x8000_0000,
+        guest_bytes,
+        layout: RegisterLayout { num_regs: 32 },
+    };
+    let artifact = backend.compile(&req).expect("compile");
+    match artifact {
+        JitArtifact::Wasm(module) => {
+            // A valid standalone module exporting the compiled trace.
+            let text = wasmprinter::print_bytes(&module).expect("printable");
+            assert!(text.contains("trace"), "trace fn exported: {text}");
+        }
+        _ => panic!("expected a Wasm artifact"),
+    }
+}
+
+#[test]
+fn jit_backend_rejects_empty_input() {
+    let mut backend = VaneWasmJit::new(riscv_abi());
+    let req = JitRequest {
+        guest_pc: 0,
+        guest_bytes: vec![],
+        layout: RegisterLayout { num_regs: 32 },
+    };
+    assert!(backend.compile(&req).is_err());
+}
