@@ -1,0 +1,12 @@
+[package]
+name = "vane-patch"
+version = "0.1.0"
+edition = "2024"
+description = "Custom wasm binary patcher + Weval wrapper for vane machine acceleration (PLAN_VIRTIO_WEVAL W2/W3)"
+
+[dependencies]
+walrus = "0.27.2"
+anyhow = "1"
+
+[dev-dependencies]
+wasm-encoder = "0.239.0"
