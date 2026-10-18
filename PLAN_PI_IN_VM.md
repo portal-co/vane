@@ -428,7 +428,10 @@ of M1–M5; M6 is on the PLAN_VIRTIO_WEVAL critical path owned by the `vane` dir
 - Q2: musl vs glibc — **DECIDED 2026-10-19: glibc.** The unofficial riscv64
   Node builds are glibc-only (no musl variant exists), so the agent image is
   Debian riscv64 userland, not the Alpine musl minirootfs of the boot gates.
-- Q3: Mock provider fidelity — **DECIDED 2026-10-19: replayable recorded session.**
+- Q3: Mock provider fidelity — **DECIDED 2026-10-19: replayable recorded session;**
+  **IMPLEMENTED** in `harness/mock-provider/server.py` (replay in order, match on
+  method+path, 409 with diagnostics on mismatch/exhaustion; `--record UPSTREAM`
+  captures a real session to JSONL, redacting auth headers).
   The mock provider serves a recorded request/response session (fixtures under
   `harness/mock-provider/recordings/`), matched in order; recording mode captures a real
   provider session for later replay. This keeps the Pi gate deterministic, offline-
@@ -462,3 +465,6 @@ of M1–M5; M6 is on the PLAN_VIRTIO_WEVAL critical path owned by the `vane` dir
   against a live runtime (R3); support matrix in `harness/net/README.md`.
   M7: `build-agent-image.sh` (QEMU nocloud + NoCloud seed, fail-closed) and
   the guest environment contract (`harness/guest/README.md`).
+- 2026-10-19 — Mock provider (M10 part): `harness/mock-provider/server.py` with
+  replay/record modes; JSONL recording format; smoke-tested (match → 200,
+  mismatch/exhaustion → 409). `recordings/smoke.jsonl` documents the format.
