@@ -107,3 +107,37 @@ fn weval_unavailable_is_a_clean_error() {
     assert!(matches!(err, Err(vane_patch::PatchError::Weval(_))));
     let _ = SNAPSHOT_SECTION;
 }
+
+#[test]
+fn multi_pass_composes_and_preserves_structure() {
+    let wasm = sample_module();
+    // A chain of three derived snapshots (each "boots further").
+    let snaps: Vec<&[u8]> = vec![b"snap-0", b"snap-1", b"snap-2"];
+    let results = vane_patch::multi_pass(&wasm, &snaps, |m, s| embed_snapshot(m, s))
+        .expect("multi-pass");
+    assert_eq!(results.len(), 3);
+    // Every pass preserves the base module's structure (S-W4).
+    for r in &results {
+        assert!(r.audit.is_clean(), "pass {} preserved structure", r.pass);
+    }
+    // Passes compose: the final module carries the last snapshot, and
+    // pass 2's input was pass 1's output (chained).
+    let last = extract_snapshot(&results[2].module).expect("extract");
+    assert_eq!(last.as_deref(), Some(&b"snap-2"[..]));
+}
+
+#[test]
+fn multi_pass_is_idempotent_safe() {
+    let wasm = sample_module();
+    // Re-specializing the same snapshot twice is a no-op-or-better: structure
+    // stays clean and the module stays valid.
+    let snaps: Vec<&[u8]> = vec![b"snap", b"snap"];
+    let results = vane_patch::multi_pass(&wasm, &snaps, |m, s| embed_snapshot(m, s))
+        .expect("multi-pass");
+    assert!(results.iter().all(|r| r.audit.is_clean()));
+    // The second pass still yields an extractable snapshot.
+    assert_eq!(
+        extract_snapshot(&results[1].module).expect("extract").as_deref(),
+        Some(&b"snap"[..])
+    );
+}

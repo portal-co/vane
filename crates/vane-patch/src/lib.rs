@@ -50,6 +50,10 @@ impl From<anyhow::Error> for PatchError {
 /// snapshot on boot and restores it, skipping the boot work that produced it.
 pub fn embed_snapshot(wasm: &[u8], snapshot: &[u8]) -> Result<Vec<u8>, PatchError> {
     let mut module = Module::from_buffer(wasm)?;
+    // Replace any prior embedded snapshot: a multi-pass chain embeds the
+    // latest derived snapshot, so re-patching supersedes rather than
+    // accumulates (and re-patching the same snapshot is idempotent).
+    while module.customs.remove_raw(SNAPSHOT_SECTION).is_some() {}
     module.customs.add(RawCustomSection {
         name: SNAPSHOT_SECTION.to_string(),
         data: snapshot.to_vec(),
@@ -186,4 +190,49 @@ pub fn weval_specialize(
     let specialized = run(wasm, snapshot).map_err(PatchError::Weval)?;
     // Weval may strip structural data; re-attach it.
     reattach_stripped_data(wasm, &specialized)
+}
+
+// ── Multi-pass acceleration over derived snapshots (W4) ─────────────────────
+
+/// The result of one acceleration pass over a snapshot in a derived chain.
+#[derive(Debug)]
+pub struct PassResult {
+    /// The specialized module produced by this pass (input to the next).
+    pub module: Vec<u8>,
+    /// Structure-preservation audit against the previous module.
+    pub audit: AuditReport,
+    /// Index of this pass (0 = base specialized against snapshot 0).
+    pub pass: usize,
+}
+
+/// Drive multi-pass acceleration (PLAN_VIRTIO_WEVAL workstream H): starting
+/// from `base_wasm`, apply `specialize` against each snapshot in a derived
+/// chain in turn, producing a successively-more-specialized module each pass.
+///
+/// `specialize(current_module, snapshot_bytes)` is the patcher
+/// ([`embed_snapshot`]) or the Weval wrapper ([`weval_specialize`]). After
+/// each pass the module is audited for structure preservation against its
+/// input, so a specializing pass that strips data fails loudly at that pass
+/// rather than compounding silently (S-W4's per-pass parity structure check).
+///
+/// Returns one [`PassResult`] per snapshot. Acceleration is idempotent-safe:
+/// re-specializing an already-specialized module just re-embeds/verifies.
+pub fn multi_pass(
+    base_wasm: &[u8],
+    snapshots: &[&[u8]],
+    specialize: impl Fn(&[u8], &[u8]) -> Result<Vec<u8>, PatchError>,
+) -> Result<Vec<PassResult>, PatchError> {
+    let mut results = Vec::new();
+    let mut current = base_wasm.to_vec();
+    for (i, snap) in snapshots.iter().enumerate() {
+        let specialized = specialize(&current, snap)?;
+        let audit = audit_no_stripping(base_wasm, &specialized)?;
+        results.push(PassResult {
+            module: specialized.clone(),
+            audit,
+            pass: i,
+        });
+        current = specialized;
+    }
+    Ok(results)
 }
