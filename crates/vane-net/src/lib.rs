@@ -28,9 +28,14 @@ pub mod dns;
 mod tunnel;
 
 #[cfg(feature = "std")]
+mod pumped;
+#[cfg(feature = "std")]
 mod std_sockets;
 
+pub use smoltcp::wire::Ipv4Address;
 pub use tunnel::{QueueDevice, Tunnel, GATEWAY_IP, GUEST_DNS_IP, GUEST_IP, SYNTHETIC_BASE};
 
+#[cfg(feature = "std")]
+pub use pumped::PumpedTunnel;
 #[cfg(feature = "std")]
 pub use std_sockets::StdSockets;

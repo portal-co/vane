@@ -21,6 +21,7 @@ wasix = []
 [dependencies]
 vane = { path = "../vane", default-features = false }
 vane-host = { path = "../vane-host" }
+vane-net = { path = "../vane-net", features = ["std"] }
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 vane-swap = { path = "../vane-swap", features = ["std"] }
 getrandom = { version = "0.3", default-features = false }

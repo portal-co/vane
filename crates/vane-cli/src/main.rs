@@ -75,6 +75,16 @@ struct Args {
     /// Host directory to share with the guest via virtio-9p (V3), mounted in
     /// the guest with `mount -t 9p -o trans=virtio hostshare <mountpoint>`.
     share: Option<String>,
+    /// Attach a virtio-net NIC whose TCP is tunneled to host sockets
+    /// (PLAN_PI_IN_VM M2). Guest addressing: 10.0.2.15/24, gateway 10.0.2.2,
+    /// DNS 10.0.2.3 (host-resolved, answers with synthetic 10.0.2.x).
+    net: bool,
+    /// Run the tunnel's clock/flow servicing on a background thread
+    /// (std::thread; a WASIX thread on wasm32-wasmer-wasi) — PLAN_PI_IN_VM M3.
+    net_pump: bool,
+    /// Static name mappings for the tunnel: `IP=hostname` (repeatable), for
+    /// guests that hardcode addresses or to pin well-known services.
+    net_map: Vec<String>,
 }
 
 const RAM_BASE: u64 = 0x8000_0000;
@@ -241,6 +251,9 @@ fn parse_args() -> Result<Args, String> {
     let mut swap_key = None;
     let mut disk = None;
     let mut share = None;
+    let mut net = false;
+    let mut net_pump = false;
+    let mut net_map: Vec<String> = Vec::new();
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -275,6 +288,12 @@ fn parse_args() -> Result<Args, String> {
             "--swap" => swap = Some(it.next().ok_or("--swap needs a value")?),
             "--disk" => disk = Some(it.next().ok_or("--disk needs a value")?),
             "--share" => share = Some(it.next().ok_or("--share needs a value")?),
+            "--net" => net = true,
+            "--net-pump" => {
+                net = true;
+                net_pump = true;
+            }
+            "--net-map" => net_map.push(it.next().ok_or("--net-map needs a value")?),
             "--swap-key" => swap_key = Some(it.next().ok_or("--swap-key needs a value")?),
             "--resident" => {
                 let v = it.next().ok_or("--resident needs a value")?;
@@ -314,6 +333,9 @@ fn parse_args() -> Result<Args, String> {
         swap_key,
         disk,
         share,
+        net,
+        net_pump,
+        net_map,
     })
 }
 
@@ -385,6 +407,48 @@ fn main() {
             reactor.add_virtio_device(Box::new(dev));
             virtio_dev_ids.push(vane::vane_riscv::virtio::DEV_9P);
             eprintln!("virtio-9p: {share_path} shared as 'hostshare'");
+        }
+        if args.net {
+            let mut tunnel = vane_net::Tunnel::new(
+                vane_net::StdSockets::new(),
+                [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
+                // Boot-time seed; TCP sequence diversity only, not security.
+                0x76616e65,
+            );
+            for m in &args.net_map {
+                let Some((ip, host)) = m.split_once('=') else {
+                    eprintln!("--net-map {m}: expected IP=hostname");
+                    std::process::exit(2);
+                };
+                let ip: std::net::Ipv4Addr = match ip.parse() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("--net-map {m}: bad address: {e}");
+                        std::process::exit(2);
+                    }
+                };
+                tunnel.map_static(
+                    vane_net::Ipv4Address::from_octets(ip.octets()),
+                    host.to_string(),
+                );
+                eprintln!("virtio-net: {ip} -> {host}");
+            }
+            let backend: Box<dyn vane::vane_riscv::virtio_net::NetBackend> = if args.net_pump {
+                eprintln!("virtio-net: pump thread at 5ms intervals");
+                Box::new(vane_net::PumpedTunnel::new(
+                    tunnel,
+                    std::time::Duration::from_millis(5),
+                ))
+            } else {
+                Box::new(tunnel)
+            };
+            let dev = vane::vane_riscv::virtio_net::VirtioNet::new(
+                [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
+                backend,
+            );
+            reactor.add_virtio_device(Box::new(dev));
+            virtio_dev_ids.push(vane::vane_riscv::virtio::DEV_NET);
+            eprintln!("virtio-net: tunnel up (guest 10.0.2.15/24 gw 10.0.2.2 dns 10.0.2.3)");
         }
 
         // M5: encrypted swap for the RAM region. Set up BEFORE loading images

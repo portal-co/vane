@@ -17,7 +17,7 @@ use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Add
 
 use vane_host::{SockErr, SockFd, SocketBackend};
 use vane_riscv::virtio_net::NetBackend;
-use vane_net::{QueueDevice, StdSockets, Tunnel};
+use vane_net::{PumpedTunnel, QueueDevice, StdSockets, Tunnel};
 
 /// StdSockets with a name override map, so tests can "resolve" fake names
 /// to loopback without touching real DNS.
@@ -113,9 +113,9 @@ impl Guest {
 
 /// Pump frames between the guest stack and the tunnel until `done` says
 /// stop (or the iteration budget runs out).
-fn pump_until<B: SocketBackend>(
+fn pump_until<N: NetBackend>(
     guest: &mut Guest,
-    tunnel: &mut Tunnel<B>,
+    tunnel: &mut N,
     mut done: impl FnMut(&mut Guest) -> bool,
 ) {
     for _ in 0..20_000 {
@@ -187,10 +187,7 @@ fn first_a_record(resp: &[u8]) -> Option<Ipv4Address> {
     ))
 }
 
-#[test]
-fn guest_dns_and_tcp_echo_through_tunnel() {
-    let echo_port = echo_server();
-
+fn echo_backend() -> MapSockets {
     let mut backend = MapSockets {
         inner: StdSockets::new(),
         map: BTreeMap::new(),
@@ -198,10 +195,30 @@ fn guest_dns_and_tcp_echo_through_tunnel() {
     backend
         .map
         .insert("echo.test".to_string(), "127.0.0.1".to_string());
-    let mut tunnel = Tunnel::new(backend, [0x52, 0x54, 0, 0, 0, 1], 0x5eed);
-    tunnel.add_listen_port(echo_port);
+    backend
+}
 
-    let mut guest = Guest::new();
+#[test]
+fn guest_dns_and_tcp_echo_through_tunnel() {
+    let echo_port = echo_server();
+    let mut tunnel = Tunnel::new(echo_backend(), [0x52, 0x54, 0, 0, 0, 1], 0x5eed);
+    tunnel.add_listen_port(echo_port);
+    run_scenario(&mut tunnel, echo_port);
+}
+
+/// Same scenario over the threaded pump (M3): the pump thread owns time and
+/// flow servicing; the NetBackend impl only moves frames.
+#[test]
+fn guest_dns_and_tcp_echo_through_pumped_tunnel() {
+    let echo_port = echo_server();
+    let mut tunnel = Tunnel::new(echo_backend(), [0x52, 0x54, 0, 0, 0, 1], 0x5eed);
+    tunnel.add_listen_port(echo_port);
+    let mut pumped = PumpedTunnel::new(tunnel, Duration::from_millis(2));
+    run_scenario(&mut pumped, echo_port);
+}
+
+fn run_scenario<N: NetBackend>(tunnel: &mut N, echo_port: u16) {
+    let guest = &mut Guest::new();
 
     // 1. DNS: resolve echo.test via 10.0.2.3 -> expect a synthetic 10.0.2.x.
     let dns = guest.sockets.add(udp::Socket::new(
@@ -218,7 +235,7 @@ fn guest_dns_and_tcp_echo_through_tunnel() {
 
     let mut synthetic = None;
     eprintln!("stage: dns");
-    pump_until(&mut guest, &mut tunnel, |g| {
+    pump_until(guest, tunnel, |g| {
         let sock = g.sockets.get_mut::<udp::Socket>(dns);
         if let Ok((data, _)) = sock.recv() {
             synthetic = first_a_record(data);
@@ -246,7 +263,7 @@ fn guest_dns_and_tcp_echo_through_tunnel() {
             .unwrap();
     }
     eprintln!("stage: tcp connect to {synthetic}");
-    pump_until(&mut guest, &mut tunnel, |g| {
+    pump_until(guest, tunnel, |g| {
         g.sockets.get::<tcp::Socket>(sock_h).state() == tcp::State::Established
     });
 
@@ -258,7 +275,7 @@ fn guest_dns_and_tcp_echo_through_tunnel() {
         .unwrap();
     let mut got = Vec::new();
     eprintln!("stage: echo");
-    pump_until(&mut guest, &mut tunnel, |g| {
+    pump_until(guest, tunnel, |g| {
         let sock = g.sockets.get_mut::<tcp::Socket>(sock_h);
         if sock.can_recv() {
             sock.recv(|d| {
@@ -275,7 +292,7 @@ fn guest_dns_and_tcp_echo_through_tunnel() {
     // guest.
     guest.sockets.get_mut::<tcp::Socket>(sock_h).close();
     eprintln!("stage: close");
-    pump_until(&mut guest, &mut tunnel, |g| {
+    pump_until(guest, tunnel, |g| {
         matches!(
             g.sockets.get::<tcp::Socket>(sock_h).state(),
             tcp::State::Closed | tcp::State::TimeWait

@@ -409,6 +409,17 @@ impl<B: SocketBackend> Tunnel<B> {
         // Kept as the place to add defensive reconciliation if that ever
         // changes.
     }
+
+    /// Queue a guest frame without advancing the clock — used by the
+    /// pumped (threaded) configuration, where a pump thread owns time.
+    pub fn push_guest_frame(&mut self, frame: &[u8]) {
+        self.device.rx.push_back(frame.to_vec());
+    }
+
+    /// Pop one frame bound for the guest without advancing the clock.
+    pub fn pop_host_frame(&mut self) -> Option<Vec<u8>> {
+        self.device.tx.pop_front()
+    }
 }
 
 impl<B: SocketBackend> NetBackend for Tunnel<B> {
