@@ -23,6 +23,7 @@ pub mod machine;
 pub mod template;
 pub mod virtio;
 pub mod virtio_blk;
+pub mod virtio_9p;
 pub mod virtio_net;
 
 #[cfg(feature = "fuzz-traces")]

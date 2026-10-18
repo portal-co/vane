@@ -235,3 +235,152 @@ fn blk_write_then_read() {
     assert_eq!(rs, 0, "read status OK");
     assert!(out.iter().all(|&b| b == 0xAA), "read back 0xAA sector");
 }
+
+// ── virtio-9p (V3) ───────────────────────────────────────────────────────────
+mod ninep {
+    use super::*;
+    use std::collections::BTreeMap;
+    use vane_riscv::virtio::VirtioMmio;
+    use vane_riscv::virtio_9p::{Host9p, Meta9p, Virtio9p};
+
+    /// In-memory host fs: path -> (is_dir, data).
+    struct MemFs {
+        files: BTreeMap<String, Vec<u8>>,
+    }
+    impl MemFs {
+        fn new() -> Self {
+            let mut files = BTreeMap::new();
+            files.insert("hello.txt".to_string(), b"hello, 9p".to_vec());
+            MemFs { files }
+        }
+    }
+    impl Host9p for MemFs {
+        fn stat(&mut self, path: &str) -> Result<Meta9p, i32> {
+            if path.is_empty() {
+                return Ok(Meta9p { mode: 0o755, size: 0, is_dir: true });
+            }
+            match self.files.get(path) {
+                Some(d) => Ok(Meta9p { mode: 0o644, size: d.len() as u64, is_dir: false }),
+                None => Err(2), // ENOENT
+            }
+        }
+        fn open(&mut self, path: &str, _flags: u32) -> Result<u64, i32> {
+            if self.files.contains_key(path) {
+                Ok(1) // single handle for the test
+            } else {
+                Err(2)
+            }
+        }
+        fn read(&mut self, _h: u64, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
+            let data = self.files.get("hello.txt").ok_or(2)?;
+            let start = (offset as usize).min(data.len());
+            let n = (data.len() - start).min(buf.len());
+            buf[..n].copy_from_slice(&data[start..start + n]);
+            Ok(n)
+        }
+        fn write(&mut self, _h: u64, _o: u64, _d: &[u8]) -> Result<usize, i32> {
+            Ok(0)
+        }
+        fn mkdir(&mut self, _p: &str, _m: u32) -> Result<(), i32> {
+            Ok(())
+        }
+        fn readdir(&mut self, _p: &str) -> Result<Vec<(String, bool)>, i32> {
+            Ok(vec![("hello.txt".to_string(), false)])
+        }
+        fn close(&mut self, _h: u64) {}
+    }
+
+    // 9P message builders (body after the size word).
+    fn msg(ty: u8, tag: u16, body: &[u8]) -> Vec<u8> {
+        let mut m = Vec::new();
+        m.extend_from_slice(&((4 + 3 + body.len()) as u32).to_le_bytes());
+        m.push(ty);
+        m.extend_from_slice(&tag.to_le_bytes());
+        m.extend_from_slice(body);
+        m
+    }
+    fn s(s: &str) -> Vec<u8> {
+        let mut v = (s.len() as u16).to_le_bytes().to_vec();
+        v.extend_from_slice(s.as_bytes());
+        v
+    }
+
+    /// Send a 9P message through the device; return the response body.
+    fn rpc(d: &mut VirtioMmio, mem: &mut TestMem, req: &[u8]) -> Vec<u8> {
+        // Reset + set up the queue.
+        d.write(0x070, 0);
+        d.write(0x020, PAGE as u32);
+        d.write(0x028, 0);
+        d.write(0x030, 4);
+        d.write(0x034, PAGE as u32);
+        d.write(0x038, 1);
+        let desc = 4096u64;
+        let avail = 4160u64;
+        let reqb = 0x30000u64;
+        let respb = 0x32000u64;
+        mem.put(reqb, req);
+        // desc 0: request (readable); desc 1: response (writable).
+        mem.put(desc, &reqb.to_le_bytes());
+        mem.put(desc + 8, &(req.len() as u32).to_le_bytes());
+        mem.put(desc + 12, &1u16.to_le_bytes()); // NEXT
+        mem.put(desc + 14, &1u16.to_le_bytes());
+        mem.put(desc + 16, &respb.to_le_bytes());
+        mem.put(desc + 24, &4096u32.to_le_bytes());
+        mem.put(desc + 28, &2u16.to_le_bytes()); // WRITE
+        mem.put(avail + 2, &1u16.to_le_bytes());
+        mem.put(avail + 4, &0u16.to_le_bytes());
+        d.write(0x050, 0);
+        d.process(mem);
+        let out = mem.get(respb, 4096);
+        let size = u32::from_le_bytes([out[0], out[1], out[2], out[3]]) as usize;
+        out[4..size].to_vec()
+    }
+
+    #[test]
+    fn ninep_version_attach_walk_read() {
+        let mut d = VirtioMmio::new(Box::new(Virtio9p::new(MemFs::new(), "hostshare")), 1);
+        let mut mem = TestMem(BTreeMap::new());
+
+        // Tversion.
+        let mut body = (8192u32).to_le_bytes().to_vec();
+        body.extend_from_slice(&s("9P2000.L"));
+        let r = rpc(&mut d, &mut mem, &msg(100, 1, &body));
+        assert_eq!(r[0], 101, "Rversion");
+        assert!(r.windows(8).any(|w| w == b"9P2000.L"), "version string echoed");
+
+        // Tattach fid=1.
+        let mut body = 1u32.to_le_bytes().to_vec();
+        body.extend_from_slice(&u32::MAX.to_le_bytes()); // afid
+        body.extend_from_slice(&s("root"));
+        body.extend_from_slice(&s(""));
+        body.extend_from_slice(&u32::MAX.to_le_bytes()); // n_uname
+        let r = rpc(&mut d, &mut mem, &msg(104, 2, &body));
+        assert_eq!(r[0], 105, "Rattach");
+
+        // Twalk fid=1 -> newfid=2 to "hello.txt".
+        let mut body = 1u32.to_le_bytes().to_vec();
+        body.extend_from_slice(&2u32.to_le_bytes());
+        body.extend_from_slice(&1u16.to_le_bytes()); // nwname
+        body.extend_from_slice(&s("hello.txt"));
+        let r = rpc(&mut d, &mut mem, &msg(110, 3, &body));
+        assert_eq!(r[0], 111, "Rwalk");
+        let nwqid = u16::from_le_bytes([r[3], r[4]]);
+        assert_eq!(nwqid, 1, "walked one element");
+
+        // Tlopen fid=2.
+        let mut body = 2u32.to_le_bytes().to_vec();
+        body.extend_from_slice(&0u32.to_le_bytes()); // O_RDONLY
+        let r = rpc(&mut d, &mut mem, &msg(12, 4, &body));
+        assert_eq!(r[0], 13, "Rlopen");
+
+        // Tread fid=2 offset=0 count=64.
+        let mut body = 2u32.to_le_bytes().to_vec();
+        body.extend_from_slice(&0u64.to_le_bytes());
+        body.extend_from_slice(&64u32.to_le_bytes());
+        let r = rpc(&mut d, &mut mem, &msg(116, 5, &body));
+        assert_eq!(r[0], 117, "Rread");
+        let count = u32::from_le_bytes([r[3], r[4], r[5], r[6]]) as usize;
+        let data = &r[7..7 + count];
+        assert_eq!(data, b"hello, 9p");
+    }
+}

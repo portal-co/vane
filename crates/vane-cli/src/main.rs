@@ -1,13 +1,15 @@
 //! `vane-cli` — self-driving vane host.
 //!
-//! Two modes:
+//! Two modes, both under the privileged architecture — the user-mode
+//! syscall-shim "micro-OS" was removed deliberately (it is very noticeable
+//! to a trained model: wrong uname, wrong /proc, wrong syscall surface):
 //!
-//! - **Userspace-shim mode (default)**: load a static RV64 ELF and bridge a
-//!   minimal Linux syscall set (write/read/exit) to stdio. Used by the M0
-//!   gate.
-//! - **Machine mode (`--hart --machine`)**: boot with the privileged
-//!   architecture and the QEMU-virt device model (UART/ACLINT/PLIC/syscon).
-//!   Optionally boots OpenSBI + a Linux Image + initrd + generated DTB.
+//! - **Hart payload mode (`--elf <payload> --hart`)**: a bare-metal RV64
+//!   payload (e.g. the riscv-tests-style gate binaries) on the privileged
+//!   architecture; completion via `--tohost` or the trap engine.
+//! - **Machine mode (`--machine`)**: boot with the QEMU-virt device model
+//!   (UART/ACLINT/PLIC/syscon/virtio). Optionally boots OpenSBI + a Linux
+//!   Image + initrd + generated DTB — real Linux, real symbols.
 //!
 //! Usage:
 //!   vane-cli --elf <payload.elf> [--hart] [--tohost 0xADDR]
@@ -18,8 +20,6 @@ mod elf;
 
 use vane::Reactor;
 use vane_host::HostIo;
-
-const ENOSYS: u64 = (-38i64) as u64;
 
 /// Stdout-backed host console.
 struct StdioHost;
@@ -72,6 +72,9 @@ struct Args {
     /// virtio-blk disk image (raw 512-byte-sector file) attached as a
     /// virtio-mmio device (V2). Requires --machine.
     disk: Option<String>,
+    /// Host directory to share with the guest via virtio-9p (V3), mounted in
+    /// the guest with `mount -t 9p -o trans=virtio hostshare <mountpoint>`.
+    share: Option<String>,
 }
 
 const RAM_BASE: u64 = 0x8000_0000;
@@ -80,6 +83,100 @@ const FW_DYNAMIC_INFO_ADDR: u64 = 0x87E0_0000;
 const KERNEL_ADDR: u64 = 0x8020_0000;
 const INITRD_ADDR: u64 = 0x8400_0000;
 const DTB_ADDR: u64 = 0x87F0_0000;
+
+/// A confined host-directory backend for virtio-9p (V3): all paths are joined
+/// beneath `root` (the device's `..`-resistant join prevents escape).
+struct DirFs {
+    root: std::path::PathBuf,
+    handles: std::collections::HashMap<u64, std::fs::File>,
+    next_handle: u64,
+}
+
+impl DirFs {
+    fn new(root: std::path::PathBuf) -> Self {
+        DirFs {
+            root,
+            handles: std::collections::HashMap::new(),
+            next_handle: 1,
+        }
+    }
+    fn resolve(&self, path: &str) -> std::path::PathBuf {
+        let mut p = self.root.clone();
+        for comp in path.split('/') {
+            if !comp.is_empty() && comp != "." && comp != ".." {
+                p.push(comp);
+            }
+        }
+        p
+    }
+}
+
+impl vane::vane_riscv::virtio_9p::Host9p for DirFs {
+    fn stat(&mut self, path: &str) -> Result<vane::vane_riscv::virtio_9p::Meta9p, i32> {
+        let p = self.resolve(path);
+        match std::fs::metadata(&p) {
+            Ok(m) => Ok(vane::vane_riscv::virtio_9p::Meta9p {
+                mode: 0o644,
+                size: m.len(),
+                is_dir: m.is_dir(),
+            }),
+            Err(_) => Err(2), // ENOENT
+        }
+    }
+    fn open(&mut self, path: &str, flags: u32) -> Result<u64, i32> {
+        let p = self.resolve(path);
+        let mut o = std::fs::OpenOptions::new();
+        // Linux flags: O_WRONLY=1, O_RDWR=2, O_CREAT=0x40, O_TRUNC=0x200.
+        let acc = flags & 3;
+        o.read(acc == 0 || acc == 2).write(acc == 1 || acc == 2);
+        if flags & 0x40 != 0 {
+            o.create(true);
+        }
+        if flags & 0x200 != 0 {
+            o.truncate(true);
+        }
+        match o.open(&p) {
+            Ok(f) => {
+                let h = self.next_handle;
+                self.next_handle += 1;
+                self.handles.insert(h, f);
+                Ok(h)
+            }
+            Err(_) => Err(2),
+        }
+    }
+    fn read(&mut self, handle: u64, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
+        use std::io::{Read, Seek, SeekFrom};
+        let f = self.handles.get_mut(&handle).ok_or(9)?;
+        f.seek(SeekFrom::Start(offset)).map_err(|_| 5)?;
+        f.read(buf).map_err(|_| 5)
+    }
+    fn write(&mut self, handle: u64, offset: u64, data: &[u8]) -> Result<usize, i32> {
+        use std::io::{Seek, SeekFrom, Write};
+        let f = self.handles.get_mut(&handle).ok_or(9)?;
+        f.seek(SeekFrom::Start(offset)).map_err(|_| 5)?;
+        f.write(data).map_err(|_| 5)
+    }
+    fn mkdir(&mut self, path: &str, _mode: u32) -> Result<(), i32> {
+        std::fs::create_dir(self.resolve(path)).map_err(|_| 17) // EEXIST on failure
+    }
+    fn readdir(&mut self, path: &str) -> Result<Vec<(String, bool)>, i32> {
+        let mut out = Vec::new();
+        match std::fs::read_dir(self.resolve(path)) {
+            Ok(rd) => {
+                for e in rd.flatten() {
+                    let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                    out.push((e.file_name().to_string_lossy().into_owned(), is_dir));
+                }
+                Ok(out)
+            }
+            Err(_) => Err(2),
+        }
+    }
+    fn close(&mut self, handle: u64) {
+        self.handles.remove(&handle);
+    }
+}
 
 /// A host-file block backend for virtio-blk (V2): a raw 512-byte-sector image.
 struct FileBlock {
@@ -143,6 +240,7 @@ fn parse_args() -> Result<Args, String> {
     let mut resident = None;
     let mut swap_key = None;
     let mut disk = None;
+    let mut share = None;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -176,6 +274,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--swap" => swap = Some(it.next().ok_or("--swap needs a value")?),
             "--disk" => disk = Some(it.next().ok_or("--disk needs a value")?),
+            "--share" => share = Some(it.next().ok_or("--share needs a value")?),
             "--swap-key" => swap_key = Some(it.next().ok_or("--swap-key needs a value")?),
             "--resident" => {
                 let v = it.next().ok_or("--resident needs a value")?;
@@ -214,6 +313,7 @@ fn parse_args() -> Result<Args, String> {
         resident,
         swap_key,
         disk,
+        share,
     })
 }
 
@@ -278,6 +378,13 @@ fn main() {
             reactor.add_virtio_device(Box::new(dev));
             virtio_dev_ids.push(vane::vane_riscv::virtio::DEV_BLK);
             eprintln!("virtio-blk: {disk_path} attached");
+        }
+        if let Some(share_path) = &args.share {
+            let backend = DirFs::new(std::path::PathBuf::from(share_path));
+            let dev = vane::vane_riscv::virtio_9p::Virtio9p::new(backend, "hostshare");
+            reactor.add_virtio_device(Box::new(dev));
+            virtio_dev_ids.push(vane::vane_riscv::virtio::DEV_9P);
+            eprintln!("virtio-9p: {share_path} shared as 'hostshare'");
         }
 
         // M5: encrypted swap for the RAM region. Set up BEFORE loading images
@@ -395,7 +502,13 @@ fn main() {
             RAM_BASE
         };
     } else {
-        // Payload mode: a single ELF.
+        // Payload mode: a single ELF, ALWAYS under the privileged
+        // architecture (the user-mode syscall-shim micro-OS was removed;
+        // payloads complete via --tohost or the trap engine).
+        if !args.hart {
+            eprintln!("vane-cli: payload mode requires --hart (the user-mode syscall shim was removed; use --machine for Linux)");
+            std::process::exit(2);
+        }
         let elf_path = match &args.elf_path {
             Some(p) => p.clone(),
             None => {
@@ -417,9 +530,7 @@ fn main() {
                 std::process::exit(2);
             }
         };
-        if args.hart {
-            reactor.set_hart_enabled(true);
-        }
+        reactor.set_hart_enabled(true);
     }
 
     // Boot register state for machine mode: a0 = hartid, a1 = dtb.
@@ -436,8 +547,6 @@ fn main() {
     }
 
     let mut host = StdioHost;
-    let mut exit_code: Option<u64> = None;
-    let mut insns: u64 = 0;
     let mut pc = entry;
 
     // M7 (`wasix` feature): pump stdin on a background thread into a channel
@@ -590,59 +699,4 @@ fn main() {
         }
     }
 
-    // Legacy userspace-shim mode.
-    loop {
-        let mut on_ecall = async |regs: &mut [u64; 32]| -> bool {
-            let nr = regs[17];
-            match nr {
-                64 => {
-                    // write(fd, buf, len)
-                    let (fd, buf, len) = (regs[10], regs[11], regs[12]);
-                    if fd == 1 || fd == 2 {
-                        for i in 0..len {
-                            host.uart_write(reactor.read_guest_byte(buf.wrapping_add(i)));
-                        }
-                    }
-                    regs[10] = len;
-                    false
-                }
-                63 => {
-                    // read(fd, buf, len): report EOF.
-                    regs[10] = 0;
-                    false
-                }
-                93 | 94 => {
-                    exit_code = Some(regs[10]);
-                    true
-                }
-                _ => {
-                    regs[10] = ENOSYS;
-                    false
-                }
-            }
-        };
-        let result = futures::executor::block_on(reactor.interp_core(pc, &mut regs, &mut on_ecall));
-        drop(on_ecall);
-        match result {
-            Ok(stop_pc) => {
-                if let Some(code) = exit_code {
-                    std::process::exit(code as u8 as i32);
-                }
-                // Stopped for a reason other than exit (currently
-                // impossible: only exit stops). Resume defensively.
-                pc = stop_pc + 4;
-            }
-            Err(e) => {
-                eprintln!("vane-cli: interpreter error at pc={pc:#x}: {e}");
-                std::process::exit(1);
-            }
-        }
-        if let Some(max) = args.max_insns {
-            insns += 1;
-            if insns >= max {
-                eprintln!("vane-cli: instruction cap reached");
-                std::process::exit(3);
-            }
-        }
-    }
 }
