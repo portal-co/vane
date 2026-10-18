@@ -150,6 +150,8 @@ impl Reactor {
                 hart: Default::default(),
                 hooks: Rc::new(vane_arch::hooks::HookSet::new()),
                 hook_events: Vec::new(),
+                pause_on_hook: false,
+                skip_hook_pause_once: None,
             })),
         }
     }

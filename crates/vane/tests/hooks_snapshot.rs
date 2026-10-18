@@ -195,6 +195,46 @@ fn snapshot_fork_bit_parity_and_divergence() {
     assert_ne!(fork2_snap.id, child_snap.id, "diverged state hashes differently");
 }
 
+/// Pause-on-hook: the trace loop stops exactly at the hooked function's
+/// entry — before any of it executes — so the driver can snapshot a
+/// trajectory fork point. Resuming runs the hooked trace once.
+#[test]
+fn pause_on_hook_stops_before_the_hooked_function() {
+    let words = [
+        0x0070_0513u32, // 0x1000: addi a0, x0, 7
+        0x05d0_0893, // 0x1004: addi a7, x0, 93   <-- hooked "entry"
+        0x0000_0073, // 0x1008: ecall (exit)
+    ];
+    let r = Reactor::new();
+    load_words(&r, 0x1000, &words);
+    let mut hooks = HookSet::new();
+    hooks.insert(0x1004, "do_exit");
+    r.install_hooks(hooks);
+    r.set_pause_on_hook(true);
+
+    // First dispatch: pauses at the hook BEFORE a7 is set.
+    let mut on_ecall = async |_h: &mut LocalStackHost<Reactor>| -> bool { true };
+    let pc = block_on(r.trace_run_fueled(0x1000, &mut on_ecall, Some(100))).expect("run");
+    assert_eq!(pc, 0x1004, "paused at the hooked entry");
+    assert_eq!(r.hook_pause_pending(), Some(0x1004));
+    assert_eq!(r.read_reg(17), 0, "the hooked function has not run yet");
+    assert_eq!(r.take_hook_events().len(), 1, "the event is recorded at pause time");
+
+    // Resume: the hooked trace runs exactly once (a7 set, ecall stops).
+    let pc = block_on(r.trace_run_fueled(pc, &mut on_ecall, Some(100))).expect("resume");
+    assert_eq!(pc, 0x100c, "the hooked trace ran to the ecall boundary");
+    assert_eq!(r.read_reg(17), 93);
+    assert_eq!(r.hook_pause_pending(), None, "the one-shot skip is consumed");
+
+    // Snapshot at the fork point would capture pre-function state: verified
+    // by construction above (regs pre-entry). Fork from it:
+    let r2 = Reactor::new();
+    load_words(&r2, 0x1000, &words);
+    r2.write_reg(10, 7);
+    let d = drive(&r2, 0x1004, None, 100);
+    assert!(d.exited);
+}
+
 /// Snapshotting under machine mode (devices attached) round-trips device
 /// state: UART RX queued before the snapshot is still queued after restore.
 #[test]

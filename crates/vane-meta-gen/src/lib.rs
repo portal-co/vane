@@ -116,6 +116,16 @@ macro_rules! vane_meta {
             /// Recorded hook firings, oldest first; drained by
             /// `take_hook_events`.
             hook_events: $crate::alloc::vec::Vec<$crate::vane_arch::hooks::HookEvent>,
+            /// When true, the trace loop pauses BEFORE dispatching a hooked
+            /// trace (returning `Ok(hooked_pc)`) so the driver can snapshot
+            /// the machine exactly at the hooked function's entry — the
+            /// trajectory fork point. Resuming runs the hooked trace once
+            /// (via `skip_hook_pause_once`) and pauses again on the next
+            /// visit to a hooked address.
+            pause_on_hook: bool,
+            /// One-shot: the hooked pc to dispatch without pausing (set by
+            /// the pause, consumed by the resume).
+            skip_hook_pause_once: Option<u64>,
         }
 
         const _: () = {
@@ -444,6 +454,20 @@ macro_rules! vane_meta {
                                 pc,
                                 args,
                             });
+                            if lock.pause_on_hook {
+                                if lock.skip_hook_pause_once == Some(pc) {
+                                    // The resume after a pause: run this
+                                    // hooked trace once, re-arm afterwards.
+                                    lock.skip_hook_pause_once = None;
+                                } else {
+                                    // Pause exactly at the hooked function's
+                                    // entry, before any of it executes.
+                                    lock.skip_hook_pause_once = Some(pc);
+                                    host.flush_regs();
+                                    lock.pc = host.pc;
+                                    return Ok(host.pc);
+                                }
+                            }
                         }
                         // Compiled-trace registry: a registered callable
                         // (Weval/JIT/patcher artifact, or the default compiled
@@ -558,6 +582,24 @@ macro_rules! vane_meta {
                     &self,
                 ) -> $crate::alloc::vec::Vec<$crate::vane_arch::hooks::HookEvent> {
                     $crate::core::mem::take(&mut self.core.lock().hook_events)
+                }
+
+                /// Enable/disable pausing before hooked traces (see
+                /// `pause_on_hook`): the trajectory fork-point mechanism.
+                pub fn set_pause_on_hook(&self, enabled: bool) {
+                    let mut lock = self.core.lock();
+                    lock.pause_on_hook = enabled;
+                    if !enabled {
+                        lock.skip_hook_pause_once = None;
+                    }
+                }
+
+                /// When the trace loop paused before a hooked trace, the
+                /// hooked pc (also the returned `Ok(pc)`). `None` when not
+                /// paused at a hook. A driver distinguishes a hook pause
+                /// from fuel exhaustion with this.
+                pub fn hook_pause_pending(&self) -> Option<u64> {
+                    self.core.lock().skip_hook_pause_once
                 }
             }
         };
