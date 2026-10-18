@@ -511,3 +511,9 @@ of M1–M5; M6 is on the PLAN_VIRTIO_WEVAL critical path owned by the `vane` dir
   asserts the full chain and records timing JSON. Contract with t-34d8:
   their ext2 image unchanged (mounts via ext4 driver, EXT4_USE_FOR_EXT2=y);
   they run the first long boot.
+- 2026-10-19 — R8 iteration: first boot ran the initramfs flow correctly but
+  insmod hit version-magic mismatch (netboot kernel 7.0.13 vs my 7.2.11
+  module set). fetch-virtio-modules.sh is now version-aware (magic read
+  from the kernel image, package located via the sid index, snapshot.d.o
+  fallback note). Also fixed a silent-death pipefail+grep-SIGPIPE bug.
+  t-34d8 re-running with matched modules.
