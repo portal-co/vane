@@ -22,17 +22,22 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// How to capture a string argument at a hooked symbol: read the pointer
-/// in argument register a<reg>, add `offset` bytes, follow that pointer,
-/// and read a NUL-terminated string there. Covers the real kernel shapes —
-/// e.g. `do_execveat_common`'s `struct filename *` (name at offset 0) —
-/// without baking struct layouts into either engine.
+/// How to capture a string argument at a hooked symbol. Covers the real
+/// kernel shapes without baking struct layouts into either engine:
+///
+/// - direct (`str:aN`, `offset = None`): register aN holds a pointer to the
+///   NUL-terminated string — e.g. `do_sys_openat2`'s
+///   `const char __user *filename`.
+/// - indirect (`str:aN:0xOFF`, `offset = Some`): aN holds a pointer to a
+///   struct; the string pointer sits at byte offset OFF inside it — e.g.
+///   `do_execveat_common`'s `struct filename *` (`name` at offset 0).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ArgStr {
     /// Argument register index (0 = a0).
     pub reg: u8,
-    /// Byte offset from the register's pointer to the string pointer.
-    pub offset: u64,
+    /// Indirect: byte offset from the register's struct pointer to the
+    /// string pointer. `None`: the register points at the string directly.
+    pub offset: Option<u64>,
 }
 
 /// One hook: a named observation point at a guest virtual address.
