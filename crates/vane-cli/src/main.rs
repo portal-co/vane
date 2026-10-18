@@ -69,6 +69,9 @@ struct Args {
     /// drawn from the host CSPRNG (a fresh key trivially invalidates old
     /// swap — by design, PLAN §6.2 item 3).
     swap_key: Option<String>,
+    /// virtio-blk disk image (raw 512-byte-sector file) attached as a
+    /// virtio-mmio device (V2). Requires --machine.
+    disk: Option<String>,
 }
 
 const RAM_BASE: u64 = 0x8000_0000;
@@ -77,6 +80,50 @@ const FW_DYNAMIC_INFO_ADDR: u64 = 0x87E0_0000;
 const KERNEL_ADDR: u64 = 0x8020_0000;
 const INITRD_ADDR: u64 = 0x8400_0000;
 const DTB_ADDR: u64 = 0x87F0_0000;
+
+/// A host-file block backend for virtio-blk (V2): a raw 512-byte-sector image.
+struct FileBlock {
+    file: std::fs::File,
+    capacity_sectors: u64,
+}
+
+impl FileBlock {
+    fn open(path: &std::path::Path) -> std::io::Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)?;
+        let len = file.metadata()?.len();
+        Ok(FileBlock {
+            file,
+            capacity_sectors: len / vane::vane_riscv::virtio_blk::SECTOR,
+        })
+    }
+}
+
+impl vane::vane_riscv::virtio_blk::BlockBackend for FileBlock {
+    fn capacity_sectors(&self) -> u64 {
+        self.capacity_sectors
+    }
+    fn read_sectors(&mut self, lba: u64, buf: &mut [u8]) {
+        use std::io::{Read, Seek, SeekFrom};
+        let _ = self
+            .file
+            .seek(SeekFrom::Start(lba * vane::vane_riscv::virtio_blk::SECTOR));
+        let _ = self.file.read_exact(buf);
+    }
+    fn write_sectors(&mut self, lba: u64, buf: &[u8]) {
+        use std::io::{Seek, SeekFrom, Write};
+        let _ = self
+            .file
+            .seek(SeekFrom::Start(lba * vane::vane_riscv::virtio_blk::SECTOR));
+        let _ = self.file.write_all(buf);
+    }
+    fn flush(&mut self) {
+        use std::io::Write;
+        let _ = self.file.flush();
+    }
+}
 
 fn parse_args() -> Result<Args, String> {
     let mut elf_path = None;
@@ -95,6 +142,7 @@ fn parse_args() -> Result<Args, String> {
     let mut swap = None;
     let mut resident = None;
     let mut swap_key = None;
+    let mut disk = None;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -127,6 +175,7 @@ fn parse_args() -> Result<Args, String> {
                 engine = Some(it.next().ok_or("--engine needs a value")?);
             }
             "--swap" => swap = Some(it.next().ok_or("--swap needs a value")?),
+            "--disk" => disk = Some(it.next().ok_or("--disk needs a value")?),
             "--swap-key" => swap_key = Some(it.next().ok_or("--swap-key needs a value")?),
             "--resident" => {
                 let v = it.next().ok_or("--resident needs a value")?;
@@ -164,6 +213,7 @@ fn parse_args() -> Result<Args, String> {
         swap,
         resident,
         swap_key,
+        disk,
     })
 }
 
@@ -214,6 +264,20 @@ fn main() {
         reactor.set_machine_enabled(true);
         if let Some(rx) = &args.uart_rx {
             reactor.with_machine(|m| m.uart.push_rx(rx));
+        }
+
+        // V2: virtio-blk disk. Registered before the DTB is generated so its
+        // virtio,mmio node is emitted (PLIC source 1).
+        let mut virtio_dev_ids: Vec<u32> = Vec::new();
+        if let Some(disk_path) = &args.disk {
+            let backend = FileBlock::open(std::path::Path::new(disk_path)).unwrap_or_else(|e| {
+                eprintln!("--disk {disk_path}: {e}");
+                std::process::exit(2);
+            });
+            let dev = vane::vane_riscv::virtio_blk::VirtioBlk::new(backend);
+            reactor.add_virtio_device(Box::new(dev));
+            virtio_dev_ids.push(vane::vane_riscv::virtio::DEV_BLK);
+            eprintln!("virtio-blk: {disk_path} attached");
         }
 
         // M5: encrypted swap for the RAM region. Set up BEFORE loading images
@@ -292,7 +356,12 @@ fn main() {
             reactor.write_bytes(FW_DYNAMIC_INFO_ADDR, &bytes);
         }
         let bootargs = args.append.as_deref().unwrap_or("console=ttyS0");
-        let dtb = vane::vane_riscv::machine::virt_dtb(args.ram_size, initrd_range, bootargs);
+        let dtb = vane::vane_riscv::machine::virt_dtb_with_virtio(
+            args.ram_size,
+            initrd_range,
+            bootargs,
+            &virtio_dev_ids,
+        );
         reactor.write_bytes(DTB_ADDR, &dtb);
 
         // Pin the boot artifacts so they are never evicted (§6.2 item 2):
