@@ -60,5 +60,8 @@ fn snapshot_checksum_catches_corruption() {
     // Flip a byte in the payload (not the trailing checksum).
     let mid = bytes.len() / 2;
     bytes[mid] ^= 0x01;
-    assert!(Reactor::snapshot_from_bytes(&bytes).is_err(), "corruption detected");
+    assert!(
+        Reactor::snapshot_from_bytes(&bytes).is_err(),
+        "corruption detected"
+    );
 }

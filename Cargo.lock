@@ -1296,6 +1296,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bf256ce5efdfa370213c1dabab5935a12e49f2c58d15e9eac2870d3b4f27263"
 
 [[package]]
+name = "termcolor"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
+dependencies = [
+ "winapi-util",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1547,8 +1556,14 @@ name = "vane-patch"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "vane-arch",
+ "vane-target-core",
+ "vane-target-wasm",
  "walrus",
  "wasm-encoder 0.239.0",
+ "wasmparser 0.239.0",
+ "wasmprinter",
+ "wat",
 ]
 
 [[package]]
@@ -1856,13 +1871,23 @@ dependencies = [
 
 [[package]]
 name = "wasmparser"
+version = "0.224.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04f17a5917c2ddd3819e84c661fae0d6ba29d7b9c1f0e96c708c65a9c4188e11"
+dependencies = [
+ "bitflags",
+ "indexmap",
+ "semver",
+]
+
+[[package]]
+name = "wasmparser"
 version = "0.239.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c9d90bb93e764f6beabf1d02028c70a2156a6583e63ac4218dd07ef733368b0"
 dependencies = [
  "bitflags",
  "indexmap",
- "semver",
 ]
 
 [[package]]
@@ -1886,6 +1911,18 @@ checksum = "60bd825ffedc6cba8a642924ba7ae424afbc47811cffbcb7b92031ec24e59b4c"
 dependencies = [
  "bitflags",
  "indexmap",
+ "semver",
+]
+
+[[package]]
+name = "wasmprinter"
+version = "0.224.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0095b53a3b09cbc2f90f789ea44aa1b17ecc2dad8b267e657c7391f3ded6293d"
+dependencies = [
+ "anyhow",
+ "termcolor",
+ "wasmparser 0.224.1",
 ]
 
 [[package]]

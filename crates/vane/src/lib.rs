@@ -1646,8 +1646,8 @@ impl Reactor {
         use vane_riscv::snapshot_ser::{open, Reader};
         let payload = open(data).map_err(|e| format!("snapshot envelope: {e:?}"))?;
         let mut r = Reader::new(payload);
-        let err = |m: &'static str| move |e: vane_riscv::snapshot_ser::SerError| {
-            format!("snapshot {m}: {e:?}")
+        let err = |m: &'static str| {
+            move |e: vane_riscv::snapshot_ser::SerError| format!("snapshot {m}: {e:?}")
         };
         let id = r.u64().map_err(err("id"))?;
         let parent = match r.u8().map_err(err("parent"))? {
@@ -1660,7 +1660,8 @@ impl Reactor {
         for reg in &mut regs {
             *reg = r.u64().map_err(err("regs"))?;
         }
-        let hart = vane_riscv::hart::HartSnapshot::decode(&mut r).map_err(|e| format!("hart: {e:?}"))?;
+        let hart =
+            vane_riscv::hart::HartSnapshot::decode(&mut r).map_err(|e| format!("hart: {e:?}"))?;
         let mut pages = std::collections::BTreeMap::new();
         let count = r.u32().map_err(err("pages"))?;
         for _ in 0..count {
