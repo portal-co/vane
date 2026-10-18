@@ -59,7 +59,13 @@ impl HookSet {
     /// Install a hook at `addr` named `name`. Re-installing the same
     /// address replaces the name.
     pub fn insert(&mut self, addr: u64, name: &str) {
-        self.by_addr.insert(addr, Hook { name: name.to_owned(), addr });
+        self.by_addr.insert(
+            addr,
+            Hook {
+                name: name.to_owned(),
+                addr,
+            },
+        );
     }
 
     /// The hook at `addr`, if any.
@@ -87,6 +93,16 @@ impl HookSet {
     /// Parse a hook manifest: one `<hexaddr> <name>` pair per line (`#`
     /// comments and blank lines ignored). This is the format the QEMU
     /// plugin consumes too, so one manifest drives both engines.
+    ///
+    /// ```
+    /// let set = vane_arch::hooks::HookSet::parse_manifest(
+    ///     "# comment\n0xffffffff80000100 do_execveat_common\n\n0xffffffff80000200 do_sys_openat2\n",
+    /// )
+    /// .unwrap();
+    /// assert_eq!(set.len(), 2);
+    /// assert_eq!(set.at(0xffffffff80000100).unwrap().name, "do_execveat_common");
+    /// assert!(vane_arch::hooks::HookSet::parse_manifest("not-an-addr").is_err());
+    /// ```
     pub fn parse_manifest(text: &str) -> Result<Self, String> {
         let mut set = HookSet::new();
         for (ln, line) in text.lines().enumerate() {
@@ -113,6 +129,18 @@ impl HookSet {
     /// <name>` lines), keeping only the named symbols. Unknown names are
     /// reported so a stale map against a new kernel fails visibly instead
     /// of silently tracing nothing.
+    ///
+    /// ```
+    /// let map = "ffffffff80000100 T do_execveat_common\nffffffff80000200 T do_sys_openat2\n";
+    /// let set = vane_arch::hooks::HookSet::from_system_map(
+    ///     map,
+    ///     &["do_execveat_common", "do_sys_openat2"],
+    /// )
+    /// .unwrap();
+    /// assert!(set.is_boundary(0xffffffff80000100));
+    /// assert!(!set.is_boundary(0xffffffff80000104));
+    /// assert!(vane_arch::hooks::HookSet::from_system_map(map, &["no_such_symbol"]).is_err());
+    /// ```
     pub fn from_system_map(text: &str, names: &[&str]) -> Result<Self, Vec<String>> {
         let mut set = HookSet::new();
         let mut missing: Vec<String> = names.iter().map(|s| (*s).to_owned()).collect();
@@ -129,6 +157,10 @@ impl HookSet {
                 missing.remove(pos);
             }
         }
-        if missing.is_empty() { Ok(set) } else { Err(missing) }
+        if missing.is_empty() {
+            Ok(set)
+        } else {
+            Err(missing)
+        }
     }
 }

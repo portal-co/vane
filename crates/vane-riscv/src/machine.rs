@@ -443,7 +443,10 @@ impl Machine {
     /// Register a virtio-mmio device at the next free slot
     /// (`VIRTIO_MMIO_BASE + slot*0x1000`, PLIC source `1 + slot`). Returns the
     /// slot index.
-    pub fn add_virtio(&mut self, device: alloc::boxed::Box<dyn crate::virtio::VirtioDevice>) -> usize {
+    pub fn add_virtio(
+        &mut self,
+        device: alloc::boxed::Box<dyn crate::virtio::VirtioDevice>,
+    ) -> usize {
         let slot = self.virtio.len();
         let irq = 1 + slot as u32;
         self.virtio
@@ -465,10 +468,7 @@ impl Machine {
 
     /// Restore device state from a snapshot. Device topology (count and ids)
     /// is fixed at machine construction; a mismatch fails visibly.
-    pub fn restore(
-        &mut self,
-        snap: &MachineSnapshot,
-    ) -> Result<(), crate::virtio::SnapshotError> {
+    pub fn restore(&mut self, snap: &MachineSnapshot) -> Result<(), crate::virtio::SnapshotError> {
         if snap.virtio.len() != self.virtio.len() {
             return Err(crate::virtio::SnapshotError::VirtioCountMismatch {
                 expected: snap.virtio.len(),

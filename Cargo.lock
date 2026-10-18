@@ -2201,6 +2201,10 @@ name = "os-linux-wasi"
 version = "0.1.0"
 
 [[patch.unused]]
+name = "os-net"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "os-rewrite-elf"
 version = "0.1.0"
 

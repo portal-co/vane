@@ -311,7 +311,153 @@ impl Default for HartState {
     }
 }
 
+/// Snapshot of the privileged hart state (PLAN_VIRTIO_WEVAL workstream E).
+///
+/// Everything architectural is captured; the TLB and the decode cache are
+/// pure caches (functions of guest memory and CSRs) and are rebuilt empty
+/// on restore. Guest RAM travels separately (the reactor's memory snapshot).
+#[derive(Clone)]
+pub struct HartSnapshot {
+    pub enabled: bool,
+    pub priv_mode: PrivMode,
+    pub mstatus: u64,
+    pub mie: u64,
+    pub mip: u64,
+    pub mtvec: u64,
+    pub mscratch: u64,
+    pub mepc: u64,
+    pub mcause: u64,
+    pub mtval: u64,
+    pub medeleg: u64,
+    pub mideleg: u64,
+    pub mcounteren: u64,
+    pub menvcfg: u64,
+    pub mcountinhibit: u64,
+    pub mseccfg: u64,
+    pub mtval2: u64,
+    pub mtinst: u64,
+    pub stvec: u64,
+    pub sscratch: u64,
+    pub sepc: u64,
+    pub scause: u64,
+    pub stval: u64,
+    pub satp: u64,
+    pub scounteren: u64,
+    pub pmpcfg: [u64; 8],
+    pub pmpaddr: [u64; 64],
+    pub mcycle: u64,
+    pub minstret: u64,
+    pub reservation: Option<u64>,
+    pub fregs: [u64; 32],
+    pub fcsr: u64,
+    pub itime: u64,
+    /// Device state, when a machine is attached.
+    pub machine: Option<crate::machine::MachineSnapshot>,
+}
+
 impl HartState {
+    /// Capture the hart state for a machine snapshot.
+    pub fn save(&self) -> HartSnapshot {
+        HartSnapshot {
+            enabled: self.enabled,
+            priv_mode: self.priv_mode,
+            mstatus: self.mstatus,
+            mie: self.mie,
+            mip: self.mip,
+            mtvec: self.mtvec,
+            mscratch: self.mscratch,
+            mepc: self.mepc,
+            mcause: self.mcause,
+            mtval: self.mtval,
+            medeleg: self.medeleg,
+            mideleg: self.mideleg,
+            mcounteren: self.mcounteren,
+            menvcfg: self.menvcfg,
+            mcountinhibit: self.mcountinhibit,
+            mseccfg: self.mseccfg,
+            mtval2: self.mtval2,
+            mtinst: self.mtinst,
+            stvec: self.stvec,
+            sscratch: self.sscratch,
+            sepc: self.sepc,
+            scause: self.scause,
+            stval: self.stval,
+            satp: self.satp,
+            scounteren: self.scounteren,
+            pmpcfg: self.pmpcfg,
+            pmpaddr: self.pmpaddr,
+            mcycle: self.mcycle,
+            minstret: self.minstret,
+            reservation: self.reservation,
+            fregs: self.fregs,
+            fcsr: self.fcsr,
+            itime: self.itime,
+            machine: self.machine.as_ref().map(|m| m.save()),
+        }
+    }
+
+    /// Restore hart state from a snapshot. The TLB and decode cache are
+    /// rebuilt empty (pure caches); pending trace-trap/irq flags are
+    /// cleared (traces are always re-entered at a boundary after restore).
+    pub fn restore(&mut self, snap: &HartSnapshot) -> Result<(), crate::virtio::SnapshotError> {
+        self.enabled = snap.enabled;
+        self.priv_mode = snap.priv_mode;
+        self.mstatus = snap.mstatus;
+        self.mie = snap.mie;
+        self.mip = snap.mip;
+        self.mtvec = snap.mtvec;
+        self.mscratch = snap.mscratch;
+        self.mepc = snap.mepc;
+        self.mcause = snap.mcause;
+        self.mtval = snap.mtval;
+        self.medeleg = snap.medeleg;
+        self.mideleg = snap.mideleg;
+        self.mcounteren = snap.mcounteren;
+        self.menvcfg = snap.menvcfg;
+        self.mcountinhibit = snap.mcountinhibit;
+        self.mseccfg = snap.mseccfg;
+        self.mtval2 = snap.mtval2;
+        self.mtinst = snap.mtinst;
+        self.stvec = snap.stvec;
+        self.sscratch = snap.sscratch;
+        self.sepc = snap.sepc;
+        self.scause = snap.scause;
+        self.stval = snap.stval;
+        self.satp = snap.satp;
+        self.scounteren = snap.scounteren;
+        self.pmpcfg = snap.pmpcfg;
+        self.pmpaddr = snap.pmpaddr;
+        self.mcycle = snap.mcycle;
+        self.minstret = snap.minstret;
+        self.reservation = snap.reservation;
+        self.fregs = snap.fregs;
+        self.fcsr = snap.fcsr;
+        self.itime = snap.itime;
+        self.tlb.clear();
+        self.decode_cache = [const { None }; 1024];
+        self.pending_trace_trap = false;
+        self.pending_irq_check = false;
+        match (&mut self.machine, &snap.machine) {
+            (Some(m), Some(ms)) => m.restore(ms)?,
+            (None, None) => {}
+            // A machine appearing/disappearing across a snapshot is a
+            // topology change; same fail-visible rule as device mismatches.
+            (Some(m), None) => {
+                return Err(crate::virtio::SnapshotError::VirtioCountMismatch {
+                    expected: 0,
+                    got: m.virtio.len(),
+                });
+            }
+            (None, Some(ms)) => {
+                return Err(crate::virtio::SnapshotError::VirtioCountMismatch {
+                    expected: ms.virtio.len(),
+                    got: 0,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Read mstatus with the computed SD bit folded in.
     pub fn mstatus_read(&self) -> u64 {
         let fs_dirty = self.mstatus & MSTATUS_FS == MSTATUS_FS;

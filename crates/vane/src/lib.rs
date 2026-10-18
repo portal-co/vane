@@ -1506,7 +1506,7 @@ impl Reactor {
     /// it must be supplied explicitly (pass the value the last
     /// `trace_run_fueled` returned).
     pub fn snapshot(&self, parent: Option<&ReactorSnapshot>, pc: u64) -> ReactorSnapshot {
-        let mut lock = self.core.lock();
+        let lock = self.core.lock();
         let mut pages: std::collections::BTreeMap<u64, Box<[u8; 65536]>> =
             std::collections::BTreeMap::new();
         if lock.mem.swap.is_some() {
@@ -1541,7 +1541,14 @@ impl Reactor {
         let hart = lock.hart.save();
         let parent_id = parent.map(|p| p.id);
         let id = snapshot_id(parent_id, pc, &regs, &pages);
-        ReactorSnapshot { id, parent: parent_id, pages, regs, pc, hart }
+        ReactorSnapshot {
+            id,
+            parent: parent_id,
+            pages,
+            regs,
+            pc,
+            hart,
+        }
     }
 
     /// Restore a snapshot into this reactor, replacing all guest state.
@@ -1585,7 +1592,9 @@ impl Reactor {
             lock = self.core.lock();
         }
         lock.pc = snap.pc;
-        lock.hart.restore(&snap.hart).map_err(|e| format!("{e:?}"))?;
+        lock.hart
+            .restore(&snap.hart)
+            .map_err(|e| format!("{e:?}"))?;
         // Re-derive caches: same pc may map to different code now.
         lock.code_dirty = true;
         Ok(())

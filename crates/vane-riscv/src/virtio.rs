@@ -107,6 +107,7 @@ impl QueueMem for vane_arch::Mem {
 /// A parsed descriptor chain from the available ring, handed to the device's
 /// `process`. `readable` buffers are written by the driver (the request);
 /// `writable` buffers are filled by the device (the response).
+#[derive(Clone)]
 pub struct DescriptorChain {
     /// Index of the chain's head descriptor (echoed in the used ring).
     pub head: u16,
@@ -171,6 +172,21 @@ pub trait VirtioDevice {
     /// returns the total bytes written to the writable buffers (reported in
     /// the used ring).
     fn process(&mut self, queue: usize, chain: &DescriptorChain, mem: &mut dyn QueueMem) -> u32;
+    /// Process a chain with the option to DEFER completion (`None`): the
+    /// transport stashes the chain and re-offers it via this method on every
+    /// `process` pass until the device completes it (`Some(written)`). This
+    /// is how real devices consume the available ring promptly but complete
+    /// in the used ring only when they actually have data — e.g. a network
+    /// RX chain waiting for a frame. The default completes immediately via
+    /// [`VirtioDevice::process`], so existing devices are unchanged.
+    fn process_or_defer(
+        &mut self,
+        queue: usize,
+        chain: &DescriptorChain,
+        mem: &mut dyn QueueMem,
+    ) -> Option<u32> {
+        Some(self.process(queue, chain, mem))
+    }
     /// Periodic tick (a device can make asynchronous progress and complete
     /// queued requests here). Default: nothing.
     fn tick(&mut self, _mem: &mut dyn QueueMem) {}
@@ -261,6 +277,8 @@ pub struct VirtioMmioSnapshot {
     pub interrupt_status: u32,
     queues: alloc::vec::Vec<Virtqueue>,
     pub notified: bool,
+    /// Chains deferred by the device (see `VirtioDevice::process_or_defer`).
+    pub deferred: alloc::vec::Vec<(usize, DescriptorChain)>,
     /// Opaque device-backend state (host resources excluded by contract).
     pub device_state: alloc::vec::Vec<u8>,
 }
@@ -278,6 +296,9 @@ pub struct VirtioMmio {
     queues: alloc::vec::Vec<Virtqueue>,
     /// Set by QueueNotify; cleared once the queue is drained.
     notified: bool,
+    /// Chains the device deferred (see `VirtioDevice::process_or_defer`):
+    /// consumed from the available ring, not yet completed in the used ring.
+    deferred: alloc::vec::Vec<(usize, DescriptorChain)>,
 }
 
 impl VirtioMmio {
@@ -292,6 +313,7 @@ impl VirtioMmio {
             interrupt_status: 0,
             queues: (0..n).map(|_| Virtqueue::new()).collect(),
             notified: false,
+            deferred: alloc::vec::Vec::new(),
         }
     }
 
@@ -335,7 +357,7 @@ impl VirtioMmio {
                 .unwrap_or(0),
             R_INTERRUPT_STATUS => self.interrupt_status,
             R_STATUS => self.status,
-            o if o >= R_CONFIG && o < R_CONFIG + 0x100 => {
+            o if (R_CONFIG..R_CONFIG + 0x100).contains(&o) => {
                 let mut b = [0u8; 4];
                 self.device.read_config(o - R_CONFIG, &mut b);
                 u32::from_le_bytes(b)
@@ -384,7 +406,7 @@ impl VirtioMmio {
                     self.status = value;
                 }
             }
-            o if o >= R_CONFIG && o < R_CONFIG + 0x100 => {
+            o if (R_CONFIG..R_CONFIG + 0x100).contains(&o) => {
                 self.device.write_config(o - R_CONFIG, &value.to_le_bytes());
             }
             _ => {}
@@ -399,9 +421,23 @@ impl VirtioMmio {
 
     /// Drain notified queues: pop available-ring entries, hand each chain to
     /// the device, push completions onto the used ring, and raise the IRQ.
-    /// Returns true if an interrupt was raised.
+    /// Deferred chains are re-offered every pass. Returns true if an
+    /// interrupt was raised.
     pub fn process(&mut self, mem: &mut dyn QueueMem) -> bool {
         let mut raised = false;
+        // Re-offer deferred chains first: the device may now be able to
+        // complete them (e.g. a frame arrived for a stashed RX buffer).
+        let mut i = 0;
+        while i < self.deferred.len() {
+            let (qi, chain) = self.deferred[i].clone();
+            if let Some(written) = self.device.process_or_defer(qi, &chain, mem) {
+                self.deferred.remove(i);
+                self.complete_chain(qi, chain.head, written, mem);
+                raised = true;
+            } else {
+                i += 1;
+            }
+        }
         if self.notified {
             self.notified = false;
             for qi in 0..self.queues.len() {
@@ -433,26 +469,41 @@ impl VirtioMmio {
                 (head, q.last_avail)
             };
             let chain = self.read_chain(qi, head, mem);
-            let written = self.device.process(qi, &chain, mem);
-            // Push the used-ring entry.
-            {
-                let q = &mut self.queues[qi];
-                let used = q.used_addr();
-                let uslot = q.used_idx % q.num as u16;
-                mem.write_u32(used + 4 + 8 * uslot as u64, chain.head as u32);
-                mem.write_u32(used + 4 + 8 * uslot as u64 + 4, written);
-                q.used_idx = q.used_idx.wrapping_add(1);
-                q.last_avail = avail.wrapping_add(1);
-                let used_idx_addr = used + 2;
-                let used_idx = q.used_idx;
-                mem.write_u16(used_idx_addr, used_idx);
+            match self.device.process_or_defer(qi, &chain, mem) {
+                Some(written) => {
+                    self.complete_chain(qi, chain.head, written, mem);
+                    let q = &mut self.queues[qi];
+                    q.last_avail = avail.wrapping_add(1);
+                    completed = true;
+                }
+                None => {
+                    // Deferred: the available ring advances, the used ring
+                    // completes later (see process_or_defer).
+                    let q = &mut self.queues[qi];
+                    q.last_avail = avail.wrapping_add(1);
+                    self.deferred.push((qi, chain));
+                }
             }
-            completed = true;
         }
         if completed {
             self.interrupt_status |= INT_USED_BUFFER;
         }
         completed
+    }
+
+    /// Complete a chain in the used ring: push the (head, written) entry and
+    /// advance the used index.
+    fn complete_chain(&mut self, qi: usize, head: u16, written: u32, mem: &mut dyn QueueMem) {
+        let q = &mut self.queues[qi];
+        let used = q.used_addr();
+        let uslot = q.used_idx % q.num as u16;
+        mem.write_u32(used + 4 + 8 * uslot as u64, head as u32);
+        mem.write_u32(used + 4 + 8 * uslot as u64 + 4, written);
+        q.used_idx = q.used_idx.wrapping_add(1);
+        let used_idx_addr = used + 2;
+        let used_idx = q.used_idx;
+        mem.write_u16(used_idx_addr, used_idx);
+        self.interrupt_status |= INT_USED_BUFFER;
     }
 
     /// Snapshot the transport state (register block + queues) and the
@@ -467,6 +518,7 @@ impl VirtioMmio {
             interrupt_status: self.interrupt_status,
             queues: self.queues.clone(),
             notified: self.notified,
+            deferred: self.deferred.clone(),
             device_state: self.device.save_state(),
         }
     }
@@ -487,6 +539,7 @@ impl VirtioMmio {
         self.interrupt_status = snap.interrupt_status;
         self.queues = snap.queues.clone();
         self.notified = snap.notified;
+        self.deferred = snap.deferred.clone();
         self.device.load_state(&snap.device_state);
         Ok(())
     }
