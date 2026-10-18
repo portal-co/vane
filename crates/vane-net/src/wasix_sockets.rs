@@ -52,9 +52,9 @@ const SDFLAGS_WR: i32 = 2;
 const FDFLAGS_NONBLOCK: i32 = 4;
 const SOCK_STATUS_OPENED: u8 = 1;
 
-/// Connect-poll bound: iterations of a status poll before giving up.
-/// Each iteration is cheap; this is a liveness bound, not a timeout.
-const CONNECT_POLL_MAX: u32 = 1_000_000;
+/// Connect budget in milliseconds (poll_oneoff-slept, not spun).
+const CONNECT_TIMEOUT_MS: u64 = 30_000;
+const CONNECT_POLL_STEP_MS: u64 = 10;
 
 /// IPv4 address-with-port, matching wasmer's `__wasi_addr_port_t` memory
 /// layout for the inet4 tag.
@@ -103,6 +103,35 @@ struct Iovec {
     len: u32,
 }
 
+/// WASI preview1 clock subscription for `poll_oneoff` (used as a sleep).
+/// Layout: userdata@0, type@8 (0=clock), clock_id@16 (1=monotonic),
+/// timeout@24 ns (relative when flags=0), precision@32, flags@40.
+#[repr(C)]
+struct ClockSubscription {
+    userdata: u64,
+    tag: u8,
+    _pad0: [u8; 7],
+    clock_id: u32,
+    timeout: u64,
+    precision: u64,
+    flags: u16,
+    _pad1: [u8; 6],
+}
+
+/// WASI preview1 event out-record (32 bytes); only userdata/error matter
+/// for a clock sleep.
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct Event {
+    userdata: u64,
+    error: u16,
+    ty: u8,
+    _pad0: [u8; 5],
+    rw_nbytes: u64,
+    rw_flags: u16,
+    _pad1: [u8; 6],
+}
+
 #[allow(non_snake_case)]
 mod sys {
     #[link(wasm_import_module = "wasix_32v1")]
@@ -123,6 +152,7 @@ mod sys {
         pub fn resolve(host: i32, host_len: i32, port: i32, addrs: i32, max: i32, ret: i32) -> i32;
         pub fn fd_close(fd: i32) -> i32;
         pub fn fd_fdstat_set_flags(fd: i32, flags: i32) -> i32;
+        pub fn poll_oneoff(subs: i32, events: i32, nsubs: i32, ret: i32) -> i32;
     }
 }
 
@@ -131,6 +161,31 @@ fn ptr<T>(p: *const T) -> i32 {
 }
 fn ptr_mut<T>(p: *mut T) -> i32 {
     p as usize as i32
+}
+
+/// Sleep via a WASI clock subscription (works on any runtime with
+/// poll_oneoff; no busy-wait).
+fn sleep_ms(ms: u64) {
+    let sub = ClockSubscription {
+        userdata: 0,
+        tag: 0, // clock
+        _pad0: [0; 7],
+        clock_id: 1, // monotonic
+        timeout: ms * 1_000_000,
+        precision: 1_000_000,
+        flags: 0, // relative
+        _pad1: [0; 6],
+    };
+    let mut ev: MaybeUninit<Event> = MaybeUninit::uninit();
+    let mut n: MaybeUninit<usize> = MaybeUninit::uninit();
+    unsafe {
+        sys::poll_oneoff(
+            ptr(&sub),
+            ptr_mut(ev.as_mut_ptr()),
+            1,
+            ptr_mut(n.as_mut_ptr()),
+        );
+    }
 }
 
 fn map_errno(e: i32) -> SockErr {
@@ -259,9 +314,11 @@ impl SocketBackend for WasixSockets {
             unsafe { sys::fd_close(fd as i32) };
             return Err(map_errno(rc));
         }
-        // Wait for the connection to come up (bounded).
+        // Wait for the connection to come up: poll sock_status with a real
+        // (poll_oneoff clock) sleep between polls — no busy spin (R9).
         let mut status: MaybeUninit<u8> = MaybeUninit::uninit();
-        for _ in 0..CONNECT_POLL_MAX {
+        let mut waited = 0u64;
+        loop {
             let rc = unsafe { sys::sock_status(fd as i32, ptr_mut(status.as_mut_ptr())) };
             if rc != ERRNO_SUCCESS {
                 unsafe { sys::fd_close(fd as i32) };
@@ -270,9 +327,13 @@ impl SocketBackend for WasixSockets {
             if unsafe { status.assume_init() } == SOCK_STATUS_OPENED {
                 return Ok(SockFd(fd));
             }
+            if waited >= CONNECT_TIMEOUT_MS {
+                unsafe { sys::fd_close(fd as i32) };
+                return Err(SockErr::Other(110)); // ETIMEDOUT
+            }
+            sleep_ms(CONNECT_POLL_STEP_MS);
+            waited += CONNECT_POLL_STEP_MS;
         }
-        unsafe { sys::fd_close(fd as i32) };
-        Err(SockErr::Other(110)) // timed out waiting for OPENED
     }
 
     fn send(&mut self, fd: SockFd, buf: &[u8]) -> Result<usize, SockErr> {

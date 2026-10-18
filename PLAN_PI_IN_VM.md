@@ -420,7 +420,7 @@ of M1–M5; M6 is on the PLAN_VIRTIO_WEVAL critical path owned by the `vane` dir
 | R6 | smoltcp socket state on snapshot restore | G6 | quiesce-with-no-open-sockets rule (§6) | designed, unverified |
 | R7 | Guest TLS cert validation vs system time (no RTC) | stage 3 flake | **mitigated 2026-10-19**: `vane_epoch=<unix>` cmdline convention — host gates append it (`lib-gate.sh::gate_epoch_arg`), guest preamble `00-preamble.sh` runs `date -s @epoch`; no emulator change. RTC device remains a nice-to-have | closed |
 | R8 | Disk-rootfs boot flow: gates need the guest to mount the virtio-blk rootfs and run /opt/gates/* as init (the boot gates use initramfs only) | stages 2-5 blocked | kernel cmdline `root=/dev/vda rw rootfstype=ext2 console=ttyS0` for the minimal gate; `root=/dev/vda1` for the GPT-partitioned agent image; **owned by the vane terminal** (t-34d8) which is writing a minimal offline gate (partitionless ext2, --disk, /init marker + read-back) | doing (vane terminal) |
-| R9 | `WasixSockets` connect polls `sock_status` in a busy loop | wasm perf | bounded spin for now; use poll_oneoff when validated on a live runtime | open |
+| R9 | `WasixSockets` connect polls `sock_status` in a busy loop | wasm perf | **fixed 2026-10-19**: `poll_oneoff` clock-subscription sleep (10ms steps, 30s budget), validated on wasmer 7.5 (probe rerun: WASIX-PROBE-OK) | closed |
 
 ## 14. Open questions / decisions
 
@@ -493,3 +493,7 @@ of M1–M5; M6 is on the PLAN_VIRTIO_WEVAL critical path owned by the `vane` dir
 - 2026-10-19 — R7 closed: `vane_epoch` kernel-cmdline clock convention wired
   through host gates, guest preamble, and the busybox net-gate init; guest
   README documents it.
+- 2026-10-19 — R9 closed: connect now sleeps via poll_oneoff clock
+  subscriptions instead of spinning on sock_status; revalidated live on
+  wasmer 7.5. R8 in progress on the vane terminal (t-34d8, commit 6046707:
+  offline ext2 rootfs builder + gate authored, boot running).
