@@ -1,9 +1,9 @@
 //! The tunnel core: frame queues <-> smoltcp <-> per-flow host sockets.
 
 use alloc::collections::BTreeMap;
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::collections::VecDeque;
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
@@ -156,8 +156,14 @@ impl<B: SocketBackend> Tunnel<B> {
         // No gateway of our own: every flow is guest-initiated and proxied.
         let mut sockets = SocketSet::new(Vec::new());
         let dns = sockets.add(udp::Socket::new(
-            udp::PacketBuffer::new(alloc::vec![udp::PacketMetadata::EMPTY; 8], alloc::vec![0u8; 4096]),
-            udp::PacketBuffer::new(alloc::vec![udp::PacketMetadata::EMPTY; 8], alloc::vec![0u8; 8192]),
+            udp::PacketBuffer::new(
+                alloc::vec![udp::PacketMetadata::EMPTY; 8],
+                alloc::vec![0u8; 4096],
+            ),
+            udp::PacketBuffer::new(
+                alloc::vec![udp::PacketMetadata::EMPTY; 8],
+                alloc::vec![0u8; 8192],
+            ),
         ));
         let mut t = Tunnel {
             device,
@@ -173,7 +179,8 @@ impl<B: SocketBackend> Tunnel<B> {
         };
         // Bind DNS to its advertised address so responses carry 10.0.2.3 as
         // source (strict resolvers check this).
-        t.sockets.get_mut::<udp::Socket>(t.dns)
+        t.sockets
+            .get_mut::<udp::Socket>(t.dns)
             .bind(IpListenEndpoint {
                 addr: Some(IpAddress::Ipv4(GUEST_DNS_IP)),
                 port: 53,
@@ -282,7 +289,9 @@ impl<B: SocketBackend> Tunnel<B> {
     fn service_listeners(&mut self) {
         let ports: Vec<u16> = self.listeners.keys().copied().collect();
         for port in ports {
-            let Some(&h) = self.listeners.get(&port) else { continue };
+            let Some(&h) = self.listeners.get(&port) else {
+                continue;
+            };
             let (state, local) = {
                 let s = self.sockets.get::<tcp::Socket>(h);
                 (s.state(), s.local_endpoint())
@@ -335,14 +344,12 @@ impl<B: SocketBackend> Tunnel<B> {
             let s = self.sockets.get_mut::<tcp::Socket>(h);
             if s.can_recv() {
                 let mut host_err = None;
-                s.recv(|data| {
-                    match self.backend.send(fd, data) {
-                        Ok(n) => (n, ()),
-                        Err(SockErr::WouldBlock) => (0, ()),
-                        Err(e) => {
-                            host_err = Some(e);
-                            (0, ())
-                        }
+                s.recv(|data| match self.backend.send(fd, data) {
+                    Ok(n) => (n, ()),
+                    Err(SockErr::WouldBlock) => (0, ()),
+                    Err(e) => {
+                        host_err = Some(e);
+                        (0, ())
                     }
                 })
                 .ok();
@@ -377,7 +384,10 @@ impl<B: SocketBackend> Tunnel<B> {
         // Guest half-close -> host half-close.
         let state = self.sockets.get::<tcp::Socket>(h).state();
         if !flow.guest_tx_closed
-            && matches!(state, tcp::State::CloseWait | tcp::State::LastAck | tcp::State::Closed)
+            && matches!(
+                state,
+                tcp::State::CloseWait | tcp::State::LastAck | tcp::State::Closed
+            )
         {
             flow.guest_tx_closed = true;
             self.backend.shutdown(fd);

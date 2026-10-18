@@ -6,7 +6,7 @@ The tunnel's host side speaks through `vane_host::SocketBackend`. Bindings:
 | --- | --- | --- | --- | --- |
 | `StdSockets` | native (macOS/Linux) | — | `std::net::TcpStream` | tested (echo test, gates) |
 | `StdSockets` | `wasm32-wasmer-wasi` | wasmer (WASIX) | std lowers to WASIX `sock_*` | authored, runtime-untested |
-| `WasixSockets` (`wasix-raw` feature) | `wasm32-wasip1` | runtimes carrying the unofficial socket extension / WASIX `sock_*` | raw `wasix_32v1` imports | compile-checked only — validate on first wasmer/wazero-sock run (R3) |
+| `WasixSockets` (`wasix-raw` feature) | `wasm32-wasip1` | runtimes carrying the unofficial socket extension / WASIX `sock_*` | raw `wasix_32v1` imports | **validated on wasmer 7.5** (`--net` required): `cargo build -p vane-net --example wasix_probe --target wasm32-wasip1 --features wasix-raw`, then `wasmer run --net .../wasix_probe.wasm -- <echo-port>` → WASIX-PROBE-OK |
 
 ABI notes for `WasixSockets` live in `crates/vane-net/src/wasix_sockets.rs`
 (port is native-endian in memory per wasmer's `read_ip_port`; port byte

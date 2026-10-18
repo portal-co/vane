@@ -42,7 +42,11 @@ const ERRNO_ISCONN: i32 = 30;
 const ERRNO_TIMEDOUT: i32 = 73;
 
 const ADDRESS_FAMILY_INET4: i32 = 1;
+// NOTE: wasmer's Socktype is Unknown=0, Stream=1, Dgram=2 (verified against
+// wasmer-wasix-types 0.705 / wasmer 7.5). The wasix *crate* 0.12.5 claims
+// Dgram=0/Stream=1 — stale; trust the runtime.
 const SOCK_TYPE_STREAM: i32 = 1;
+const SOCK_TYPE_DGRAM: i32 = 2;
 const SOCK_PROTO_IP: i32 = 0;
 const SDFLAGS_WR: i32 = 2;
 const FDFLAGS_NONBLOCK: i32 = 4;
@@ -106,12 +110,17 @@ mod sys {
         pub fn sock_open(family: i32, ty: i32, proto: i32, ret_fd: i32) -> i32;
         pub fn sock_connect(fd: i32, addr: i32) -> i32;
         pub fn sock_send(fd: i32, data: i32, len: i32, flags: i32, ret: i32) -> i32;
-        pub fn sock_recv(fd: i32, data: i32, len: i32, flags: i32, ret_n: i32, ret_flags: i32)
-        -> i32;
+        pub fn sock_recv(
+            fd: i32,
+            data: i32,
+            len: i32,
+            flags: i32,
+            ret_n: i32,
+            ret_flags: i32,
+        ) -> i32;
         pub fn sock_shutdown(fd: i32, how: i32) -> i32;
         pub fn sock_status(fd: i32, ret: i32) -> i32;
-        pub fn resolve(host: i32, host_len: i32, port: i32, addrs: i32, max: i32, ret: i32)
-        -> i32;
+        pub fn resolve(host: i32, host_len: i32, port: i32, addrs: i32, max: i32, ret: i32) -> i32;
         pub fn fd_close(fd: i32) -> i32;
         pub fn fd_fdstat_set_flags(fd: i32, flags: i32) -> i32;
     }
@@ -143,18 +152,31 @@ impl WasixSockets {
         WasixSockets
     }
 
+    /// Raw probe result: the errno from a UDP `sock_open`, for debugging.
+    /// `0` means the extension answered; the fd is closed on success.
+    pub fn probe_raw() -> i32 {
+        let mut fd: MaybeUninit<u32> = MaybeUninit::uninit();
+        let rc = unsafe {
+            sys::sock_open(
+                ADDRESS_FAMILY_INET4,
+                SOCK_TYPE_DGRAM,
+                SOCK_PROTO_IP,
+                ptr_mut(fd.as_mut_ptr()),
+            )
+        };
+        if rc != ERRNO_SUCCESS {
+            return rc;
+        }
+        let fd = unsafe { fd.assume_init() };
+        unsafe { sys::fd_close(fd as i32) };
+        0
+    }
+
     /// Probe whether the runtime actually provides the extension: a UDP
     /// socket is opened and closed. Cheap; run once at startup before
     /// advertising networking.
     pub fn probe() -> bool {
-        let mut fd: MaybeUninit<u32> = MaybeUninit::uninit();
-        // SOCK_TYPE_DGRAM = 0
-        let rc = unsafe { sys::sock_open(ADDRESS_FAMILY_INET4, 0, SOCK_PROTO_IP, ptr_mut(fd.as_mut_ptr())) };
-        if rc != ERRNO_SUCCESS {
-            return false;
-        }
-        let fd = unsafe { fd.assume_init() };
-        unsafe { sys::fd_close(fd as i32) == ERRNO_SUCCESS }
+        Self::probe_raw() == 0
     }
 
     fn set_nonblocking(fd: u32) {
@@ -259,9 +281,7 @@ impl SocketBackend for WasixSockets {
             len: buf.len() as u32,
         };
         let mut n: MaybeUninit<usize> = MaybeUninit::uninit();
-        let rc = unsafe {
-            sys::sock_send(fd.0 as i32, ptr(&io), 1, 0, ptr_mut(n.as_mut_ptr()))
-        };
+        let rc = unsafe { sys::sock_send(fd.0 as i32, ptr(&io), 1, 0, ptr_mut(n.as_mut_ptr())) };
         match rc {
             ERRNO_SUCCESS => Ok(unsafe { n.assume_init() }),
             e => Err(map_errno(e)),

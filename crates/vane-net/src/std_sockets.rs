@@ -8,8 +8,8 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::vec::Vec;
 use std::time::Duration;
+use std::vec::Vec;
 
 use vane_host::{SockErr, SockFd, SocketBackend};
 

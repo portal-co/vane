@@ -41,7 +41,7 @@ mod wasix_sockets;
 pub use wasix_sockets::WasixSockets;
 
 pub use smoltcp::wire::Ipv4Address;
-pub use tunnel::{QueueDevice, Tunnel, GATEWAY_IP, GUEST_DNS_IP, GUEST_IP, SYNTHETIC_BASE};
+pub use tunnel::{GATEWAY_IP, GUEST_DNS_IP, GUEST_IP, QueueDevice, SYNTHETIC_BASE, Tunnel};
 
 #[cfg(feature = "std")]
 pub use pumped::PumpedTunnel;

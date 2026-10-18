@@ -364,7 +364,7 @@ Status column is kept current (`todo` / `doing` / `done` / `blocked(reason)`).
 | M1 | virtio-net device + smoltcp `NetBackend` guest-side (PLAN_VIRTIO_WEVAL D) | V1 transport | done (device by vane terminal; smoltcp tunnel landed with M2) |
 | M2 | `SocketBackend` trait + std/WASIX binding (`StdSockets`), smoltcp tunnel `vane-net`, loopback echo tests, `--net`/`--net-map` CLI wiring, echo gate P1 authored (execution pending boot artifacts) | M1 | done (gate run pending) |
 | M3 | I/O pump on a thread: `PumpedTunnel` (std::thread = WASIX thread on wasm32-wasmer-wasi), `--net-pump`, pumped echo test | M2 | done (native; WASIX-target verification pending) |
-| M4 | Socket-extension binding + runtime probe; P3 | M2 | doing: `WasixSockets` (raw `wasix_32v1`, wasix ABI verified vs wasix-0.12.5 + wasmer read_ip_port) compile-checked for wasm32-wasip1; runtime validation + probe wiring pending (R3) |
+| M4 | Socket-extension binding + runtime probe; P3 | M2 | done: `WasixSockets` validated live on wasmer 7.5 (`examples/wasix_probe.rs`, P1-equivalent echo over the raw binding) |
 | M5 | DNS forwarding (tunnel DNS responder at 10.0.2.3, host-side resolve, synthetic answers) | M2 | done |
 | M6 | Machine snapshots: `ReactorSnapshot`/VSNP existed; added CLI `--snapshot-save/--snapshot-marker/--snapshot-restore/--exit-after-snapshot` | boot gate | done (CLI); gate integration pending |
 | M7 | Agent disk image build (Node v24.22.0 glibc pinned) under QEMU; node gate P4 | M2 | doing: `build-agent-image.sh` authored (fail-closed, QEMU nocloud+seed); not yet executed |
@@ -414,7 +414,7 @@ of M1–M5; M6 is on the PLAN_VIRTIO_WEVAL critical path owned by the `vane` dir
 | --- | --- | --- | --- | --- |
 | R1 | Node riscv64 unofficial build is glibc-only; Alpine rootfs is musl | stage 2 | no musl build exists → Debian glibc base (Q2) | closed 2026-10-19 |
 | R2 | Pi or its deps ship native modules without riscv64 prebuilds | stage 5 blocked | audit `npm ls` after image build; stub/replace or build natives in QEMU | open |
-| R3 | Unofficial socket-extension coverage varies by runtime (esp. `sock_accept`, non-blocking semantics) | G3 gated per runtime | runtime probe + per-runtime support matrix in `harness/net/README.md` | open |
+| R3 | Unofficial socket-extension coverage varies by runtime | G3 | **wasmer 7.5 validated 2026-10-19**: `wasix_probe.wasm` (wasm32-wasip1 + raw `wasix_32v1` imports) under `wasmer run --net` — open/resolve/connect/send/recv/shutdown all pass. **ABI finding**: wasmer's `Socktype` is Unknown=0/Stream=1/Dgram=2 — the wasix *crate* 0.12.5 table (Dgram=0) is stale; trust the runtime. Runtime requires `--net`. | closed |
 | R4 | Interpreter perf makes npm/Pi stages exceed budget | G8 | snapshots + trace acceleration; budget table is the tracking mechanism | open |
 | R5 | Shared-memory requirements of wasi-threads conflict with `Mem`'s page store | M12 | keep page store hart-local; pass buffers across the channel | open |
 | R6 | smoltcp socket state on snapshot restore | G6 | quiesce-with-no-open-sockets rule (§6) | designed, unverified |
@@ -484,3 +484,9 @@ of M1–M5; M6 is on the PLAN_VIRTIO_WEVAL critical path owned by the `vane` dir
   (`=== GATE <STAGE> OK ===`) are the UART contract for --snapshot-marker.
   Also confirmed on the link: VSNP format stable, virtio_net device model
   owned by t-baab and unchanged.
+- 2026-10-19 — R3 closed: wasmer 7.5 (brew) runs `wasix_probe.wasm` with
+  `--net` — full socket lifecycle passes against the host echo server.
+  Found and fixed a real ABI bug this way: wasmer's Socktype numbering
+  (Unknown=0, Stream=1, Dgram=2) differs from the wasix crate 0.12.5
+  constants (Dgram=0); the runtime is ground truth. Note: `wasmer run`
+  needs `--net` or sock_open returns NOTSUP(58).

@@ -16,8 +16,8 @@ use smoltcp::time::Instant;
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Address, Ipv4Cidr};
 
 use vane_host::{SockErr, SockFd, SocketBackend};
-use vane_riscv::virtio_net::NetBackend;
 use vane_net::{PumpedTunnel, QueueDevice, StdSockets, Tunnel};
+use vane_riscv::virtio_net::NetBackend;
 
 /// StdSockets with a name override map, so tests can "resolve" fake names
 /// to loopback without touching real DNS.
@@ -34,7 +34,11 @@ impl SocketBackend for MapSockets {
         }
     }
     fn connect(&mut self, host: &str, port: u16) -> Result<SockFd, SockErr> {
-        let real = self.map.get(host).cloned().unwrap_or_else(|| host.to_string());
+        let real = self
+            .map
+            .get(host)
+            .cloned()
+            .unwrap_or_else(|| host.to_string());
         self.inner.connect(&real, port)
     }
     fn send(&mut self, fd: SockFd, buf: &[u8]) -> Result<usize, SockErr> {
@@ -94,8 +98,11 @@ impl Guest {
         config.random_seed = 0x5eed;
         let mut iface = Interface::new(config, &mut device, Instant::from_millis(0));
         iface.update_ip_addrs(|a| {
-            a.push(IpCidr::Ipv4(Ipv4Cidr::new(Ipv4Address::new(10, 0, 2, 15), 24)))
-                .ok();
+            a.push(IpCidr::Ipv4(Ipv4Cidr::new(
+                Ipv4Address::new(10, 0, 2, 15),
+                24,
+            )))
+            .ok();
         });
         Guest {
             device,
@@ -225,7 +232,11 @@ fn run_scenario<N: NetBackend>(tunnel: &mut N, echo_port: u16) {
         udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0u8; 2048]),
         udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0u8; 2048]),
     ));
-    guest.sockets.get_mut::<udp::Socket>(dns).bind(49153).unwrap();
+    guest
+        .sockets
+        .get_mut::<udp::Socket>(dns)
+        .bind(49153)
+        .unwrap();
     let query = dns_query_packet(0x1234, "echo.test");
     guest
         .sockets
