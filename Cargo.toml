@@ -13,6 +13,7 @@ members = [
     "crates/vane-aarch64",
     "crates/vane-wsdom",
     "crates/vane-patch",
+    "crates/vane-net",
 ]
 
 # The differential fuzz harness is NOT a member: it links the native Unicorn

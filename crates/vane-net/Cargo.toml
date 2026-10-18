@@ -1,0 +1,29 @@
+[package]
+name = "vane-net"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+description = "Guest TCP tunnel: smoltcp terminates guest TCP, one host socket per flow via vane-host SocketBackend (PLAN_PI_IN_VM workstream 4)"
+publish = false
+
+[features]
+default = []
+# Native std::net SocketBackend. Also the WASIX binding: on
+# wasm32-wasmer-wasi, std sockets lower to WASIX sock_* calls.
+std = []
+
+[dependencies]
+vane-host = { path = "../vane-host" }
+vane-riscv = { path = "../vane-riscv", default-features = false }
+smoltcp = { version = "0.14.0", default-features = false, features = [
+    "alloc",
+    "medium-ethernet",
+    "proto-ipv4",
+    "socket-tcp",
+    "socket-udp",
+    "log",
+] }
+
+[dev-dependencies]
+log = "0.4"
+vane-net = { path = ".", features = ["std"] }

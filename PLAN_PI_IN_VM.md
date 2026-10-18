@@ -361,8 +361,8 @@ Status column is kept current (`todo` / `doing` / `done` / `blocked(reason)`).
 | # | Milestone | Depends on | Status |
 | --- | --- | --- | --- |
 | M0 | This plan reviewed; harness dir structure + results conventions | — | done |
-| M1 | virtio-net + smoltcp `NetBackend` guest-side (PLAN_VIRTIO_WEVAL D) | V1 transport | todo |
-| M2 | `SocketBackend` trait + WASIX binding; echo gate P1 | M1 | todo |
+| M1 | virtio-net device + smoltcp `NetBackend` guest-side (PLAN_VIRTIO_WEVAL D) | V1 transport | done (device by vane terminal; smoltcp tunnel landed with M2) |
+| M2 | `SocketBackend` trait + std/WASIX binding (`StdSockets`), smoltcp tunnel `vane-net`, loopback echo test; CLI wiring + echo gate P1 | M1 | doing |
 | M3 | I/O pump on WASIX thread; P2 | M2 | todo |
 | M4 | Socket-extension binding + runtime probe; P3 | M2 | todo |
 | M5 | DNS forwarding | M2 | todo |
@@ -438,3 +438,12 @@ of M1–M5; M6 is on the PLAN_VIRTIO_WEVAL critical path owned by the `vane` dir
 - 2026-10-19 — Initial draft (vane-agent terminal, branch `mile/agent-in-vane`).
 - 2026-10-19 — Plan approved (LGTM); Q3 decided: replayable recorded session. M0 done.
   Implementation begins, committing after each milestone and part-milestone.
+- 2026-10-19 — M1 confirmed done (virtio-net device + tests, courtesy of the `vane`
+  terminal). M2 core landed: `vane-host::SocketBackend` trait, `vane-net` crate
+  (smoltcp tunnel: guest 10.0.2.15/24, gateway 10.0.2.2, DNS 10.0.2.3 answering
+  with synthetic 10.0.2.16+ addresses via smoltcp AnyIP, per-flow host sockets),
+  `StdSockets` binding (native + wasm32-wasmer-wasi = WASIX path), and a
+  loopback echo test (guest smoltcp stack → DNS → synthetic IP → TCP echo →
+  close) passing in ~1.3 s. smoltcp gotchas found: interface address table is
+  fixed-capacity 2 (hence AnyIP), neighbor discovery is rate-limited 1 s
+  cache-wide.
