@@ -419,7 +419,7 @@ of M1–M5; M6 is on the PLAN_VIRTIO_WEVAL critical path owned by the `vane` dir
 | R5 | Shared-memory requirements of wasi-threads conflict with `Mem`'s page store | M12 | keep page store hart-local; pass buffers across the channel | open |
 | R6 | smoltcp socket state on snapshot restore | G6 | quiesce-with-no-open-sockets rule (§6) | designed, unverified |
 | R7 | Guest TLS cert validation vs system time (no RTC) | stage 3 flake | **mitigated 2026-10-19**: `vane_epoch=<unix>` cmdline convention — host gates append it (`lib-gate.sh::gate_epoch_arg`), guest preamble `00-preamble.sh` runs `date -s @epoch`; no emulator change. RTC device remains a nice-to-have | closed |
-| R8 | Disk-rootfs boot flow | stages 2-5 | **2026-10-19 findings**: (1) Debian netboot kernel never probes virtio (modules) — t-34d8 confirmed at the root mount (`unknown-block(0,0)`); (2) the cloud-image shortcut is dead too — Debian riscv64 7.2.11 builds VIRTIO_MMIO/VIRTIO_BLK/VIRTIO_NET/9P/EXT4 **all modular**, and EXT2_FS is unset entirely; (3) chosen path: stock kernel + gate initramfs carrying the module set (`harness/linux/fetch-virtio-modules.sh`, 10 modules verified) insmod'd in /init, root on **ext4** (not ext2!); t-34d8 integrating into their gate | doing (vane terminal + modules ready here) |
+| R8 | Disk-rootfs boot flow | stages 2-5 | **2026-10-19 findings**: (1) Debian netboot kernel never probes virtio (modules) — t-34d8 confirmed at the root mount (`unknown-block(0,0)`); (2) the cloud-image shortcut is dead too — Debian riscv64 7.2.11 builds VIRTIO_MMIO/VIRTIO_BLK/VIRTIO_NET/9P/EXT4 **all modular**, and EXT2_FS is unset entirely; (3) chosen path: stock kernel + gate initramfs carrying the module set (`harness/linux/fetch-virtio-modules.sh`, 10 modules verified) insmod'd in /init, root on **ext4** (not ext2!); initramfs-modules gate authored here (`build-initramfs-virtio.sh` + `run-disk-rootfs-gate.sh`: /init insmods the module set, mounts /dev/vda via ext4 driver — ext2 images work through EXT4_USE_FOR_EXT2=y — switch_root to the disk /init); t-34d8 runs the long boot | doing (gate authored; first run on t-34d8) |
 | R9 | `WasixSockets` connect polls `sock_status` in a busy loop | wasm perf | **fixed 2026-10-19**: `poll_oneoff` clock-subscription sleep (10ms steps, 30s budget), validated on wasmer 7.5 (probe rerun: WASIX-PROBE-OK) | closed |
 
 ## 14. Open questions / decisions
@@ -505,3 +505,9 @@ of M1–M5; M6 is on the PLAN_VIRTIO_WEVAL critical path owned by the `vane` dir
   initramfs carries the module set instead. `fetch-virtio-modules.sh`
   landed (extracts crc32c/virtio_mmio/virtio_blk/mbcache/jbd2/ext4/
   virtio_net/9p* from linux-modules-7.2.11, plus load-modules.sh).
+- 2026-10-19 — R8 integrated gate authored: `build-initramfs-virtio.sh` packs
+  minirootfs + module set + loader /init (insmod → mount /dev/vda → marker
+  readback → switch_root to the disk /init); `run-disk-rootfs-gate.sh`
+  asserts the full chain and records timing JSON. Contract with t-34d8:
+  their ext2 image unchanged (mounts via ext4 driver, EXT4_USE_FOR_EXT2=y);
+  they run the first long boot.
