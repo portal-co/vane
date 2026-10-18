@@ -241,16 +241,17 @@ A shared `vane-virtio` crate (or `vane-riscv::virtio` module):
 
 ## 11. Milestones
 
-| # | Milestone | Deliverables | Acceptance |
-|---|---|---|---|
-| V1 | virtio-mmio framework | `vane-virtio`: virtqueues, mmio block (legacy+modern), PLIC wiring, DTB nodes | Linux probes a stub device |
-| V2 | virtio-blk | BlockBackend (file + OPFS), COW layer | S-V1 (mount rootfs) |
-| V3 | virtio-9p | 9P2000.L device on `AsyncUnixHost`; confinement | S-V2 (two backends) |
-| V4 | virtio-net | NetBackend (TUN/TAP native; smoltcp-via-os-emulation; browser relay) | S-V3 |
-| W1 | Snapshots | MachineSnapshot save/restore/derive + COW disk | S-W1 |
-| W2 | Weval | vane-weval wrapper (structure-preserving) → registry | S-W2 |
-| W3 | Custom patcher | in-place/additive patcher → registry | S-W3 |
-| W4 | Multi-pass | snapshot-chain driver, N-pass correctness | S-W4 |
+| # | Milestone | Deliverables | Acceptance | Status |
+|---|---|---|---|---|---|
+| V1 | virtio-mmio framework | `vane-riscv::virtio`: QueueMem, legacy-v1 virtqueue, VirtioDevice, VirtioMmio; Machine slots + PLIC + DTB; process_virtio | Linux probes a stub device | **DONE** (3f2cd13) |
+| V2 | virtio-blk | VirtioBlk + BlockBackend + CowBlock; vane-cli `--disk` + FileBlock | S-V1 (mount rootfs) | **DONE** (c98322e); Linux-mount E2E needs a rootfs image |
+| V3 | virtio-9p | Virtio9p (9P2000.L subset) + Host9p trait; vane-cli `--share` + confined DirFs | S-V2 (two backends) | **DONE** (154beae); device-level 9P roundtrip tested |
+| V4 | virtio-net | VirtioNet + NetBackend + RX chain deferral (t-baab, 901f9ec) | S-V3 | **DONE** (t-baab) |
+| W1 | Snapshots | HartSnapshot/MachineSnapshot/ReactorSnapshot save/restore/fork (t-baab, 901f9ec) | S-W1 | **DONE** (t-baab) |
+| W1.5 | Snapshot serialization | `snapshot_ser` (VSNP envelope) + encode/decode + snapshot_to/from_bytes (b84043f) | round-trip + checksum | **DONE** |
+| W2 | Weval | vane-patch `weval_specialize` + `reattach_stripped_data` (c0cd138) | S-W2 | **infra DONE**; real Weval tool network-gated |
+| W3 | Custom patcher | vane-patch `embed_snapshot`/`extract_snapshot`/`audit_no_stripping` (c0cd138) | S-W3 | **DONE** (offline, walrus) |
+| W4 | Multi-pass | vane-patch `multi_pass` snapshot-chain driver + per-pass audit (e3baf0b) | S-W4 | **DONE** |
 
 Ordering: V1→V2/V3/V4 (devices are independent after the framework); W1 is independent
 and can start anytime; W2/W3 need W1 (snapshots) and the existing registry; W4 needs
