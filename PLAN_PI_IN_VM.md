@@ -366,8 +366,8 @@ Status column is kept current (`todo` / `doing` / `done` / `blocked(reason)`).
 | M3 | I/O pump on a thread: `PumpedTunnel` (std::thread = WASIX thread on wasm32-wasmer-wasi), `--net-pump`, pumped echo test | M2 | done (native; WASIX-target verification pending) |
 | M4 | Socket-extension binding + runtime probe; P3 | M2 | todo |
 | M5 | DNS forwarding (tunnel DNS responder at 10.0.2.3, host-side resolve, synthetic answers) | M2 | done |
-| M6 | Machine snapshots S0 (PLAN_VIRTIO_WEVAL E) + `--from-snapshot` in gates | boot gate | todo |
-| M7 | Agent disk image build (Node pinned) under QEMU; node gate P4 | M2(net not strictly req) | todo |
+| M6 | Machine snapshots: `ReactorSnapshot`/VSNP existed; added CLI `--snapshot-save/--snapshot-marker/--snapshot-restore/--exit-after-snapshot` | boot gate | done (CLI); gate integration pending |
+| M7 | Agent disk image build (Node v24.22.0 glibc pinned) under QEMU; node gate P4 | M2 | doing |
 | M8 | HTTPS gate P5 (+P6 MITM optional mode) | M2,M7 | todo |
 | M9 | npm gate P7; snapshots S1–S2 | M8 | todo |
 | M10 | Pi + extension pre-installed in image; mock provider; pi gate P8; snapshot S3 | M9 | todo |
@@ -412,7 +412,7 @@ of M1–M5; M6 is on the PLAN_VIRTIO_WEVAL critical path owned by the `vane` dir
 
 | # | Risk/blocker | Impact | Mitigation | Status |
 | --- | --- | --- | --- | --- |
-| R1 | Node riscv64 unofficial build is glibc-only; Alpine rootfs is musl | stage 2 blocked | check for musl build; else switch base to a glibc riscv64 rootfs (Debian ports) | open |
+| R1 | Node riscv64 unofficial build is glibc-only; Alpine rootfs is musl | stage 2 | no musl build exists → Debian glibc base (Q2) | closed 2026-10-19 |
 | R2 | Pi or its deps ship native modules without riscv64 prebuilds | stage 5 blocked | audit `npm ls` after image build; stub/replace or build natives in QEMU | open |
 | R3 | Unofficial socket-extension coverage varies by runtime (esp. `sock_accept`, non-blocking semantics) | G3 gated per runtime | runtime probe + per-runtime support matrix in `harness/net/README.md` | open |
 | R4 | Interpreter perf makes npm/Pi stages exceed budget | G8 | snapshots + trace acceleration; budget table is the tracking mechanism | open |
@@ -422,9 +422,12 @@ of M1–M5; M6 is on the PLAN_VIRTIO_WEVAL critical path owned by the `vane` dir
 
 ## 14. Open questions / decisions
 
-- Q1: Which Node major version do we pin? (Decide at M7; prefer active LTS with a
-  riscv64 unofficial build.)
-- Q2: musl vs glibc base — see R1. Decision goes here.
+- Q1: Node version — **DECIDED 2026-10-19: v24.22.0** (latest v24 LTS with a
+  `linux-riscv64` unofficial build), pinned with SHA256 in
+  `harness/node/VERSIONS`.
+- Q2: musl vs glibc — **DECIDED 2026-10-19: glibc.** The unofficial riscv64
+  Node builds are glibc-only (no musl variant exists), so the agent image is
+  Debian riscv64 userland, not the Alpine musl minirootfs of the boot gates.
 - Q3: Mock provider fidelity — **DECIDED 2026-10-19: replayable recorded session.**
   The mock provider serves a recorded request/response session (fixtures under
   `harness/mock-provider/recordings/`), matched in order; recording mode captures a real
@@ -447,3 +450,8 @@ of M1–M5; M6 is on the PLAN_VIRTIO_WEVAL critical path owned by the `vane` dir
   close) passing in ~1.3 s. smoltcp gotchas found: interface address table is
   fixed-capacity 2 (hence AnyIP), neighbor discovery is rate-limited 1 s
   cache-wide.
+- 2026-10-19 — M2b+M3+M6 landed: `--net/--net-map/--net-pump`,
+  `PumpedTunnel` (pumped echo test passes), snapshot save/restore CLI flags.
+  Q1/Q2 decided (Node v24.22.0, glibc/Debian base); R1 closed. R8 mitigated
+  in code: the DNS responder socket binds 10.0.2.3 explicitly so replies
+  carry the queried source address.

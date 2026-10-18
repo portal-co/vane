@@ -1,0 +1,13 @@
+# Pinned Node.js riscv64 artifacts for the agent disk image (PLAN_PI_IN_VM M7).
+#
+# Source: https://unofficial-builds.nodejs.org/download/release/
+# (official Node builds do not ship riscv64; these are the community builds).
+#
+# Q1/Q2 decision (2026-10-19): riscv64 builds are glibc-only (no musl
+# variant), so the agent image is glibc-based (Debian riscv64 userland),
+# NOT the Alpine musl minirootfs used by the boot gates. The
+# `-pointer-compression` variant exists but is untested; start with the
+# plain build.
+#
+# Format: <version> <artifact> <sha256>
+v24.22.0 node-v24.22.0-linux-riscv64.tar.gz 55331b5f7a8374a92fa2747e9de95692eabac2c9f1ed913d198fb5d77f043926
