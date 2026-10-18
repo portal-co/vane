@@ -22,7 +22,7 @@ tar -xzf "$rootfs" -C rootfs-virtio
 
 mkdir -p rootfs-virtio/lib/modules
 cp modules/*.ko rootfs-virtio/lib/modules/
-cp modules/load-modules.sh rootfs-virtio/lib/
+cp modules/load-*.sh rootfs-virtio/lib/
 
 cat > rootfs-virtio/init <<'INITEOF'
 #!/bin/busybox sh
@@ -35,7 +35,7 @@ mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev 2>/dev/null
 
 echo "=== VANE VIRTIO INITRAMFS ==="
-sh /lib/load-modules.sh || { echo "FAIL: module load"; poweroff -f; }
+sh /lib/load-disk.sh || { echo "FAIL: module load"; poweroff -f; }
 echo "modules loaded"
 
 # R7: guest clock from the host cmdline.

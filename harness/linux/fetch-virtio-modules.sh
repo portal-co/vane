@@ -62,11 +62,15 @@ for m in "${WANT[@]}"; do
   echo "  $out" >&2
 done
 
-# In-guest loader fragment (packed at /lib/load-modules.sh in the initramfs).
-cat > modules/load-modules.sh <<'EOF'
+# In-guest loader fragments, tiered so gates only pay the insmod cost they
+# need (module loading is minutes per module under the interpreter):
+#   load-disk.sh — minimal set for a disk-rootfs boot (R8 core)
+#   load-net.sh  — disk set + virtio_net (net gates)
+#   load-9p.sh   — 9p over virtio (host share)
+#   load-modules.sh — aggregate of all three (back-compat)
+cat > modules/load-disk.sh <<'EOF'
 #!/bin/busybox sh
-# Insmod the virtio/ext4/9p set in dependency order (PLAN_PI_IN_VM R8).
-# The Debian riscv64 kernel builds all of these as modules.
+# Minimal disk-boot set, dependency order (R8).
 set -e
 cd /lib/modules
 insmod crc32c-cryptoapi.ko
@@ -75,9 +79,26 @@ insmod virtio_blk.ko
 insmod mbcache.ko
 insmod jbd2.ko
 insmod ext4.ko
+EOF
+cat > modules/load-net.sh <<'EOF'
+#!/bin/busybox sh
+set -e
+sh /lib/load-disk.sh
+cd /lib/modules
 insmod virtio_net.ko
+EOF
+cat > modules/load-9p.sh <<'EOF'
+#!/bin/busybox sh
+set -e
+cd /lib/modules
 insmod 9pnet.ko
 insmod 9pnet_virtio.ko
 insmod 9p.ko
+EOF
+cat > modules/load-modules.sh <<'EOF'
+#!/bin/busybox sh
+set -e
+sh /lib/load-net.sh
+sh /lib/load-9p.sh
 EOF
 echo "modules for $vermagic ready in harness/linux/modules/" >&2
