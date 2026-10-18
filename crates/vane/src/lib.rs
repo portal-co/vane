@@ -1612,6 +1612,74 @@ impl Reactor {
         Ok(r)
     }
 
+    /// Serialize a snapshot to a standalone, versioned, checksummed byte
+    /// artifact (W1.5) — feedable to Weval, storable, transferable. The
+    /// lineage (`id`/`parent`) and the sparse page set (zero pages omitted,
+    /// swap-backed RAM materialized at capture) round-trip.
+    pub fn snapshot_to_bytes(snap: &ReactorSnapshot) -> Vec<u8> {
+        use vane_riscv::snapshot_ser::Writer;
+        let mut w = Writer::new();
+        w.u64(snap.id);
+        match snap.parent {
+            None => w.u8(0),
+            Some(p) => {
+                w.u8(1);
+                w.u64(p);
+            }
+        }
+        w.u64(snap.pc);
+        for r in snap.regs {
+            w.u64(r);
+        }
+        snap.hart.encode(&mut w);
+        w.u32(snap.pages.len() as u32);
+        for (pn, page) in &snap.pages {
+            w.u64(*pn);
+            w.bytes(&page[..]);
+        }
+        vane_riscv::snapshot_ser::seal(&w.b)
+    }
+
+    /// Deserialize a snapshot from [`snapshot_to_bytes`](Self::snapshot_to_bytes)
+    /// bytes, verifying magic, version, and checksum.
+    pub fn snapshot_from_bytes(data: &[u8]) -> Result<ReactorSnapshot, String> {
+        use vane_riscv::snapshot_ser::{open, Reader};
+        let payload = open(data).map_err(|e| format!("snapshot envelope: {e:?}"))?;
+        let mut r = Reader::new(payload);
+        let err = |m: &'static str| move |e: vane_riscv::snapshot_ser::SerError| {
+            format!("snapshot {m}: {e:?}")
+        };
+        let id = r.u64().map_err(err("id"))?;
+        let parent = match r.u8().map_err(err("parent"))? {
+            0 => None,
+            1 => Some(r.u64().map_err(err("parent"))?),
+            _ => return Err("snapshot parent flag".into()),
+        };
+        let pc = r.u64().map_err(err("pc"))?;
+        let mut regs = [0u64; 32];
+        for reg in &mut regs {
+            *reg = r.u64().map_err(err("regs"))?;
+        }
+        let hart = vane_riscv::hart::HartSnapshot::decode(&mut r).map_err(|e| format!("hart: {e:?}"))?;
+        let mut pages = std::collections::BTreeMap::new();
+        let count = r.u32().map_err(err("pages"))?;
+        for _ in 0..count {
+            let pn = r.u64().map_err(err("page num"))?;
+            let bytes = r.bytes(65536).map_err(err("page"))?;
+            let mut page = Box::new([0u8; 65536]);
+            page.copy_from_slice(bytes);
+            pages.insert(pn, page);
+        }
+        Ok(ReactorSnapshot {
+            id,
+            parent,
+            pages,
+            regs,
+            pc,
+            hart,
+        })
+    }
+
     /// Read one byte at a guest VIRTUAL address through the current hart's
     /// page tables (identity when translation is off or fails). The hook
     /// system uses this to follow argument pointers at hooked kernel

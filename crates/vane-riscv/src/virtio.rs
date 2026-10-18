@@ -578,3 +578,112 @@ impl VirtioMmio {
         chain
     }
 }
+
+// ── Snapshot serialization (W1.5) ────────────────────────────────────────────
+use crate::snapshot_ser::{Reader, SerError, Writer};
+
+impl Virtqueue {
+    fn encode(&self, w: &mut Writer) {
+        w.u32(self.num);
+        w.u32(self.page_size);
+        w.u32(self.align);
+        w.u32(self.pfn);
+        w.u16(self.last_avail);
+        w.u16(self.used_idx);
+    }
+    fn decode(r: &mut Reader) -> Result<Virtqueue, SerError> {
+        Ok(Virtqueue {
+            num: r.u32()?,
+            page_size: r.u32()?,
+            align: r.u32()?,
+            pfn: r.u32()?,
+            last_avail: r.u16()?,
+            used_idx: r.u16()?,
+        })
+    }
+}
+
+impl DescriptorChain {
+    fn encode(&self, w: &mut Writer) {
+        w.u16(self.head);
+        w.u32(self.readable.len() as u32);
+        for &(a, l) in &self.readable {
+            w.u64(a);
+            w.u32(l);
+        }
+        w.u32(self.writable.len() as u32);
+        for &(a, l) in &self.writable {
+            w.u64(a);
+            w.u32(l);
+        }
+    }
+    fn decode(r: &mut Reader) -> Result<DescriptorChain, SerError> {
+        let head = r.u16()?;
+        let mut readable = alloc::vec::Vec::new();
+        for _ in 0..r.u32()? {
+            readable.push((r.u64()?, r.u32()?));
+        }
+        let mut writable = alloc::vec::Vec::new();
+        for _ in 0..r.u32()? {
+            writable.push((r.u64()?, r.u32()?));
+        }
+        Ok(DescriptorChain {
+            head,
+            readable,
+            writable,
+        })
+    }
+}
+
+impl VirtioMmioSnapshot {
+    pub fn encode(&self, w: &mut Writer) {
+        w.u32(self.device_id);
+        w.u32(self.irq);
+        w.u32(self.status);
+        w.u32(self.host_features_sel);
+        w.u32(self.queue_sel);
+        w.u32(self.interrupt_status);
+        w.u32(self.queues.len() as u32);
+        for q in &self.queues {
+            q.encode(w);
+        }
+        w.bool(self.notified);
+        w.u32(self.deferred.len() as u32);
+        for (qi, chain) in &self.deferred {
+            w.u32(*qi as u32);
+            chain.encode(w);
+        }
+        w.blob(&self.device_state);
+    }
+    pub fn decode(r: &mut Reader) -> Result<VirtioMmioSnapshot, SerError> {
+        let device_id = r.u32()?;
+        let irq = r.u32()?;
+        let status = r.u32()?;
+        let host_features_sel = r.u32()?;
+        let queue_sel = r.u32()?;
+        let interrupt_status = r.u32()?;
+        let mut queues = alloc::vec::Vec::new();
+        for _ in 0..r.u32()? {
+            queues.push(Virtqueue::decode(r)?);
+        }
+        let notified = r.bool()?;
+        let mut deferred = alloc::vec::Vec::new();
+        for _ in 0..r.u32()? {
+            let qi = r.u32()? as usize;
+            deferred.push((qi, DescriptorChain::decode(r)?));
+        }
+        let device_state = alloc::vec::Vec::from(r.blob()?);
+        Ok(VirtioMmioSnapshot {
+            device_id,
+            irq,
+            status,
+            host_features_sel,
+            queue_sel,
+            interrupt_status,
+            queues,
+            notified,
+            deferred,
+            device_state,
+        })
+    }
+}

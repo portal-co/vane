@@ -861,3 +861,165 @@ pub fn virt_dtb_with_virtio(
     f.end_node(); // root
     f.finish()
 }
+
+// ── Snapshot serialization (W1.5) ────────────────────────────────────────────
+use crate::snapshot_ser::{Reader, SerError, Writer};
+
+impl Uart16550 {
+    fn encode(&self, w: &mut Writer) {
+        w.u8(self.ier);
+        w.u8(self.lcr);
+        w.u8(self.mcr);
+        w.u8(self.fcr);
+        w.u8(self.scr);
+        w.u8(self.dll);
+        w.u8(self.dlm);
+        w.u32(self.rx.len() as u32);
+        for b in &self.rx {
+            w.u8(*b);
+        }
+        w.u32(self.tx.len() as u32);
+        for b in &self.tx {
+            w.u8(*b);
+        }
+    }
+    fn decode(r: &mut Reader) -> Result<Uart16550, SerError> {
+        let (ier, lcr, mcr, fcr, scr, dll, dlm) = (
+            r.u8()?,
+            r.u8()?,
+            r.u8()?,
+            r.u8()?,
+            r.u8()?,
+            r.u8()?,
+            r.u8()?,
+        );
+        let mut rx = VecDeque::new();
+        for _ in 0..r.u32()? {
+            rx.push_back(r.u8()?);
+        }
+        let mut tx = Vec::new();
+        for _ in 0..r.u32()? {
+            tx.push(r.u8()?);
+        }
+        Ok(Uart16550 {
+            ier,
+            lcr,
+            mcr,
+            fcr,
+            scr,
+            dll,
+            dlm,
+            rx,
+            tx,
+        })
+    }
+}
+
+impl Aclint {
+    fn encode(&self, w: &mut Writer) {
+        w.bool(self.msip);
+        w.u64(self.mtimecmp);
+        w.u64(self.time_nanos);
+        w.u64(self.freq_hz);
+    }
+    fn decode(r: &mut Reader) -> Result<Aclint, SerError> {
+        Ok(Aclint {
+            msip: r.bool()?,
+            mtimecmp: r.u64()?,
+            time_nanos: r.u64()?,
+            freq_hz: r.u64()?,
+        })
+    }
+}
+
+impl Plic {
+    fn encode(&self, w: &mut Writer) {
+        for p in self.priority {
+            w.u32(p);
+        }
+        w.u32(self.pending);
+        for e in self.enable {
+            w.u32(e);
+        }
+        for t in self.threshold {
+            w.u32(t);
+        }
+    }
+    fn decode(r: &mut Reader) -> Result<Plic, SerError> {
+        let mut priority = [0u32; 32];
+        for p in &mut priority {
+            *p = r.u32()?;
+        }
+        let pending = r.u32()?;
+        let mut enable = [0u32; 2];
+        for e in &mut enable {
+            *e = r.u32()?;
+        }
+        let mut threshold = [0u32; 2];
+        for t in &mut threshold {
+            *t = r.u32()?;
+        }
+        Ok(Plic {
+            priority,
+            pending,
+            enable,
+            threshold,
+        })
+    }
+}
+
+impl Syscon {
+    fn encode(&self, w: &mut Writer) {
+        match self.power {
+            None => w.u8(0),
+            Some(PowerAction::PowerOff { code }) => {
+                w.u8(1);
+                w.u32(code);
+            }
+            Some(PowerAction::Reboot) => w.u8(2),
+        }
+    }
+    fn decode(r: &mut Reader) -> Result<Syscon, SerError> {
+        Ok(Syscon {
+            power: match r.u8()? {
+                0 => None,
+                1 => Some(PowerAction::PowerOff { code: r.u32()? }),
+                2 => Some(PowerAction::Reboot),
+                _ => return Err(SerError::Invalid("syscon power")),
+            },
+        })
+    }
+}
+
+impl MachineSnapshot {
+    pub fn encode(&self, w: &mut Writer) {
+        self.uart.encode(w);
+        self.aclint.encode(w);
+        self.plic.encode(w);
+        self.syscon.encode(w);
+        w.u32(self.virtio.len() as u32);
+        for v in &self.virtio {
+            v.encode(w);
+        }
+        w.bool(self.irq_dirty);
+    }
+    pub fn decode(r: &mut Reader) -> Result<MachineSnapshot, SerError> {
+        let uart = Uart16550::decode(r)?;
+        let aclint = Aclint::decode(r)?;
+        let plic = Plic::decode(r)?;
+        let syscon = Syscon::decode(r)?;
+        let mut virtio = Vec::new();
+        for _ in 0..r.u32()? {
+            virtio.push(crate::virtio::VirtioMmioSnapshot::decode(r)?);
+        }
+        let irq_dirty = r.bool()?;
+        Ok(MachineSnapshot {
+            uart,
+            aclint,
+            plic,
+            syscon,
+            virtio,
+            irq_dirty,
+        })
+    }
+}

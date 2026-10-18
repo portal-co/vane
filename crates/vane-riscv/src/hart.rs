@@ -1056,3 +1056,168 @@ fn write_mem_u64(mem: &mut Mem, addr: u64, v: u64) {
         mem.write_byte(addr.wrapping_add(i), (v >> (8 * i)) as u8);
     }
 }
+
+// ── Snapshot serialization (W1.5) ────────────────────────────────────────────
+use crate::snapshot_ser::{Reader, SerError, Writer};
+
+impl HartSnapshot {
+    pub fn encode(&self, w: &mut Writer) {
+        w.bool(self.enabled);
+        w.u8(match self.priv_mode {
+            PrivMode::U => 0,
+            PrivMode::S => 1,
+            PrivMode::M => 3,
+        });
+        // The scalar CSRs, in declaration order.
+        for v in [
+            self.mstatus,
+            self.mie,
+            self.mip,
+            self.mtvec,
+            self.mscratch,
+            self.mepc,
+            self.mcause,
+            self.mtval,
+            self.medeleg,
+            self.mideleg,
+            self.mcounteren,
+            self.menvcfg,
+            self.mcountinhibit,
+            self.mseccfg,
+            self.mtval2,
+            self.mtinst,
+            self.stvec,
+            self.sscratch,
+            self.sepc,
+            self.scause,
+            self.stval,
+            self.satp,
+            self.scounteren,
+            self.mcycle,
+            self.minstret,
+            self.fcsr,
+            self.itime,
+        ] {
+            w.u64(v);
+        }
+        for v in self.pmpcfg {
+            w.u64(v);
+        }
+        for v in self.pmpaddr {
+            w.u64(v);
+        }
+        for v in self.fregs {
+            w.u64(v);
+        }
+        match self.reservation {
+            None => w.u8(0),
+            Some(a) => {
+                w.u8(1);
+                w.u64(a);
+            }
+        }
+        match &self.machine {
+            None => w.u8(0),
+            Some(m) => {
+                w.u8(1);
+                m.encode(w);
+            }
+        }
+    }
+
+    pub fn decode(r: &mut Reader) -> Result<HartSnapshot, SerError> {
+        let enabled = r.bool()?;
+        let priv_mode = match r.u8()? {
+            0 => PrivMode::U,
+            1 => PrivMode::S,
+            3 => PrivMode::M,
+            _ => return Err(SerError::Invalid("priv_mode")),
+        };
+        let mut next = || r.u64();
+        let mstatus = next()?;
+        let mie = next()?;
+        let mip = next()?;
+        let mtvec = next()?;
+        let mscratch = next()?;
+        let mepc = next()?;
+        let mcause = next()?;
+        let mtval = next()?;
+        let medeleg = next()?;
+        let mideleg = next()?;
+        let mcounteren = next()?;
+        let menvcfg = next()?;
+        let mcountinhibit = next()?;
+        let mseccfg = next()?;
+        let mtval2 = next()?;
+        let mtinst = next()?;
+        let stvec = next()?;
+        let sscratch = next()?;
+        let sepc = next()?;
+        let scause = next()?;
+        let stval = next()?;
+        let satp = next()?;
+        let scounteren = next()?;
+        let mcycle = next()?;
+        let minstret = next()?;
+        let fcsr = next()?;
+        let itime = next()?;
+        let mut pmpcfg = [0u64; 8];
+        for v in &mut pmpcfg {
+            *v = r.u64()?;
+        }
+        let mut pmpaddr = [0u64; 64];
+        for v in &mut pmpaddr {
+            *v = r.u64()?;
+        }
+        let mut fregs = [0u64; 32];
+        for v in &mut fregs {
+            *v = r.u64()?;
+        }
+        let reservation = match r.u8()? {
+            0 => None,
+            1 => Some(r.u64()?),
+            _ => return Err(SerError::Invalid("reservation")),
+        };
+        let machine = match r.u8()? {
+            0 => None,
+            1 => Some(crate::machine::MachineSnapshot::decode(r)?),
+            _ => return Err(SerError::Invalid("machine")),
+        };
+        Ok(HartSnapshot {
+            enabled,
+            priv_mode,
+            mstatus,
+            mie,
+            mip,
+            mtvec,
+            mscratch,
+            mepc,
+            mcause,
+            mtval,
+            medeleg,
+            mideleg,
+            mcounteren,
+            menvcfg,
+            mcountinhibit,
+            mseccfg,
+            mtval2,
+            mtinst,
+            stvec,
+            sscratch,
+            sepc,
+            scause,
+            stval,
+            satp,
+            scounteren,
+            pmpcfg,
+            pmpaddr,
+            mcycle,
+            minstret,
+            reservation,
+            fregs,
+            fcsr,
+            itime,
+            machine,
+        })
+    }
+}
