@@ -60,7 +60,10 @@ fn trace_pack_fills_slots() {
     let text = wasmprinter::print_bytes(&pack).expect("printable");
     assert!(text.contains("trace_table"), "dispatch table exported");
     for pc in [0x8000_0000u64, 0x8000_0100, 0x8000_0200] {
-        assert!(text.contains(&format!("trace_{pc:x}")), "trace_{pc:x} exported");
+        assert!(
+            text.contains(&format!("trace_{pc:x}")),
+            "trace_{pc:x} exported"
+        );
     }
     // The table has exactly one slot per trace.
     assert!(text.contains("table"), "has a table");
@@ -124,7 +127,7 @@ fn multi_pass_composes_trace_specialization() {
 }
 
 // ── os-jit-core JitBackend integration ──────────────────────────────────────
-use os_jit_core::{JitBackend, JitArtifact, JitRequest, RegisterLayout};
+use os_jit_core::{JitArtifact, JitBackend, JitRequest, RegisterLayout};
 use vane_patch::VaneWasmJit;
 
 /// RISC-V has 32 GPRs (the compiled trace references all of them as locals);
@@ -173,4 +176,70 @@ fn jit_backend_rejects_empty_input() {
         layout: RegisterLayout { num_regs: 32 },
     };
     assert!(backend.compile(&req).is_err());
+}
+
+// ── StackOp serialization + traces-from-snapshot + start-function pack ──────
+use vane_patch::{read_traces_section, write_traces_section};
+use vane_target_core::{FloatBinOp, FloatWidth, MemWidth};
+
+#[test]
+fn stackop_trace_cache_roundtrip() {
+    let traces: Vec<(u64, Vec<StackOp>)> = vec![
+        (
+            0x8000_0000,
+            vec![
+                StackOp::PushImm(5),
+                StackOp::LoadReg(1),
+                StackOp::Add64,
+                StackOp::StoreReg(2),
+                StackOp::LoopBegin { label: "x8000".into() },
+                StackOp::Br { relative_depth: 1, label: "x8000".into() },
+                StackOp::LoopEnd,
+                StackOp::LoadMem { width: MemWidth::B4, signed: true },
+                StackOp::StoreMem { width: MemWidth::B8 },
+                StackOp::FloatBinary { width: FloatWidth::F64, op: FloatBinOp::Add },
+                StackOp::CheckCode { addr: 0x100, expected: vec![1, 2, 3].into(), miss_label: "m".into() },
+                StackOp::Trap("boom".into()),
+                StackOp::PushImm(0x8000_0000),
+                StackOp::TailCall,
+            ],
+        ),
+        (0x8000_0100, vec![StackOp::Ecall, StackOp::Log("hi".into())]),
+    ];
+    let bytes = vane_patch::serialize_trace_cache(&traces);
+    let back = vane_patch::deserialize_trace_cache(&bytes).expect("decode");
+    // StackOp has no PartialEq, so compare by re-serializing.
+    assert_eq!(vane_patch::serialize_trace_cache(&back), bytes, "round-trip stable");
+    assert_eq!(back.len(), 2);
+    assert_eq!(back[0].0, 0x8000_0000);
+    assert_eq!(back[0].1.len(), traces[0].1.len());
+}
+
+#[test]
+fn traces_roundtrip_through_a_snapshot_section() {
+    // A module (the snapshotted interpreter) carries its hot trace cache.
+    let base = compile_trace_pack(vec![(0x8000_0000, simple_trace(1))], &test_abi()).unwrap();
+    let traces: Vec<(u64, Vec<StackOp>)> = vec![(0x8000_0000, simple_trace(7))];
+    let with_traces = write_traces_section(&base, &traces).expect("write traces");
+    let back = read_traces_section(&with_traces).expect("read traces");
+    assert_eq!(back.len(), 1);
+    assert_eq!(back[0].0, 0x8000_0000);
+    // And the module still validates with the section present.
+    assert!(walrus::Module::from_buffer(&with_traces).is_ok());
+}
+
+#[test]
+fn pack_has_a_start_function_registering_slots() {
+    let traces: Vec<(u64, Vec<StackOp>)> = vec![
+        (0x8000_0000, simple_trace(1)),
+        (0x8000_0100, simple_trace(2)),
+    ];
+    let pack = compile_trace_pack(traces, &test_abi()).expect("pack");
+    let text = wasmprinter::print_bytes(&pack).expect("printable");
+    // A start function exists and fills the dispatch-table slots.
+    assert!(text.contains("start"), "start function present: {text}");
+    assert!(text.contains("table.set"), "start fn fills slots via table.set");
+    assert!(text.contains("register_trace"), "start fn calls register_trace");
+    // The slot table is exported.
+    assert!(text.contains("trace_table"), "slot table exported");
 }

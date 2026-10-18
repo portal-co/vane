@@ -18,14 +18,17 @@
 //!   structural data Weval's reachability analysis stripped, so the
 //!   specialized module is still a complete, runnable machine.
 
-use walrus::Module;
-use walrus::RawCustomSection;
 use vane_target_core::StackOp;
 use vane_target_wasm::WasmAbiConfig;
+pub mod stackop_ser;
+pub use stackop_ser::{deserialize_trace_cache, serialize_trace_cache};
+
+use walrus::Module;
+use walrus::RawCustomSection;
 use wasm_encoder::reencode::{RoundtripReencoder, utils::instruction};
 use wasm_encoder::{
-    CodeSection, ConstExpr, DataSection, ElementSection, Elements, ExportKind, ExportSection,
-    Function, FunctionSection, ImportSection, Instruction, MemoryType, EntityType, TableSection,
+    CodeSection, ConstExpr, DataSection, ElementSection, Elements, EntityType, ExportKind,
+    ExportSection, Function, FunctionSection, ImportSection, Instruction, MemoryType, TableSection,
     TableType, TypeSection, ValType,
 };
 
@@ -95,21 +98,33 @@ pub fn compile_trace_pack(
     // Extract the pcs up front (the traces are consumed to build the code).
     let pcs: Vec<u64> = traces.iter().map(|(pc, _)| *pc).collect();
     let num_regs = abi.num_regs;
-    // Types: 0 = regfn (params num_regs*i64 + target_pc i64 -> num_regs*i64);
-    //        1 = ecall (num_regs*i64 -> num_regs*i64); 2 = jit_invalidate (i64 -> ()).
+    // Types: 0 = regfn (num_regs*i64 + target_pc i64 -> num_regs*i64);
+    //        1 = ecall (num_regs*i64 -> num_regs*i64); 2 = jit_invalidate
+    //        (i64 -> ()); 3 = register_trace (i64 pc, i32 slot -> ());
+    //        4 = start (() -> ()).
     let mut types = TypeSection::new();
     let mut regfn_params: Vec<ValType> = (0..num_regs).map(|_| ValType::I64).collect();
     regfn_params.push(ValType::I64); // target_pc
     let regfn_results: Vec<ValType> = (0..num_regs).map(|_| ValType::I64).collect();
-    types.ty().function(regfn_params.clone(), regfn_results.clone());
-    types.ty().function((0..num_regs).map(|_| ValType::I64).collect::<Vec<_>>(), regfn_results.clone());
+    types
+        .ty()
+        .function(regfn_params.clone(), regfn_results.clone());
+    types.ty().function(
+        (0..num_regs).map(|_| ValType::I64).collect::<Vec<_>>(),
+        regfn_results.clone(),
+    );
     types.ty().function([ValType::I64], []);
+    types.ty().function([ValType::I64, ValType::I32], []); // register_trace
+    types.ty().function([], []); // start
 
-    // Imports (host imports + shared memory), at the indices the abi names.
+    // Imports (host imports + shared memory), at the indices the abi names:
+    // ecall=0, jit_invalidate=1, lookup_stub=2 (as the abi refers to them),
+    // then register_trace=3.
     let mut imports = ImportSection::new();
     imports.import("env", "ecall", EntityType::Function(1));
     imports.import("env", "jit_invalidate", EntityType::Function(2));
     imports.import("env", "lookup_stub", EntityType::Function(0));
+    imports.import("env", "register_trace", EntityType::Function(3));
     imports.import(
         "env",
         "memory",
@@ -122,16 +137,20 @@ pub fn compile_trace_pack(
         }),
     );
 
-    // Compiled trace functions (func indices start after the 3 imports).
-    let first_func = 3u32;
+    // Compiled trace functions (func indices start after the 4 imports).
+    let first_func = 4u32;
     let mut funcs = FunctionSection::new();
     let mut code = CodeSection::new();
     for (_pc, ops) in traces {
         funcs.function(0); // regfn type
         code.function(&compile_trace(ops, abi));
     }
+    // The start function (registers the slots); its func index follows the traces.
+    let start_func = first_func + n as u32;
+    funcs.function(4); // start type
 
-    // Dispatch table: funcref slots, one per trace.
+    // Dispatch table: funcref slots, one per trace. EXPORTED so the runtime
+    // (and the host) can see the available slots.
     let mut tables = TableSection::new();
     tables.table(TableType {
         element_type: wasm_encoder::RefType::FUNCREF,
@@ -141,14 +160,28 @@ pub fn compile_trace_pack(
         shared: false,
     });
 
-    // Fill the slots: active element segment, slot i -> func (first_func + i).
+    // A declarative element segment declaring the trace functions, so the
+    // start function can `ref.func` them.
     let func_indices: Vec<u32> = (0..n as u32).map(|i| first_func + i).collect();
     let mut elems = ElementSection::new();
-    elems.active(
-        Some(0),
-        &ConstExpr::i32_const(0),
-        Elements::Functions(func_indices.into()),
-    );
+    elems.declared(Elements::Functions(func_indices.clone().into()));
+
+    // The start function body: for each trace, fill its slot in the dispatch
+    // table and call the host's register_trace(pc, slot) so the runtime maps
+    // the guest pc to the precompiled slot.
+    let mut start_body = Function::new([]);
+    for (i, pc) in pcs.iter().enumerate() {
+        // slot[i] = ref.func(first_func + i)
+        start_body.instruction(&Instruction::I32Const(i as i32));
+        start_body.instruction(&Instruction::RefFunc(first_func + i as u32));
+        start_body.instruction(&Instruction::TableSet(0));
+        // register_trace(pc, slot)
+        start_body.instruction(&Instruction::I64Const(*pc as i64));
+        start_body.instruction(&Instruction::I32Const(i as i32));
+        start_body.instruction(&Instruction::Call(3)); // register_trace import
+    }
+    start_body.instruction(&Instruction::End);
+    code.function(&start_body);
 
     // pc -> slot map as a data segment (pairs of (pc: u64, slot: u32)).
     let mut map_bytes: Vec<u8> = Vec::new();
@@ -159,7 +192,7 @@ pub fn compile_trace_pack(
     let mut data = DataSection::new();
     data.active(0, &ConstExpr::i32_const(0), map_bytes);
 
-    // Exports: the table (the slots) and each compiled trace function.
+    // Exports: the slot table (all available slots) and each compiled trace fn.
     let mut exports = ExportSection::new();
     exports.export("trace_table", ExportKind::Table, 0);
     for (i, pc) in pcs.iter().enumerate() {
@@ -176,6 +209,10 @@ pub fn compile_trace_pack(
     module.section(&funcs);
     module.section(&tables);
     module.section(&exports);
+    // Start (section 8) precedes Element (9), Code (10), Data (11).
+    module.section(&wasm_encoder::StartSection {
+        function_index: start_func,
+    });
     module.section(&elems);
     module.section(&code);
     module.section(&data);
@@ -492,4 +529,43 @@ impl os_jit_core::JitBackend for VaneWasmJit {
             .map_err(|e| os_jit_core::JitError::Unsupported(format!("{e:?}")))?;
         Ok(os_jit_core::JitArtifact::Wasm(module))
     }
+}
+
+// ── Traces read from snapshotted WASM (Wizer) ────────────────────────────────
+//
+// The interpreter serializes its hot trace cache into a `vane.traces` custom
+// section before Wizer snapshots the module; the patcher reads the traces back
+// from the snapshotted module, recompiles them, and fills the slots.
+
+/// The custom section name holding the serialized trace cache.
+pub const TRACES_SECTION: &str = "vane.traces";
+
+/// Store a trace cache (pc → StackOp trace) into a module's `vane.traces`
+/// custom section (replacing any prior one). The interpreter does this before
+/// Wizer snapshots so the traces survive into the snapshotted module.
+pub fn write_traces_section(
+    wasm: &[u8],
+    traces: &[(u64, Vec<StackOp>)],
+) -> Result<Vec<u8>, PatchError> {
+    let mut module = Module::from_buffer(wasm)?;
+    while module.customs.remove_raw(TRACES_SECTION).is_some() {}
+    module.customs.add(RawCustomSection {
+        name: TRACES_SECTION.to_string(),
+        data: stackop_ser::serialize_trace_cache(traces),
+    });
+    Ok(module.emit_wasm())
+}
+
+/// Read the trace cache back from a snapshotted module's `vane.traces` section.
+/// Returns an empty vec when no trace cache is present.
+pub fn read_traces_section(wasm: &[u8]) -> Result<Vec<(u64, Vec<StackOp>)>, PatchError> {
+    let module = Module::from_buffer(wasm)?;
+    for (_id, section) in module.customs.iter() {
+        if section.name() == TRACES_SECTION {
+            let data = section.data(&walrus::IdsToIndices::default()).into_owned();
+            return stackop_ser::deserialize_trace_cache(&data)
+                .map_err(|e| PatchError::Parse(format!("traces section: {e:?}")));
+        }
+    }
+    Ok(Vec::new())
 }
