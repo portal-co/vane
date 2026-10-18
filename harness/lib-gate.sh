@@ -9,6 +9,13 @@ gate_need() { # path, hint
   [[ -f "$1" ]] || gate_fail "missing $1 — $2"
 }
 
+# Kernel-cmdline fragment setting the guest clock (PLAN_PI_IN_VM R7):
+# gates append this to --append; the guest preamble (00-preamble.sh) reads
+# it back from /proc/cmdline and runs date -s. vane has no RTC device.
+gate_epoch_arg() {
+  echo "vane_epoch=$(date +%s)"
+}
+
 # Record gate timing to harness/results/<date>-<stage>.json.
 gate_record() { # stage, started_at_epoch, pass(true|false), notes
   local stage="$1" start="$2" pass="$3" notes="$4"

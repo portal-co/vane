@@ -418,7 +418,7 @@ of M1–M5; M6 is on the PLAN_VIRTIO_WEVAL critical path owned by the `vane` dir
 | R4 | Interpreter perf makes npm/Pi stages exceed budget | G8 | snapshots + trace acceleration; budget table is the tracking mechanism | open |
 | R5 | Shared-memory requirements of wasi-threads conflict with `Mem`'s page store | M12 | keep page store hart-local; pass buffers across the channel | open |
 | R6 | smoltcp socket state on snapshot restore | G6 | quiesce-with-no-open-sockets rule (§6) | designed, unverified |
-| R7 | Guest TLS cert validation vs system time (no RTC) | stage 3 flake | set guest clock from host at boot (`date -s` in `/init` or an RTC device) | open |
+| R7 | Guest TLS cert validation vs system time (no RTC) | stage 3 flake | **mitigated 2026-10-19**: `vane_epoch=<unix>` cmdline convention — host gates append it (`lib-gate.sh::gate_epoch_arg`), guest preamble `00-preamble.sh` runs `date -s @epoch`; no emulator change. RTC device remains a nice-to-have | closed |
 | R8 | Disk-rootfs boot flow: gates need the guest to mount the virtio-blk rootfs and run /opt/gates/* as init (the boot gates use initramfs only) | stages 2-5 blocked | kernel cmdline `root=/dev/vda rw rootfstype=ext2 console=ttyS0` for the minimal gate; `root=/dev/vda1` for the GPT-partitioned agent image; **owned by the vane terminal** (t-34d8) which is writing a minimal offline gate (partitionless ext2, --disk, /init marker + read-back) | doing (vane terminal) |
 | R9 | `WasixSockets` connect polls `sock_status` in a busy loop | wasm perf | bounded spin for now; use poll_oneoff when validated on a live runtime | open |
 
@@ -490,3 +490,6 @@ of M1–M5; M6 is on the PLAN_VIRTIO_WEVAL critical path owned by the `vane` dir
   (Unknown=0, Stream=1, Dgram=2) differs from the wasix crate 0.12.5
   constants (Dgram=0); the runtime is ground truth. Note: `wasmer run`
   needs `--net` or sock_open returns NOTSUP(58).
+- 2026-10-19 — R7 closed: `vane_epoch` kernel-cmdline clock convention wired
+  through host gates, guest preamble, and the busybox net-gate init; guest
+  README documents it.

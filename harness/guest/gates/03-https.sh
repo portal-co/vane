@@ -3,6 +3,8 @@
 # With --mitm the host exports NODE_EXTRA_CA_CERTS=/mnt/host/mitm/ca.pem via
 # the gate driver.
 set -uo pipefail
+source /opt/gates/00-preamble.sh
+
 echo "=== GATE HTTPS ==="
 node -e '
 fetch("https://registry.npmjs.org/-/ping")

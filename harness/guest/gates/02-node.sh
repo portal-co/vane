@@ -1,6 +1,8 @@
 #!/bin/bash
 # Stage 2 gate (P4): Node runs in the guest.
 set -uo pipefail
+source /opt/gates/00-preamble.sh
+
 echo "=== GATE NODE ==="
 node --version || { echo "GATE-FAIL: node --version"; poweroff -f; }
 node -e 'console.log("node-hello-ok")' || { echo "GATE-FAIL: node -e"; poweroff -f; }

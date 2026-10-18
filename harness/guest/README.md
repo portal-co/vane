@@ -26,7 +26,7 @@ Then: `harness/build-agent-image.sh` (needs Homebrew QEMU; fail-closed).
 | Host files (9p) | `/mnt/host` (repo checkout, fixtures, CA bundle when `--mitm`) |
 | Guest-owned state | the virtio-blk root disk (rootfs, npm cache, `~/.pi`) |
 | Networking | guest `10.0.2.15/24`, gateway `10.0.2.2`, DNS `10.0.2.3`; all TCP tunneled to host sockets (WASIX/`std::net`); DNS resolved host-side |
-| Clock | guest time is set from the host at boot (no RTC); TLS depends on it |
+| Clock | no RTC device; the host appends `vane_epoch=<unix>` to the kernel cmdline and the guest preamble (`/opt/gates/00-preamble.sh`, or the init script) runs `date -s @<epoch>` — TLS cert validation depends on this |
 
 Caveats: first runs after a cold boot are slow (interpreter); gates restore
 snapshots (S0–S3) instead. Credentials are never in the image — they arrive

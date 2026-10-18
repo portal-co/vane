@@ -8,6 +8,10 @@ mount -t proc proc /proc
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev 2>/dev/null
 
+# R7: guest clock from the host (busybox date accepts @epoch).
+_epoch=$(sed -n 's/.*vane_epoch=\([0-9]*\).*/\1/p' /proc/cmdline)
+[ -n "$_epoch" ] && date -s "@$_epoch" 2>/dev/null || true
+
 echo "=== VANE NET GATE ==="
 ip link set eth0 up || { echo "FAIL: no eth0 (virtio-net driver missing?)"; poweroff -f; }
 ip addr add 10.0.2.15/24 dev eth0

@@ -44,7 +44,7 @@ echo "== booting Linux with --net (this takes a while) ==" >&2
 start=$(date +%s)
 out="$(cargo run -q -p vane-cli --no-default-features -- \
   --machine --opensbi "$artifacts/opensbi.bin" --kernel "$artifacts/linux" \
-  --initrd "$work/initrd.gz" --append "console=ttyS0 panic=-1" \
+  --initrd "$work/initrd.gz" --append "console=ttyS0 panic=-1 vane_epoch=$(date +%s)" \
   --net --net-map 10.0.2.100=127.0.0.1 2>/dev/null)"
 end=$(date +%s)
 

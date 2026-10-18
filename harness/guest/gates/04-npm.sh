@@ -1,6 +1,8 @@
 #!/bin/bash
 # Stage 4 gate (P7): cold-cache npm install of a pinned tiny package.
 set -uo pipefail
+source /opt/gates/00-preamble.sh
+
 echo "=== GATE NPM ==="
 rm -rf /tmp/npm-gate && mkdir -p /tmp/npm-gate && cd /tmp/npm-gate
 npm init -y >/dev/null

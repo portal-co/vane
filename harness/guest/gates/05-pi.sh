@@ -3,6 +3,8 @@
 # mock provider (base URL + dummy key exported by the gate driver; never
 # real credentials — PLAN §11 Sec-1).
 set -uo pipefail
+source /opt/gates/00-preamble.sh
+
 echo "=== GATE PI ==="
 pi --version || { echo "GATE-FAIL: pi --version"; poweroff -f; }
 pi extensions list 2>&1 | grep -q "pi-surplus-intelligence" \
