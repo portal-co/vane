@@ -141,6 +141,7 @@ impl Reactor {
                 host_api: OnceCell::new(),
                 test_mode: false,
                 trace_cache: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+                compiled: std::cell::RefCell::new(std::collections::BTreeMap::new()),
                 engine: vane_arch::ExecEngine::Interp,
                 pc: 0,
                 code_dirty: false,
@@ -204,6 +205,41 @@ impl Reactor {
     /// satp) — used by device models, tests, and host drivers.
     pub fn with_hart<R>(&self, f: impl FnOnce(&mut vane_riscv::hart::HartState) -> R) -> R {
         f(&mut self.core.lock().hart)
+    }
+
+    /// Register a compiled trace callable for the trace rooted at guest
+    /// `pc` (M-perf / PLAN §4.2). This is the global exposure point for
+    /// Weval/JIT/binary-patcher backends: they produce a [`TraceFn`] (a
+    /// native/compiled callable) and insert it here; the dispatch loop then
+    /// runs it instead of interpreting the trace's `StackOp`s.
+    ///
+    /// [`TraceFn`]: vane_arch::interp::TraceFn
+    pub fn register_compiled_trace(&self, pc: u64, f: vane_arch::interp::TraceFn<Self>) {
+        self.core.lock().compiled.borrow_mut().insert(pc, f);
+    }
+
+    /// Whether a compiled trace is registered for `pc`.
+    pub fn has_compiled_trace(&self, pc: u64) -> bool {
+        self.core.lock().compiled.borrow().contains_key(&pc)
+    }
+
+    /// Compile the trace rooted at `pc` with the default producer (the dense
+    /// interpreter) and register it, so subsequent dispatches call it as a
+    /// function pointer instead of interpreting. Returns false if the trace
+    /// isn't compiled yet (run it once first to populate the trace cache).
+    ///
+    /// This is the hook a heat policy calls to promote hot traces; a
+    /// Weval/JIT backend would instead call `register_compiled_trace` with a
+    /// natively-compiled artifact.
+    pub fn compile_trace_at(&self, pc: u64) -> bool {
+        let ops = self.core.lock().trace_cache.borrow().get(&pc).cloned();
+        match ops {
+            Some(ops) => {
+                self.register_compiled_trace(pc, vane_arch::interp::compile_trace(ops));
+                true
+            }
+            None => false,
+        }
     }
 
     /// Enable encrypted swap for the machine-mode RAM region (M5,

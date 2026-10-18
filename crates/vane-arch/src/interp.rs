@@ -1053,6 +1053,58 @@ pub async fn interpret_async(ops: &[StackOp], host: &mut impl AsyncStackHost) ->
     }
 }
 
+/// A compiled trace callable: executes one trace of `StackOp`s against the
+/// host and returns the exit reason. This is the artifact stored in the
+/// per-reactor trace registry — produced by the default dense interpreter
+/// ([`compile_trace`]), or inserted in place by a Weval/JIT/binary-patcher
+/// backend (PLAN_LINUX_WASM.md §4.2). It is synchronous: a native/JIT/Weval
+/// artifact is a plain function pointer, and the interpreter fallback never
+/// actually pends for a local host.
+#[cfg(feature = "async-host")]
+pub type TraceFn<R> = alloc::rc::Rc<dyn Fn(&mut LocalStackHost<R>) -> Exit>;
+
+/// The default trace compiler: wrap the fused interpreter in a callable. This
+/// is the always-available producer; Weval/JIT/patcher backends register
+/// their own callables instead (same registry, faster artifacts).
+#[cfg(feature = "async-host")]
+pub fn compile_trace<R: LocalReactor>(ops: alloc::rc::Rc<alloc::vec::Vec<StackOp>>) -> TraceFn<R> {
+    alloc::rc::Rc::new(move |host: &mut LocalStackHost<R>| {
+        // The local host never pends, so this completes in one poll. The op
+        // budget matters: a looping trace must still yield to the dispatch
+        // loop (interrupt delivery, fuel) via Exit::TailCall.
+        let mut fuel: u64 = 4096;
+        block_on_ready(interpret_async_fueled(&ops, host, Some(&mut fuel)))
+            .expect("a fuel budget yields Exit::TailCall, not FuelExhausted")
+    })
+}
+
+/// Drive a future that never pends to completion. Used to run the async
+/// interpreter as a synchronous compiled-trace callable for a purely-local
+/// host. A `Pending` here means a non-local host reached the compiled path,
+/// which is a host-integration bug.
+#[cfg(feature = "async-host")]
+pub fn block_on_ready<F: core::future::Future>(fut: F) -> F::Output {
+    use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+    const VTABLE: RawWakerVTable = RawWakerVTable::new(
+        |_| RawWaker::new(core::ptr::null(), &VTABLE),
+        |_| {},
+        |_| {},
+        |_| {},
+    );
+    let waker = unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &VTABLE)) };
+    let mut cx = Context::from_waker(&waker);
+    let mut fut = core::pin::pin!(fut);
+    loop {
+        match fut.as_mut().poll(&mut cx) {
+            Poll::Ready(v) => return v,
+            Poll::Pending => {
+                // A purely-local host never pends; spin defensively.
+                core::hint::spin_loop();
+            }
+        }
+    }
+}
+
 /// [`interpret_async`] with an op budget, checked at instruction boundaries
 /// (every `CheckCode`). Exhaustion returns `Exit::TailCall` to the current
 /// instruction — whose ops have not run yet, so re-entry is atomic. This is

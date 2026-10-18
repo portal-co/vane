@@ -79,6 +79,17 @@ macro_rules! vane_meta {
                     $crate::alloc::rc::Rc<$crate::alloc::vec::Vec<$crate::vane_arch::StackOp>>,
                 >,
             >,
+            /// Compiled-trace registry (Weval/JIT/binary-patcher artifacts,
+            /// or the default dense interpreter via `compile_trace`). Keyed by
+            /// the trace's root guest pc. The dispatch loop consults this
+            /// before interpreting the `trace_cache` ops — a registered
+            /// callable runs instead of interpreting the StackOps.
+            compiled: $crate::core::cell::RefCell<
+                $crate::alloc::collections::BTreeMap<
+                    u64,
+                    $crate::vane_arch::interp::TraceFn<$t>,
+                >,
+            >,
             /// Which execution engine `run` dispatches to.
             engine: $crate::vane_arch::ExecEngine,
             /// Current guest pc: the register file lives in JS (`r`) under
@@ -308,6 +319,7 @@ macro_rules! vane_meta {
                             let mut lock = self.core.lock();
                             if lock.code_dirty {
                                 lock.trace_cache.borrow_mut().clear();
+                                lock.compiled.borrow_mut().clear();
                                 lock.code_dirty = false;
                             }
                         }
@@ -398,7 +410,14 @@ macro_rules! vane_meta {
 
                         };
                         let pc = host.pc;
-                        let exit = {
+                        // Compiled-trace registry: a registered callable
+                        // (Weval/JIT/patcher artifact, or the default compiled
+                        // interpreter) runs the trace instead of interpreting
+                        // the StackOps. The callable is synchronous.
+                        let compiled = self.core.lock().compiled.borrow().get(&pc).cloned();
+                        let exit = if let Some(cf) = compiled {
+                            cf(&mut host)
+                        } else {
                             // Per-trace op budget: bounds how long a trace
                             // runs before yielding to the dispatch loop
                             // (interrupt delivery, ecall handling, fuel).
