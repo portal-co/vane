@@ -244,7 +244,7 @@ A shared `vane-virtio` crate (or `vane-riscv::virtio` module):
 | # | Milestone | Deliverables | Acceptance | Status |
 |---|---|---|---|---|---|
 | V1 | virtio-mmio framework | `vane-riscv::virtio`: QueueMem, legacy-v1 virtqueue, VirtioDevice, VirtioMmio; Machine slots + PLIC + DTB; process_virtio | Linux probes a stub device | **DONE** (3f2cd13) |
-| V2 | virtio-blk | VirtioBlk + BlockBackend + CowBlock; vane-cli `--disk` + FileBlock | S-V1 (mount rootfs) | **DONE** (c98322e); Linux-mount E2E needs a rootfs image |
+| V2 | virtio-blk | VirtioBlk + BlockBackend + CowBlock; vane-cli `--disk` + FileBlock; ext2 image builder + disk-rootfs gate (6046707) | S-V1 (mount rootfs) | **DONE** (device + DTB validated); the Linux-mount E2E is blocked on a kernel-config finding: the Debian netboot kernel has virtio_mmio/virtio_blk as *modules*, so `root=/dev/vda` needs a virtio-builtin kernel (see §12 R-V4) |
 | V3 | virtio-9p | Virtio9p (9P2000.L subset) + Host9p trait; vane-cli `--share` + confined DirFs | S-V2 (two backends) | **DONE** (154beae); device-level 9P roundtrip tested |
 | V4 | virtio-net | VirtioNet + NetBackend + RX chain deferral (t-baab, 901f9ec) | S-V3 | **DONE** (t-baab) |
 | W1 | Snapshots | HartSnapshot/MachineSnapshot/ReactorSnapshot save/restore/fork (t-baab, 901f9ec) | S-W1 | **DONE** (t-baab) |
