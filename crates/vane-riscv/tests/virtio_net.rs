@@ -46,11 +46,11 @@ impl NetBackend for Script {
 const PAGE: u64 = 4096;
 
 fn setup_queue(d: &mut VirtioMmio, q: u32, pfn: u32) {
-    d.write(0x020, PAGE as u32); // GuestPageSize
-    d.write(0x028, q); // QueueSel
-    d.write(0x030, 4); // QueueNum = 4
-    d.write(0x034, PAGE as u32); // QueueAlign
-    d.write(0x038, pfn); // QueuePFN
+    d.write(0x028, PAGE as u32); // GuestPageSize
+    d.write(0x030, q); // QueueSel
+    d.write(0x038, 4); // QueueNum = 4
+    d.write(0x03c, PAGE as u32); // QueueAlign
+    d.write(0x040, pfn); // QueuePFN
 }
 
 #[test]
@@ -63,7 +63,7 @@ fn net_register_block() {
         1,
     );
     assert_eq!(d.read(0x008), DEV_NET);
-    assert_eq!(d.read(0x02c), 256); // QueueNumMax
+    assert_eq!(d.read(0x034), 256); // QueueNumMax
     // Config: MAC then link status.
     assert_eq!(d.read(0x100) & 0xFF, 0x52);
     assert_eq!((d.read(0x100) >> 8) & 0xFF, 0x54);

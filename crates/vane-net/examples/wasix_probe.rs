@@ -9,9 +9,17 @@
 //! TCP connect to the host echo server, send/recv round-trip, half-close.
 //! Prints WASIX-PROBE-OK on success; exits nonzero on failure.
 
+#[cfg(all(target_os = "wasi", feature = "wasix-raw"))]
 use vane_host::{SockErr, SocketBackend};
+#[cfg(all(target_os = "wasi", feature = "wasix-raw"))]
 use vane_net::WasixSockets;
 
+#[cfg(not(all(target_os = "wasi", feature = "wasix-raw")))]
+fn main() {
+    eprintln!("wasix_probe: only meaningful on wasm32-wasi with --features wasix-raw");
+}
+
+#[cfg(all(target_os = "wasi", feature = "wasix-raw"))]
 fn main() {
     let port: u16 = std::env::args()
         .nth(1)
