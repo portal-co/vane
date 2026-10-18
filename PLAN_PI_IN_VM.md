@@ -367,10 +367,10 @@ Status column is kept current (`todo` / `doing` / `done` / `blocked(reason)`).
 | M4 | Socket-extension binding + runtime probe; P3 | M2 | doing: `WasixSockets` (raw `wasix_32v1`, wasix ABI verified vs wasix-0.12.5 + wasmer read_ip_port) compile-checked for wasm32-wasip1; runtime validation + probe wiring pending (R3) |
 | M5 | DNS forwarding (tunnel DNS responder at 10.0.2.3, host-side resolve, synthetic answers) | M2 | done |
 | M6 | Machine snapshots: `ReactorSnapshot`/VSNP existed; added CLI `--snapshot-save/--snapshot-marker/--snapshot-restore/--exit-after-snapshot` | boot gate | done (CLI); gate integration pending |
-| M7 | Agent disk image build (Node v24.22.0 glibc pinned) under QEMU; node gate P4 | M2 | doing |
-| M8 | HTTPS gate P5 (+P6 MITM optional mode) | M2,M7 | todo |
-| M9 | npm gate P7; snapshots S1–S2 | M8 | todo |
-| M10 | Pi + extension pre-installed in image; mock provider; pi gate P8; snapshot S3 | M9 | todo |
+| M7 | Agent disk image build (Node v24.22.0 glibc pinned) under QEMU; node gate P4 | M2 | doing: `build-agent-image.sh` authored (fail-closed, QEMU nocloud+seed); not yet executed |
+| M8 | HTTPS gate P5 (+P6 MITM optional mode) | M2,M7 | doing: gate + guest script authored; `--mitm` stubbed fail-closed; pending image + disk-boot flow |
+| M9 | npm gate P7; snapshots S1–S2 | M8 | doing: gate + guest script authored; pending image + disk-boot flow |
+| M10 | Pi + extension pre-installed in image; mock provider; pi gate P8; snapshot S3 | M9 | doing: mock provider done; image provisioner installs pi+extension; gate authored; pending image + disk-boot flow |
 | M11 | E2E gate P9–P10; performance table filled; runbook final | M10 | todo |
 | M12 | wasi-threads pump variant (wasmtime) | M3 | stretch |
 
@@ -419,6 +419,8 @@ of M1–M5; M6 is on the PLAN_VIRTIO_WEVAL critical path owned by the `vane` dir
 | R5 | Shared-memory requirements of wasi-threads conflict with `Mem`'s page store | M12 | keep page store hart-local; pass buffers across the channel | open |
 | R6 | smoltcp socket state on snapshot restore | G6 | quiesce-with-no-open-sockets rule (§6) | designed, unverified |
 | R7 | Guest TLS cert validation vs system time (no RTC) | stage 3 flake | set guest clock from host at boot (`date -s` in `/init` or an RTC device) | open |
+| R8 | Disk-rootfs boot flow: gates need the guest to mount the virtio-blk rootfs and run /opt/gates/* as init (the boot gates use initramfs only) | stages 2-5 blocked | kernel cmdline `root=/dev/vda rw init=/opt/gates/NN.sh`; needs virtio-blk in the kernel + an /opt/gates-aware init; tracked in `harness/lib-gate.sh::gate_boot_agent_image` | open |
+| R9 | `WasixSockets` connect polls `sock_status` in a busy loop | wasm perf | bounded spin for now; use poll_oneoff when validated on a live runtime | open |
 
 ## 14. Open questions / decisions
 
@@ -468,3 +470,9 @@ of M1–M5; M6 is on the PLAN_VIRTIO_WEVAL critical path owned by the `vane` dir
 - 2026-10-19 — Mock provider (M10 part): `harness/mock-provider/server.py` with
   replay/record modes; JSONL recording format; smoke-tested (match → 200,
   mismatch/exhaustion → 409). `recordings/smoke.jsonl` documents the format.
+- 2026-10-19 — Stage gates authored end-to-end: `lib-gate.sh` (fail-closed
+  helpers + results JSON), `run-{node,node-https,npm,pi}-gate.sh`, in-guest
+  `/opt/gates/02..05` scripts. Image build now publishes a raw `.img`
+  (vane-cli FileBlock is raw-only). Gates are wired but blocked on R8
+  (disk-rootfs boot flow) and the fetched artifacts; they fail closed with
+  the exact missing piece named.

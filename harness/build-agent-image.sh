@@ -132,7 +132,8 @@ set -e
 grep -q "AGENT IMAGE PROVISION DONE" "$log" || fail "provisioning did not complete (log: $log)"
 grep -q "HTTPS-OK" "$log" || fail "guest HTTPS smoke test failed (log: $log)"
 
-# Publish the built image (not committed; harness/.gitignore covers it).
-out=harness/agent-riscv64.qcow2
-qemu-img convert -f qcow2 -O qcow2 "$work/disk.qcow2" "$out"
+# Publish the built image as RAW (vane-cli's FileBlock backend is raw
+# 512-byte-sector only; QCOW2 is a stretch goal). Not committed.
+out=harness/agent-riscv64.img
+qemu-img convert -f qcow2 -O raw "$work/disk.qcow2" "$out"
 echo "PASS: agent image at $out (log: $log)" >&2
