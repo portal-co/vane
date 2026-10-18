@@ -45,7 +45,10 @@ fn pending_future_parks_then_completes_after_wake() {
     });
     // First resume: the future pends → Parked, and it registered a wake.
     assert!(matches!(c.resume(), CoroutineState::Parked));
-    assert!(c.is_woken(), "the pending host op should have registered a wake");
+    assert!(
+        c.is_woken(),
+        "the pending host op should have registered a wake"
+    );
     // Complete the "round-trip" and resume.
     ready.set(true);
     match c.resume() {

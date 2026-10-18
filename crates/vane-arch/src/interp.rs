@@ -757,6 +757,7 @@ pub struct LocalStackHost<R> {
     pub check_code_integrity: bool,
 }
 
+#[cfg(feature = "async-host")]
 impl<R: LocalReactor> LocalStackHost<R> {
     /// Load the register cache from the reactor (one bulk read). No-op when
     /// the register cache is disabled.
@@ -1191,7 +1192,6 @@ fn coroutine_waker(flag: alloc::rc::Rc<core::cell::Cell<bool>>) -> core::task::W
     const VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop);
     unsafe { Waker::from_raw(RawWaker::new(Rc::into_raw(flag) as *const (), &VTABLE)) }
 }
-
 
 /// [`interpret_async`] with an op budget, checked at instruction boundaries
 /// (every `CheckCode`). Exhaustion returns `Exit::TailCall` to the current
