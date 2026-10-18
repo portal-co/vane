@@ -364,7 +364,7 @@ Status column is kept current (`todo` / `doing` / `done` / `blocked(reason)`).
 | M1 | virtio-net device + smoltcp `NetBackend` guest-side (PLAN_VIRTIO_WEVAL D) | V1 transport | done (device by vane terminal; smoltcp tunnel landed with M2) |
 | M2 | `SocketBackend` trait + std/WASIX binding (`StdSockets`), smoltcp tunnel `vane-net`, loopback echo tests, `--net`/`--net-map` CLI wiring, echo gate P1 authored (execution pending boot artifacts) | M1 | done (gate run pending) |
 | M3 | I/O pump on a thread: `PumpedTunnel` (std::thread = WASIX thread on wasm32-wasmer-wasi), `--net-pump`, pumped echo test | M2 | done (native; WASIX-target verification pending) |
-| M4 | Socket-extension binding + runtime probe; P3 | M2 | todo |
+| M4 | Socket-extension binding + runtime probe; P3 | M2 | doing: `WasixSockets` (raw `wasix_32v1`, wasix ABI verified vs wasix-0.12.5 + wasmer read_ip_port) compile-checked for wasm32-wasip1; runtime validation + probe wiring pending (R3) |
 | M5 | DNS forwarding (tunnel DNS responder at 10.0.2.3, host-side resolve, synthetic answers) | M2 | done |
 | M6 | Machine snapshots: `ReactorSnapshot`/VSNP existed; added CLI `--snapshot-save/--snapshot-marker/--snapshot-restore/--exit-after-snapshot` | boot gate | done (CLI); gate integration pending |
 | M7 | Agent disk image build (Node v24.22.0 glibc pinned) under QEMU; node gate P4 | M2 | doing |
@@ -455,3 +455,10 @@ of M1–M5; M6 is on the PLAN_VIRTIO_WEVAL critical path owned by the `vane` dir
   Q1/Q2 decided (Node v24.22.0, glibc/Debian base); R1 closed. R8 mitigated
   in code: the DNS responder socket binds 10.0.2.3 explicitly so replies
   carry the queried source address.
+- 2026-10-19 — M4 binding authored: `vane-net::WasixSockets` behind the
+  `wasix-raw` feature (raw `wasix_32v1` imports; ABI verified against
+  wasix 0.12.5 sources and wasmer's `net::read_ip_port` — port is
+  native-endian in memory). Compile-checked for wasm32-wasip1. Not yet run
+  against a live runtime (R3); support matrix in `harness/net/README.md`.
+  M7: `build-agent-image.sh` (QEMU nocloud + NoCloud seed, fail-closed) and
+  the guest environment contract (`harness/guest/README.md`).

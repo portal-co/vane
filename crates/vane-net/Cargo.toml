@@ -11,6 +11,9 @@ default = []
 # Native std::net SocketBackend. Also the WASIX binding: on
 # wasm32-wasmer-wasi, std sockets lower to WASIX sock_* calls.
 std = []
+# Binding B (M4): raw wasix_32v1 syscalls for wasm32-wasi targets whose
+# runtime carries the unofficial socket extension but std has no sockets.
+wasix-raw = []
 
 [dependencies]
 vane-host = { path = "../vane-host" }

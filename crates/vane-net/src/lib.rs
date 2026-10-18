@@ -32,6 +32,14 @@ mod pumped;
 #[cfg(feature = "std")]
 mod std_sockets;
 
+// Binding B (M4): raw wasix_32v1 / unofficial-socket-extension syscalls.
+// Only meaningful on wasm32-wasi targets; gated on the `wasix-raw` feature
+// so plain builds never carry the imports.
+#[cfg(all(target_os = "wasi", feature = "wasix-raw"))]
+mod wasix_sockets;
+#[cfg(all(target_os = "wasi", feature = "wasix-raw"))]
+pub use wasix_sockets::WasixSockets;
+
 pub use smoltcp::wire::Ipv4Address;
 pub use tunnel::{QueueDevice, Tunnel, GATEWAY_IP, GUEST_DNS_IP, GUEST_IP, SYNTHETIC_BASE};
 
