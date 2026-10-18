@@ -22,6 +22,19 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+/// How to capture a string argument at a hooked symbol: read the pointer
+/// in argument register a<reg>, add `offset` bytes, follow that pointer,
+/// and read a NUL-terminated string there. Covers the real kernel shapes —
+/// e.g. `do_execveat_common`'s `struct filename *` (name at offset 0) —
+/// without baking struct layouts into either engine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArgStr {
+    /// Argument register index (0 = a0).
+    pub reg: u8,
+    /// Byte offset from the register's pointer to the string pointer.
+    pub offset: u64,
+}
+
 /// One hook: a named observation point at a guest virtual address.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hook {
@@ -29,6 +42,8 @@ pub struct Hook {
     pub name: String,
     /// Guest virtual address of the hook (the symbol's st_value).
     pub addr: u64,
+    /// Optional string capture rule (manifest `str:aN:off`).
+    pub arg_str: Option<ArgStr>,
 }
 
 /// A recorded hook firing: arrival at a hooked symbol with the argument
@@ -64,6 +79,19 @@ impl HookSet {
             Hook {
                 name: name.to_owned(),
                 addr,
+                arg_str: None,
+            },
+        );
+    }
+
+    /// Install a hook with a string-capture rule.
+    pub fn insert_with_str(&mut self, addr: u64, name: &str, arg_str: ArgStr) {
+        self.by_addr.insert(
+            addr,
+            Hook {
+                name: name.to_owned(),
+                addr,
+                arg_str: Some(arg_str),
             },
         );
     }

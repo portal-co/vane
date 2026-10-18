@@ -138,11 +138,14 @@ bindings), and runs the payload inside the WASI module under Node's
 `node:wasi` (`harness/run-wasi.mjs`). Expected output:
 `hello from vane wasip1` and `M0 wasip1 gate: PASS`.
 
-Native equivalent:
+Native equivalent (payload mode now requires the privileged architecture —
+the user-mode syscall-shim micro-OS was removed; `--hart` runs the payload
+with the trap engine live, completing via `--tohost` or trap):
 
 ```sh
 cargo run -p vane-cli -- \
-  --elf harness/payload-hello/target/riscv64gc-unknown-none-elf/release/payload-hello
+  --elf harness/payload-hello/target/riscv64gc-unknown-none-elf/release/payload-hello \
+  --hart
 ```
 
 ## Current approach: WASM-in-JS

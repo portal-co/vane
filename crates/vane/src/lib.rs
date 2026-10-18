@@ -1609,6 +1609,43 @@ impl Reactor {
         r.restore(&snap)?;
         Ok(r)
     }
+
+    /// Read one byte at a guest VIRTUAL address through the current hart's
+    /// page tables (identity when translation is off or fails). The hook
+    /// system uses this to follow argument pointers at hooked kernel
+    /// entries — e.g. `struct filename *` in `do_execveat_common` — so
+    /// captured arguments are read from real kernel memory at real symbol
+    /// locations.
+    pub fn read_guest_virtual_u8(&self, vaddr: u64) -> u8 {
+        let mut lock = self.core.lock();
+        let lock = &mut *lock;
+        let pa = lock
+            .hart
+            .translate(&mut lock.mem, vaddr, vane_riscv::hart::Access::Load)
+            .unwrap_or(vaddr);
+        lock.mem.read_byte(pa)
+    }
+
+    /// Read a NUL-terminated string at a guest virtual address (capped at
+    /// `max` bytes; a missing terminator truncates).
+    pub fn read_guest_virtual_cstr(&self, vaddr: u64, max: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        for i in 0..max as u64 {
+            let b = self.read_guest_virtual_u8(vaddr.wrapping_add(i));
+            if b == 0 {
+                break;
+            }
+            out.push(b);
+        }
+        out
+    }
+
+    /// Read `len` bytes at a guest virtual address.
+    pub fn read_guest_virtual(&self, vaddr: u64, len: usize) -> Vec<u8> {
+        (0..len as u64)
+            .map(|i| self.read_guest_virtual_u8(vaddr.wrapping_add(i)))
+            .collect()
+    }
 }
 
 #[cfg(not(feature = "js-host"))]
