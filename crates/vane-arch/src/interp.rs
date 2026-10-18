@@ -1105,6 +1105,94 @@ pub fn block_on_ready<F: core::future::Future>(fut: F) -> F::Output {
     }
 }
 
+/// The result of one step of a [`GuestCoroutine`].
+#[cfg(feature = "async-host")]
+#[derive(Debug)]
+pub enum CoroutineState<T> {
+    /// The guest parked on a host operation (a non-local host's round-trip).
+    /// The host wakes the coroutine's waker when the round-trip completes;
+    /// call [`GuestCoroutine::resume`] again after that. Under Binaryen
+    /// asyncify / JSPI the same suspension happens at the wasm level inside
+    /// an async host import — the guest code is identical, only the driver
+    /// differs.
+    Parked,
+    /// The guest finished, producing its output.
+    Done(T),
+}
+
+/// A guest execution driven as a resumable coroutine (PLAN_LINUX_WASM.md §4.2
+/// non-local hosts). Owns the interpreter future; each [`resume`](Self::resume)
+/// runs it until it completes or parks on a host operation.
+///
+/// This is the coroutine seam for non-local hosts: a local host never parks
+/// (each resume runs to completion); a non-local host (e.g. remote browser
+/// memory via wsdom, or any host whose register/memory access round-trips)
+/// parks at the round-trip, and the driver resumes it once the round-trip
+/// resolves.
+#[cfg(feature = "async-host")]
+pub struct GuestCoroutine<F: core::future::Future> {
+    fut: core::pin::Pin<alloc::boxed::Box<F>>,
+    woken: alloc::rc::Rc<core::cell::Cell<bool>>,
+}
+
+#[cfg(feature = "async-host")]
+impl<F: core::future::Future> GuestCoroutine<F> {
+    /// Wrap a guest-execution future as a resumable coroutine.
+    pub fn new(fut: F) -> Self {
+        GuestCoroutine {
+            fut: alloc::boxed::Box::pin(fut),
+            woken: alloc::rc::Rc::new(core::cell::Cell::new(true)),
+        }
+    }
+
+    /// Run until the guest completes or parks on a host operation.
+    pub fn resume(&mut self) -> CoroutineState<F::Output> {
+        let waker = coroutine_waker(self.woken.clone());
+        let mut cx = core::task::Context::from_waker(&waker);
+        self.woken.set(false);
+        match self.fut.as_mut().poll(&mut cx) {
+            core::task::Poll::Ready(v) => CoroutineState::Done(v),
+            core::task::Poll::Pending => CoroutineState::Parked,
+        }
+    }
+
+    /// Whether the host woke the coroutine since the last [`resume`](Self::
+    /// resume) — i.e. a pending round-trip completed and it's ready to resume.
+    pub fn is_woken(&self) -> bool {
+        self.woken.get()
+    }
+}
+
+/// Build a waker whose wake sets the shared flag (an `Rc<Cell<bool>>`).
+#[cfg(feature = "async-host")]
+fn coroutine_waker(flag: alloc::rc::Rc<core::cell::Cell<bool>>) -> core::task::Waker {
+    use alloc::rc::Rc;
+    use core::cell::Cell;
+    use core::task::{RawWaker, RawWakerVTable, Waker};
+    unsafe fn clone(d: *const ()) -> RawWaker {
+        // SAFETY: `d` is a live `Rc<Cell<bool>>` from `Rc::into_raw`.
+        unsafe { Rc::increment_strong_count(d as *const Cell<bool>) };
+        RawWaker::new(d, &VTABLE)
+    }
+    unsafe fn wake(d: *const ()) {
+        // SAFETY: `d` is a live `Rc<Cell<bool>>` from `Rc::into_raw`; taking
+        // ownership and dropping it balances the count.
+        let rc = unsafe { Rc::from_raw(d as *const Cell<bool>) };
+        rc.set(true);
+    }
+    unsafe fn wake_by_ref(d: *const ()) {
+        // SAFETY: `d` is a live `Rc<Cell<bool>>` for the waker's lifetime.
+        unsafe { &*(d as *const Cell<bool>) }.set(true);
+    }
+    unsafe fn drop(d: *const ()) {
+        // SAFETY: `d` is a live `Rc<Cell<bool>>` from `Rc::into_raw`.
+        core::mem::drop(unsafe { Rc::from_raw(d as *const Cell<bool>) });
+    }
+    const VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop);
+    unsafe { Waker::from_raw(RawWaker::new(Rc::into_raw(flag) as *const (), &VTABLE)) }
+}
+
+
 /// [`interpret_async`] with an op budget, checked at instruction boundaries
 /// (every `CheckCode`). Exhaustion returns `Exit::TailCall` to the current
 /// instruction — whose ops have not run yet, so re-entry is atomic. This is
