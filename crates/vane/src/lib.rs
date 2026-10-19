@@ -1273,20 +1273,13 @@ impl Reactor {
             let needs_step = match Inst::decode(code, Xlen::Rv64) {
                 Ok((inst, _)) => matches!(
                     inst,
-                    Inst::Csrrw { .. }
-                        | Inst::Csrrs { .. }
-                        | Inst::Csrrc { .. }
-                        | Inst::Csrrwi { .. }
-                        | Inst::Csrrsi { .. }
-                        | Inst::Csrrci { .. }
-                        | Inst::Mret
-                        | Inst::Sret
-                        | Inst::Wfi
-                        | Inst::SfenceVma { .. }
-                        | Inst::Ecall
-                        | Inst::Ebreak
-                        // fence.i flushes the code-dirty flag (step_one
-                        // handles it) — boundary it like the privileged ops.
+                    // The CSR/trap-return/misc privileged ops (Csrr*, Mret,
+                    // Sret, Wfi, SfenceVma, Ebreak) are now traced inline via
+                    // StackOp::Privileged (PLAN_TRACE_CUTOVER P2) — not
+                    // boundary'd here. Ecall and fence.i still boundary
+                    // (traced in a later phase), as do the AMOs and the FP
+                    // ops rv_float_ops doesn't lower.
+                    Inst::Ecall
                         | Inst::FenceI
                         // AMOs (lr/sc + atomic ops): not lowered to StackOps
                         // by rv_emit, so they boundary out of traces and the
@@ -1380,6 +1373,29 @@ impl Reactor {
             }
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    /// Execute one privileged instruction inline in a trace
+    /// (PLAN_TRACE_CUTOVER): decode + run via the hart
+    /// (`vane_riscv::privileged::execute_privileged`), then apply the
+    /// trace-cache / code-dirty invalidation the op signalled. Called by the
+    /// macro-generated `LocalReactor::lr_privileged`.
+    fn execute_privileged_inst(
+        &self,
+        pc: u64,
+        raw: u32,
+        regs: &mut [u64; 32],
+    ) -> vane_arch::interp::PrivOutcome {
+        let mut guard = self.core.lock();
+        let core = &mut *guard;
+        let r = vane_riscv::privileged::execute_privileged(&mut core.hart, pc, raw, regs);
+        if r.clear_traces {
+            core.trace_cache.borrow_mut().clear();
+        }
+        if r.code_dirty {
+            core.code_dirty = true;
+        }
+        r.outcome
     }
 
     /// Fueled variant of [`Reactor::interp_core`]: when `fuel` is `Some`,

@@ -155,6 +155,13 @@ macro_rules! vane_meta {
                 fn lr_has_local_regfile(&self) -> bool {
                     true
                 }
+                // Execute a privileged instruction inline in a trace
+                // (PLAN_TRACE_CUTOVER). The handler lives on the Reactor
+                // (vane has the vane_riscv dep; vane-meta-gen re-exports only
+                // vane_arch).
+                fn lr_privileged(&self, pc: u64, raw: u32, regs: &mut [u64; 32]) -> $crate::vane_arch::interp::PrivOutcome {
+                    self.execute_privileged_inst(pc, raw, regs)
+                }
                 fn lr_read_byte(&self, addr: u64) -> u8 {
                     // Fetch validation (CheckCode): translate as exec.
                     let mut lock = self.core.lock();

@@ -18,6 +18,7 @@ pub mod state {
 pub mod fdt;
 pub mod fp;
 pub mod hart;
+pub mod privileged;
 pub mod hint;
 pub mod machine;
 pub mod snapshot_ser;

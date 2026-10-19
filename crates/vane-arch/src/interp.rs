@@ -819,6 +819,13 @@ pub trait LocalReactor {
     fn lr_store_reg(&self, r: u8, v: u64);
     fn lr_read_byte(&self, addr: u64) -> u8;
     fn lr_write_byte(&self, addr: u64, v: u8);
+    /// Execute one raw privileged (or non-lowered) instruction at `pc`
+    /// against the register file `regs` and the hart (`StackOp::Privileged`;
+    /// PLAN_TRACE_CUTOVER). Default: divert to `pc` (the stepper fallback —
+    /// the pre-cutover behaviour for reactors without a privileged handler).
+    fn lr_privileged(&self, pc: u64, _raw: u32, _regs: &mut [u64; 32]) -> PrivOutcome {
+        PrivOutcome::Divert(pc)
+    }
     /// A memory access inside a trace trapped (Sv39 page/access fault) since
     /// the last call. Default: never (bare memory cannot fault).
     fn lr_take_pending_trap(&self) -> bool {
@@ -935,6 +942,21 @@ impl<R: LocalReactor> AsyncStackHost for LocalStackHost<R> {
         // renderer, which likewise never diverts control flow).
         self.pending_ecall = true;
         true
+    }
+    async fn privileged(&mut self, pc: u64, raw: u32) -> PrivOutcome {
+        // Execute the privileged op against the register cache + the hart
+        // (via the reactor). Only the local-regfile path supports inline
+        // privileged ops; the js-host keeps registers in JS and diverts to
+        // the stepper (the pre-cutover behaviour).
+        if !self.reg_cache {
+            return PrivOutcome::Divert(pc);
+        }
+        // The op may write a register (e.g. a CSR dest); mark the cache dirty
+        // so it flushes at the trace end. Trap atomicity is preserved: the
+        // op always ends its trace (rv_emit emits the terminating
+        // `PushImm; TailCall` after it), so no faulting op follows it.
+        self.regs_dirty = true;
+        self.reactor.lr_privileged(pc, raw, &mut self.regs)
     }
     fn take_pending_trap(&mut self) -> bool {
         self.reactor.lr_take_pending_trap()

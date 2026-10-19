@@ -793,7 +793,14 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
         | Inst::Ebreak
             if this.params.flags.privileged =>
         {
-            ops.push(StackOp::PushImm(this.pc));
+            // PLAN_TRACE_CUTOVER: execute the privileged op inline via the
+            // hart (StackHost::privileged) instead of boundarying out to a
+            // separate step engine. The op ends the trace: on Continue the
+            // PushImm/TailCall dispatch to next_pc; on Divert (trap return /
+            // trap) the interpreter tail-calls the hart's pc directly,
+            // skipping the fallthrough.
+            ops.push(StackOp::Privileged { pc: this.pc, raw: inst_code });
+            ops.push(StackOp::PushImm(next_pc));
             ops.push(StackOp::TailCall);
         }
         // Ebreak and anything unrecognised → trap. In privileged mode,
