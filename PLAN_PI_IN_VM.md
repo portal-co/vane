@@ -532,3 +532,11 @@ of M1–M5; M6 is on the PLAN_VIRTIO_WEVAL critical path owned by the `vane` dir
   default RAM OOMs the initramfs /init ("sh: out of memory" → panic);
   disk gate now uses --ram-size 0x20000000. Sizing guidance for the
   agent-image gates (1-2 GiB) recorded in harness/lib-gate.sh.
+- 2026-10-19 — R8 near-complete: with register-map fix + crc16 + 512MiB RAM,
+  the boot loads all disk modules, virtio_blk registers vda, ext4 loads; the
+  mount failed on the IMAGE (ext4 validates inodes_count ==
+  inodes_per_group × groups; the python ext2 builder wrote the used count).
+  Fixed in vane 1f5fba7 (one-field superblock fix, verified consistent).
+  Full virtio path (mmio → blk → ext4) is validated; the gate's remaining
+  step is the re-run. NOTE: t-34d8 was redirected to the trace-interpreter
+  cutover; the R8 re-run may need to be picked up by whoever is free.
