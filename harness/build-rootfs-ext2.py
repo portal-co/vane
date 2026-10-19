@@ -162,7 +162,11 @@ def build_image(files, total_sectors, out_path):
 
     # Superblock: 1024 bytes, at byte offset 1024 (within block 0 for 4K blocks).
     sb = bytearray(1024)
-    struct.pack_into("<IIII", sb, 0, len(used_inodes), total_blocks, 0, free_blocks)
+    # s_inodes_count must equal inodes_per_group * groups (ext4 validates
+    # this even when mounting an ext2 image via EXT4_USE_FOR_EXT2); using
+    # the *used* count here made the mount fail with "inodes count not
+    # valid: 6 vs 64".
+    struct.pack_into("<IIII", sb, 0, n_inodes, total_blocks, 0, free_blocks)
     struct.pack_into("<I", sb, 16, free_inodes)
     struct.pack_into("<I", sb, 20, 0)  # s_first_data_block (0 for 4K blocks)
     struct.pack_into("<I", sb, 24, 2)  # s_log_block_size (1024 << 2 = 4096)
