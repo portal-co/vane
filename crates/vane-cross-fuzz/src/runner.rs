@@ -258,6 +258,13 @@ impl<P: ArchProfile> CrossRunner<P> {
                 // Normal architectural exit (fallthrough/branch/jump). Fall
                 // through to the Unicorn side and compare.
             }
+            crate::interp::Exit::Bail(_) => {
+                // A mid-trace memory access trapped (the interpreter bailed
+                // to the stepper for trap atomicity). In the scoped one-
+                // instruction cross-fuzz this is the instruction's own
+                // memory fault; treat like a trap skip (Unicorn will refuse
+                // or the states will match on the pre-fault registers).
+            }
         }
 
         // ── Unicorn side: exactly one instruction ────────────────────────
