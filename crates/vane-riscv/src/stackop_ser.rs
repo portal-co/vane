@@ -227,6 +227,11 @@ pub fn encode_op(op: &StackOp, w: &mut Writer) {
             w.blob(expected);
             w.str(miss_label);
         }
+        Privileged { pc, raw } => {
+            w.u8(63);
+            w.u64(*pc);
+            w.u32(*raw);
+        }
     }
 }
 
@@ -325,6 +330,10 @@ pub fn decode_op(r: &mut Reader) -> Result<StackOp, SerError> {
             addr: r.u64()?,
             expected: r.blob()?.into(),
             miss_label: r.str()?,
+        },
+        63 => Privileged {
+            pc: r.u64()?,
+            raw: r.u32()?,
         },
         _ => return Err(SerError::Invalid("StackOp discriminant")),
     })

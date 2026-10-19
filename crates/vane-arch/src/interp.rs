@@ -41,6 +41,18 @@
 use alloc::{string::String, vec::Vec};
 use vane_target_core::{FloatBinOp, FloatUnaryOp, FloatWidth, MemWidth, StackOp, StateSlot};
 
+/// The outcome of a `StackOp::Privileged` instruction (PLAN_TRACE_CUTOVER).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivOutcome {
+    /// The instruction executed and did not divert control flow (e.g. a CSR
+    /// write); the trace proceeds to the next op.
+    Continue,
+    /// The instruction diverted control flow (trap return, or a trap the hart
+    /// resolved to a handler pc); the trace ends and the dispatcher resumes at
+    /// this pc.
+    Divert(u64),
+}
+
 /// Host state a [`StackOp`] trace reads and writes as it interprets.
 ///
 /// Implementors decide where register/memory state actually lives (e.g. a
@@ -73,6 +85,15 @@ pub trait StackHost {
     /// interpreting and report [`Exit::Ecall`] to the caller (e.g. the
     /// `exit` syscall — see `Reactor::_ecall` in `crates/vane/src/lib.rs`).
     fn ecall(&mut self) -> bool;
+    /// Called for `StackOp::Privileged`: execute one raw privileged (or
+    /// otherwise non-lowered) instruction at `pc` via the architecture's
+    /// handler, keeping the semantics in one place (the hart). The default
+    /// diverts back to `pc` so a host without a privileged handler re-runs the
+    /// instruction through the stepper — the pre-cutover behaviour (safe
+    /// fallback during the transition). See PLAN_TRACE_CUTOVER.md.
+    fn privileged(&mut self, pc: u64, _raw: u32) -> PrivOutcome {
+        PrivOutcome::Divert(pc)
+    }
     /// Called for `StackOp::Log`. Default: no-op.
     fn log(&mut self, _msg: &str) {}
 }
@@ -621,6 +642,10 @@ pub fn interpret_fueled(
                     return Ok(Exit::Ecall);
                 }
             }
+            StackOp::Privileged { pc, raw } => match host.privileged(*pc, *raw) {
+                PrivOutcome::Continue => ip += 1,
+                PrivOutcome::Divert(addr) => return Ok(Exit::TailCall(addr)),
+            },
             StackOp::Trap(msg) => return Ok(Exit::Trap(msg.clone())),
             StackOp::TailCall => {
                 let addr = pop!();
@@ -675,6 +700,12 @@ pub trait AsyncStackHost {
     }
     /// See [`StackHost::ecall`].
     async fn ecall(&mut self) -> bool;
+    /// See [`StackHost::privileged`]. Default: divert to `pc` (the stepper
+    /// fallback) — the pre-cutover behaviour for hosts without a privileged
+    /// handler.
+    async fn privileged(&mut self, pc: u64, _raw: u32) -> PrivOutcome {
+        PrivOutcome::Divert(pc)
+    }
     /// See [`StackHost::log`].
     async fn log(&mut self, _msg: &str) {}
     /// A memory access trapped (page/access fault) since the last call.
@@ -1610,6 +1641,10 @@ pub async fn interpret_async_fueled(
                     return Ok(Exit::Ecall);
                 }
             }
+            StackOp::Privileged { pc, raw } => match host.privileged(*pc, *raw).await {
+                PrivOutcome::Continue => ip += 1,
+                PrivOutcome::Divert(addr) => return Ok(Exit::TailCall(addr)),
+            },
             StackOp::Trap(msg) => return Ok(Exit::Trap(msg.clone())),
             StackOp::TailCall => {
                 let addr = pop!();

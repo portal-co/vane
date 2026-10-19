@@ -509,6 +509,13 @@ pub fn render_stack_to_wasm<'a>(
                 StackOp::Trap(_msg) => {
                     op!(Operator::Unreachable);
                 }
+                StackOp::Privileged { .. } => {
+                    // Not yet lowered to WASM (PLAN_TRACE_CUTOVER P2+): the
+                    // trace engine's interpreter handles privileged ops via
+                    // StackHost::privileged; the WASM JIT path doesn't emit
+                    // this yet (rv_emit doesn't produce it).
+                    op!(Operator::Unreachable);
+                }
                 StackOp::TailCall => {
                     // Stack: [addr: i64] — save it before pushing registers
                     // (which must precede it as `target_pc`, the last

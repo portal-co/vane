@@ -242,6 +242,14 @@ pub enum StackOp {
     ///
     /// JS: `console.log(msg)`  WASM: no-op
     Log(alloc::string::String),
+    /// Execute a raw privileged (or otherwise non-lowered) instruction inline
+    /// via the host's architecture handler (`StackHost::privileged`), keeping
+    /// the semantics in one place (the hart) instead of boundarying the trace
+    /// out to a separate step engine. `pc` is the instruction's guest address
+    /// (for trap reporting and the continue/divert decision). The trace
+    /// continues on `PrivOutcome::Continue` and ends (`TailCall`) on
+    /// `PrivOutcome::Divert`.
+    Privileged { pc: u64, raw: u32 },
 
     // ── Instruction integrity check ───────────────────────────────────────
     /// Verify that the bytes at `addr` in guest memory match `expected`.
