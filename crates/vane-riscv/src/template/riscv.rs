@@ -799,7 +799,10 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
             // PushImm/TailCall dispatch to next_pc; on Divert (trap return /
             // trap) the interpreter tail-calls the hart's pc directly,
             // skipping the fallthrough.
-            ops.push(StackOp::Privileged { pc: this.pc, raw: inst_code });
+            ops.push(StackOp::Privileged {
+                pc: this.pc,
+                raw: inst_code,
+            });
             ops.push(StackOp::PushImm(next_pc));
             ops.push(StackOp::TailCall);
         }

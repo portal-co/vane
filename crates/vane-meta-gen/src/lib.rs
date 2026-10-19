@@ -333,6 +333,18 @@ macro_rules! vane_meta {
                             host.flush_regs();
                             return Ok(host.pc);
                         }
+                        // Advance the instruction-time counter each trace so the
+                        // machine timer (mtime = itime * rate, hart.rs) keeps
+                        // running under the trace engine. step_one advances it
+                        // per-instruction; here per-trace is the cheap
+                        // approximation (PLAN_TRACE_CUTOVER: the privileged ops
+                        // no longer step through step_one, so they no longer
+                        // advance itime — without this the guest's timer spins).
+                        if hart_enabled0 {
+                            // Lock once (spin::Mutex is not reentrant).
+                            let mut lock = self.core.lock();
+                            lock.hart.itime = lock.hart.itime.wrapping_add(1);
+                        }
                         // Fetch (or compile-and-cache) the trace for pc.
                         // Neither the mutex nor the RefCell borrow is held
                         // across an await.

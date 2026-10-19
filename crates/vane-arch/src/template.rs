@@ -779,7 +779,10 @@ pub fn render_stack_to_js_with_names<N: HostMethodNames<VaneHostMethod>>(
                 // Not yet lowered to JS (PLAN_TRACE_CUTOVER P2+): the trace
                 // engine's interpreter handles privileged ops; rv_emit doesn't
                 // produce this for the JS path yet.
-                write!(f, "throw new TypeError(`StackOp::Privileged not lowered to JS`);")?;
+                write!(
+                    f,
+                    "throw new TypeError(`StackOp::Privileged not lowered to JS`);"
+                )?;
             }
             StackOp::TailCall => {
                 let addr = pop!();

@@ -249,7 +249,10 @@ pub enum StackOp {
     /// (for trap reporting and the continue/divert decision). The trace
     /// continues on `PrivOutcome::Continue` and ends (`TailCall`) on
     /// `PrivOutcome::Divert`.
-    Privileged { pc: u64, raw: u32 },
+    Privileged {
+        pc: u64,
+        raw: u32,
+    },
 
     // ── Instruction integrity check ───────────────────────────────────────
     /// Verify that the bytes at `addr` in guest memory match `expected`.
