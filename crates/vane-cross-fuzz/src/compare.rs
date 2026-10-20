@@ -86,15 +86,14 @@ pub fn diff_states_named(vane: &MachineState, unicorn: &MachineState) -> Vec<Fie
     let uc_nzcv = (unicorn.slots.get("a64:nzcv").copied().unwrap_or(0) >> 28) & 0xf;
     let vane_has_flags = vane.slots.keys().any(|k| k.starts_with("a64:nzcv:"));
     let uc_has_flags = unicorn.slots.contains_key("a64:nzcv");
-    if vane_has_flags || uc_has_flags {
-        if vane_nzcv != uc_nzcv {
+    if (vane_has_flags || uc_has_flags)
+        && vane_nzcv != uc_nzcv {
             diffs.push(FieldDiff {
                 name: alloc::string::String::from("nzcv"),
                 vane: vane_nzcv,
                 unicorn: uc_nzcv,
             });
         }
-    }
     // Slots present in either image but unequal (or missing on the Unicorn
     // side, where a missing slot reads as 0 via `MachineState::slot`).
     let mut names: Vec<&String> = vane.slots.keys().collect();
