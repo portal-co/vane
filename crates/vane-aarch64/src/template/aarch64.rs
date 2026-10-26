@@ -1194,24 +1194,27 @@ pub fn a64_emit(this: &TemplateJit<'_>) -> Vec<StackOp> {
         return alloc::vec![StackOp::PushImm(this.pc), StackOp::TailCall];
     }
 
-    let mut labels = this.labels.clone();
     let mut ops = Vec::new();
-    match labels.0.entry(this.pc) {
-        alloc::collections::btree_map::Entry::Vacant(entry) => {
+    match this.labels.lookup(this.pc) {
+        None => {
             let label = alloc::format!("a64_{:x}", this.pc);
-            entry.insert(vane_arch::template::Label {
-                ident_name: label.clone(),
-                index: this.depth,
-            });
+            let labels = this.labels.insert(
+                this.pc,
+                vane_arch::template::Label {
+                    ident_name: label.clone(),
+                    index: this.depth,
+                },
+            );
             ops.push(StackOp::LoopBegin { label });
             ops.extend(a64_body(this, labels, this.depth + 1));
             ops.push(StackOp::LoopEnd);
         }
-        alloc::collections::btree_map::Entry::Occupied(entry) => {
-            let label = entry.get().clone();
+        Some(lbl) => {
+            let relative_depth = this.depth - lbl.index;
+            let label = lbl.ident_name.clone();
             ops.push(StackOp::Br {
-                relative_depth: this.depth - label.index,
-                label: label.ident_name,
+                relative_depth,
+                label,
             });
         }
     }

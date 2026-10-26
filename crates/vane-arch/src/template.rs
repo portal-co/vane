@@ -111,8 +111,47 @@ pub struct Label {
 }
 
 /// Map from guest PC to the loop label opened at that PC.
+///
+/// Implemented as a persistent (shared-structure) cons-list rather than a
+/// `BTreeMap`: `Clone` is O(1) (an `Rc` bump) and `insert` prepends (O(1)),
+/// so cloning a label set for each inlined block or branch arm no longer
+/// copies the whole map (which made emission O(N²) in the emit-tree size).
+/// Lookups walk the chain, which is bounded by the inline depth
+/// (≤ `MAX_INLINE`), so they stay cheap in practice.
 #[derive(Clone, Default)]
-pub struct Labels(pub BTreeMap<u64, Label>);
+pub struct Labels(Option<alloc::rc::Rc<LabelNode>>);
+
+/// One node in the [`Labels`] persistent chain.
+struct LabelNode {
+    pc: u64,
+    label: Label,
+    parent: Labels,
+}
+
+impl Labels {
+    /// Look up the label opened at `pc` (walks the chain from most-recent).
+    pub fn lookup(&self, pc: u64) -> Option<&Label> {
+        let mut cur = self;
+        while let Some(node) = cur.0.as_deref() {
+            if node.pc == pc {
+                return Some(&node.label);
+            }
+            cur = &node.parent;
+        }
+        None
+    }
+
+    /// Return a new set with `pc -> label` prepended, sharing the existing
+    /// chain (so branch-arm forks see the same ancestor labels).
+    #[must_use]
+    pub fn insert(&self, pc: u64, label: Label) -> Labels {
+        Labels(Some(alloc::rc::Rc::new(LabelNode {
+            pc,
+            label,
+            parent: self.clone(),
+        })))
+    }
+}
 
 #[derive(Clone, Copy)]
 pub struct Params<'a> {
@@ -265,22 +304,23 @@ impl<'b> TemplateJit<'b> {
         // `gen_blocks` feature gate fires at parse time, which cfg-stripping
         // cannot hide, and its presence in this file broke stable builds of
         // the interpreter-only path (spday-exec).
-        let mut labels = self.labels.clone();
-        let out: alloc::vec::Vec<O> = match labels.0.entry(self.pc) {
-            alloc::collections::btree_map::Entry::Vacant(vacant_entry) => {
+        let out: alloc::vec::Vec<O> = match self.labels.lookup(self.pc) {
+            None => {
                 let label_name = alloc::format!("x{}", self.pc);
-                vacant_entry.insert(Label {
-                    ident_name: label_name.clone(),
-                    index: self.depth,
-                });
+                let labels = self.labels.insert(
+                    self.pc,
+                    Label {
+                        ident_name: label_name.clone(),
+                        index: self.depth,
+                    },
+                );
                 let nd = self.depth + 1;
                 let i = go(labels, nd);
                 O::r#loop(i, label_name).collect()
             }
-            alloc::collections::btree_map::Entry::Occupied(occupied_entry) => {
-                let Label { index, ident_name } = occupied_entry.get().clone();
-                let relative_depth = self.depth - index;
-                O::br(relative_depth, ident_name).collect()
+            Some(lbl) => {
+                let relative_depth = self.depth - lbl.index;
+                O::br(relative_depth, lbl.ident_name.clone()).collect()
             }
         };
         out.into_iter()

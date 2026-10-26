@@ -151,23 +151,26 @@ fn emit_block(
         out_ops.push(StackOp::TailCall);
         return;
     }
-    let mut labels = labels;
-    match labels.0.entry(pc) {
-        alloc::collections::btree_map::Entry::Occupied(e) => {
-            let lbl = e.get().clone();
+    match labels.lookup(pc) {
+        Some(lbl) => {
+            let relative_depth = depth - lbl.index;
+            let label = lbl.ident_name.clone();
             out_ops.push(StackOp::Br {
-                relative_depth: depth - lbl.index,
-                label: lbl.ident_name,
+                relative_depth,
+                label,
             });
         }
-        alloc::collections::btree_map::Entry::Vacant(e) => {
+        None => {
             let label = alloc::format!("x{}", pc);
-            e.insert(Label {
-                ident_name: label.clone(),
-                index: depth,
-            });
+            let body_labels = labels.insert(
+                pc,
+                Label {
+                    ident_name: label.clone(),
+                    index: depth,
+                },
+            );
             out_ops.push(StackOp::LoopBegin { label });
-            rv_body(params, pc, labels, depth + 1, out_ops, out_work);
+            rv_body(params, pc, body_labels, depth + 1, out_ops, out_work);
             // LoopEnd closes this block *after* its continuations.
             out_work.push(Work::Op(StackOp::LoopEnd));
         }
@@ -205,7 +208,15 @@ pub fn rv_emit(this: &TemplateJit<'_>) -> alloc::vec::Vec<StackOp> {
             Work::Emit { pc, labels, depth } => {
                 out_ops.clear();
                 out_work.clear();
-                emit_block(&this.params, pc, labels, depth, total_ops, &mut out_ops, &mut out_work);
+                emit_block(
+                    &this.params,
+                    pc,
+                    labels,
+                    depth,
+                    total_ops,
+                    &mut out_ops,
+                    &mut out_work,
+                );
                 total_ops += out_ops.len();
                 result.append(&mut out_ops);
                 for wi in out_work.drain(..).rev() {
@@ -225,7 +236,6 @@ fn rv_body(
     ops: &mut alloc::vec::Vec<StackOp>,
     cont: &mut alloc::vec::Vec<Work>,
 ) {
-
     // ── Hook boundary (vane-arch::hooks) ─────────────────────────────────────
     // A hooked address must start its own trace: cut the inlining chain
     // here so the dispatch loop observes the arrival. The trace root is
@@ -282,10 +292,7 @@ fn rv_body(
                 // raises the in-guest illegal-instruction trap) rather than
                 // fatal-exiting the interpreter. An all-zero / unmapped fetch
                 // is a guest fault the kernel handles (or panics on) in-guest.
-                ops.push(StackOp::Privileged {
-                    pc: pc,
-                    raw: inst_code,
-                });
+                ops.push(StackOp::Privileged { pc, raw: inst_code });
                 // On the (always-taken) Divert the interpreter tail-calls the
                 // trap handler directly; the PushImm fallthrough is dead.
                 ops.push(StackOp::PushImm(pc));
@@ -334,19 +341,18 @@ fn rv_body(
     };
 
     // Shorthand: emit a conditional branch (taken = branch_target, not-taken = next_pc).
-    let branch =
-        |ops: &mut alloc::vec::Vec<StackOp>,
-         cont: &mut alloc::vec::Vec<Work>,
-         cmp: StackOp,
-         branch_target: u64,
-         labels: Labels| {
-            ops.push(cmp);
-            ops.push(StackOp::IfBegin);
-            emit_next(cont, branch_target, labels.clone());
-            cont.push(Work::Op(StackOp::IfElse));
-            emit_next(cont, next_pc, labels);
-            cont.push(Work::Op(StackOp::IfEnd));
-        };
+    let branch = |ops: &mut alloc::vec::Vec<StackOp>,
+                  cont: &mut alloc::vec::Vec<Work>,
+                  cmp: StackOp,
+                  branch_target: u64,
+                  labels: Labels| {
+        ops.push(cmp);
+        ops.push(StackOp::IfBegin);
+        emit_next(cont, branch_target, labels.clone());
+        cont.push(Work::Op(StackOp::IfElse));
+        emit_next(cont, next_pc, labels);
+        cont.push(Work::Op(StackOp::IfEnd));
+    };
 
     // `rv-asm`'s B-type/J-type immediate accessors (`imm_b`/`imm_j`, and
     // their compressed counterparts feeding Beq/Bne/.../Jal below) already
@@ -901,10 +907,7 @@ fn rv_body(
             // PushImm/TailCall dispatch to next_pc; on Divert (trap return /
             // trap) the interpreter tail-calls the hart's pc directly,
             // skipping the fallthrough.
-            ops.push(StackOp::Privileged {
-                pc: pc,
-                raw: inst_code,
-            });
+            ops.push(StackOp::Privileged { pc, raw: inst_code });
             ops.push(StackOp::PushImm(next_pc));
             ops.push(StackOp::TailCall);
         }
@@ -979,10 +982,7 @@ fn rv_body(
         {
             // Inline FP via the hart (execute_privileged): fp_load!/fp_store!
             // for the memory ops, exec_fp for compute. Ends the trace.
-            ops.push(StackOp::Privileged {
-                pc: pc,
-                raw: inst_code,
-            });
+            ops.push(StackOp::Privileged { pc, raw: inst_code });
             ops.push(StackOp::PushImm(next_pc));
             ops.push(StackOp::TailCall);
         }
@@ -998,7 +998,6 @@ fn rv_body(
             }
         }
     }
-
 }
 
 // ── Target impls ─────────────────────────────────────────────────────────────
