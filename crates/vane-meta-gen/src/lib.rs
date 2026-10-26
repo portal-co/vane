@@ -33,13 +33,13 @@ macro_rules! vane_meta {
         #[derive(Clone)]
         pub struct $t {
             _handle: (),
-            core: $crate::alloc::rc::Rc<$crate::spin::Mutex<$c>>,
+            core: $crate::vane_arch::Shared<$crate::spin::Mutex<$c>>,
         }
         #[cfg(not(feature = "js-host"))]
         #[derive(Clone)]
         pub struct $t {
             _handle: (),
-            core: $crate::alloc::rc::Rc<$crate::spin::Mutex<$c>>,
+            core: $crate::vane_arch::Shared<$crate::spin::Mutex<$c>>,
         }
         impl $crate::vane_arch::JitCtx for $t {
             fn bytes(&self, a: u64) -> $crate::alloc::boxed::Box<dyn Iterator<Item = u8> + '_> {
@@ -106,7 +106,7 @@ macro_rules! vane_meta {
             trace_cache: $crate::core::cell::RefCell<
                 $crate::alloc::collections::BTreeMap<
                     u64,
-                    $crate::alloc::rc::Rc<$crate::alloc::vec::Vec<$crate::vane_arch::StackOp>>,
+                    $crate::vane_arch::Shared<$crate::alloc::vec::Vec<$crate::vane_arch::StackOp>>,
                 >,
             >,
             /// Compiled-trace registry (Weval/JIT/binary-patcher artifacts,
@@ -142,7 +142,7 @@ macro_rules! vane_meta {
             /// Hook system (vane-arch::hooks): observation points at real
             /// guest symbol locations. `Rc` so the trace compiler can hold
             /// the boundary predicate without keeping the core locked.
-            hooks: $crate::alloc::rc::Rc<$crate::vane_arch::hooks::HookSet>,
+            hooks: $crate::vane_arch::Shared<$crate::vane_arch::hooks::HookSet>,
             /// Recorded hook firings, oldest first; drained by
             /// `take_hook_events`.
             hook_events: $crate::alloc::vec::Vec<$crate::vane_arch::hooks::HookEvent>,
@@ -511,7 +511,7 @@ macro_rules! vane_meta {
                                 depth: 0,
                             };
                             let _t_compile = _prof.then(std::time::Instant::now);
-                            let ops = $crate::alloc::rc::Rc::new($emit(&jit));
+                            let ops = $crate::vane_arch::shared_new($emit(&jit));
                             if let Some(t) = _t_compile {
                                 $crate::vane_arch::PROF_COMPILE_NS
                                     .fetch_add(t.elapsed().as_nanos() as u64, core::sync::atomic::Ordering::Relaxed);
@@ -665,7 +665,7 @@ macro_rules! vane_meta {
                 /// traces may span addresses that are boundaries now.
                 pub fn install_hooks(&self, hooks: $crate::vane_arch::hooks::HookSet) {
                     let mut lock = self.core.lock();
-                    lock.hooks = $crate::alloc::rc::Rc::new(hooks);
+                    lock.hooks = $crate::vane_arch::shared_new(hooks);
                     lock.trace_cache.borrow_mut().clear();
                     lock.compiled.borrow_mut().clear();
                     lock.code_dirty = false;

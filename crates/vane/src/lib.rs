@@ -56,6 +56,16 @@ vane_meta_gen::vane_meta!(
     Reactor::privileged_step
 );
 
+// Phase B (parallel trace compilation) shares the `Core` between the
+// interpreter thread and a background compile thread, so the Reactor must be
+// `Send + Sync` (its `Shared<spin::Mutex<Core>>` is `Arc` on native). This
+// assertion is the step-1 gate: it fails to compile if any Core field is
+// still `!Send` (e.g. an `Rc`).
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Reactor>();
+};
+
 /// wasm-bindgen calls this once when the module is instantiated.
 /// Installs `console_error_panic_hook` so Rust panics surface as readable
 /// `console.error` messages (with the panic location/message) instead of an
@@ -154,7 +164,7 @@ impl Reactor {
     pub fn new_with_mem(mem: vane_riscv::Mem) -> Self {
         Reactor {
             _handle: (),
-            core: Rc::new(spin::Mutex::new(Core {
+            core: vane_arch::shared_new(spin::Mutex::new(Core {
                 mem,
                 #[cfg(feature = "js-host")]
                 state: OnceCell::new(),
@@ -171,7 +181,7 @@ impl Reactor {
                 #[cfg(not(feature = "js-host"))]
                 regs: [0; 32],
                 hart: Default::default(),
-                hooks: Rc::new(vane_arch::hooks::HookSet::new()),
+                hooks: vane_arch::shared_new(vane_arch::hooks::HookSet::new()),
                 hook_events: Vec::new(),
                 pause_on_hook: false,
                 skip_hook_pause_once: None,

@@ -1114,18 +1114,35 @@ pub async fn interpret_async(ops: &[StackOp], host: &mut impl AsyncStackHost) ->
 /// backend (PLAN_LINUX_WASM.md §4.2). It is synchronous: a native/JIT/Weval
 /// artifact is a plain function pointer, and the interpreter fallback never
 /// actually pends for a local host.
-#[cfg(feature = "async-host")]
+#[cfg(all(feature = "async-host", target_has_atomic = "ptr"))]
+pub type TraceFn<R> =
+    alloc::sync::Arc<dyn Fn(&mut LocalStackHost<R>) -> Exit + Send + Sync>;
+/// Single-threaded (atomic-less wasm) build: no `Send + Sync` needed.
+#[cfg(all(feature = "async-host", not(target_has_atomic = "ptr")))]
 pub type TraceFn<R> = alloc::rc::Rc<dyn Fn(&mut LocalStackHost<R>) -> Exit>;
 
 /// The default trace compiler: wrap the fused interpreter in a callable. This
 /// is the always-available producer; Weval/JIT/patcher backends register
 /// their own callables instead (same registry, faster artifacts).
-#[cfg(feature = "async-host")]
-pub fn compile_trace<R: LocalReactor>(ops: alloc::rc::Rc<alloc::vec::Vec<StackOp>>) -> TraceFn<R> {
-    alloc::rc::Rc::new(move |host: &mut LocalStackHost<R>| {
+#[cfg(all(feature = "async-host", target_has_atomic = "ptr"))]
+pub fn compile_trace<R: LocalReactor>(
+    ops: crate::Shared<alloc::vec::Vec<StackOp>>,
+) -> TraceFn<R> {
+    alloc::sync::Arc::new(move |host: &mut LocalStackHost<R>| {
         // The local host never pends, so this completes in one poll. The op
         // budget matters: a looping trace must still yield to the dispatch
         // loop (interrupt delivery, fuel) via Exit::TailCall.
+        let mut fuel: u64 = 4096;
+        block_on_ready(interpret_async_fueled(&ops, host, Some(&mut fuel)))
+            .expect("a fuel budget yields Exit::TailCall, not FuelExhausted")
+    })
+}
+/// Single-threaded (atomic-less wasm) build.
+#[cfg(all(feature = "async-host", not(target_has_atomic = "ptr")))]
+pub fn compile_trace<R: LocalReactor>(
+    ops: alloc::rc::Rc<alloc::vec::Vec<StackOp>>,
+) -> TraceFn<R> {
+    alloc::rc::Rc::new(move |host: &mut LocalStackHost<R>| {
         let mut fuel: u64 = 4096;
         block_on_ready(interpret_async_fueled(&ops, host, Some(&mut fuel)))
             .expect("a fuel budget yields Exit::TailCall, not FuelExhausted")
@@ -2302,7 +2319,6 @@ fn find_if_end_p(
     }
 }
 
-
 fn sext32(v: u32) -> u64 {
     v as i32 as i64 as u64
 }
@@ -2831,21 +2847,24 @@ mod async_tests {
         // Clone, so the trace is built fresh for each run.)
         fn make_trace() -> Vec<StackOp> {
             vec![
-                StackOp::LoopBegin { label: "L".into() },   // 0
-                StackOp::LoadReg(1),                        // 1
-                StackOp::IfBegin,                           // 2
-                StackOp::LoadReg(1),                        // 3
-                StackOp::PushImm(-1i64 as u64),             // 4
-                StackOp::Add64,                             // 5
-                StackOp::StoreReg(1),                       // 6
-                StackOp::Br { relative_depth: 1, label: "L".into() }, // 7
-                StackOp::IfElse,                            // 8
-                StackOp::PushImm(99),                       // 9
-                StackOp::StoreReg(3),                       // 10
-                StackOp::IfEnd,                             // 11
-                StackOp::LoopEnd,                           // 12
-                StackOp::PushImm(42),                       // 13
-                StackOp::TailCall,                          // 14
+                StackOp::LoopBegin { label: "L".into() }, // 0
+                StackOp::LoadReg(1),                      // 1
+                StackOp::IfBegin,                         // 2
+                StackOp::LoadReg(1),                      // 3
+                StackOp::PushImm(-1i64 as u64),           // 4
+                StackOp::Add64,                           // 5
+                StackOp::StoreReg(1),                     // 6
+                StackOp::Br {
+                    relative_depth: 1,
+                    label: "L".into(),
+                }, // 7
+                StackOp::IfElse,                          // 8
+                StackOp::PushImm(99),                     // 9
+                StackOp::StoreReg(3),                     // 10
+                StackOp::IfEnd,                           // 11
+                StackOp::LoopEnd,                         // 12
+                StackOp::PushImm(42),                     // 13
+                StackOp::TailCall,                        // 14
             ]
         }
         // Eager interpreter on the materialized trace.
@@ -2858,7 +2877,12 @@ mod async_tests {
         h2.regs[1] = 3;
         let mut buf = Vec::new();
         let mut producer = make_trace().into_iter();
-        let e2 = block_on(interpret_async_producing(&mut producer, &mut buf, &mut h2, None));
+        let e2 = block_on(interpret_async_producing(
+            &mut producer,
+            &mut buf,
+            &mut h2,
+            None,
+        ));
         assert!(matches!(e1, Ok(Exit::TailCall(42))));
         assert!(matches!(e2, Ok(Exit::TailCall(42))));
         assert_eq!(h1.regs, h2.regs);

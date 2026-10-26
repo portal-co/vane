@@ -18,6 +18,31 @@ macro_rules! gen_block {
 use alloc::{boxed::Box, collections::btree_map::BTreeMap};
 #[doc(hidden)]
 pub use core;
+
+/// Thread-shared ownership for the pieces of the trace engine a parallel
+/// compile thread shares with the interpreter: `Arc` where pointer atomics
+/// are available (native hosts), `Rc` otherwise (single-threaded wasm). On a
+/// single-threaded build `Shared` is `Rc`, so the default interpreter path is
+/// unchanged; on native it is `Arc`, letting a background compile thread hold
+/// a `Shared<spin::Mutex<Core>>` alongside the interpreter thread.
+#[cfg(target_has_atomic = "ptr")]
+pub type Shared<T> = alloc::sync::Arc<T>;
+/// See the `Arc` case (single-threaded targets without pointer atomics).
+#[cfg(not(target_has_atomic = "ptr"))]
+pub type Shared<T> = alloc::rc::Rc<T>;
+
+/// Construct a [`Shared`] (Arc on native, Rc on atomic-less targets). A type
+/// alias can't be constructed by name, so this helper abstracts the
+/// constructor for macro-generated code that must build on both.
+#[cfg(target_has_atomic = "ptr")]
+pub fn shared_new<T>(v: T) -> Shared<T> {
+    alloc::sync::Arc::new(v)
+}
+/// See the atomic case.
+#[cfg(not(target_has_atomic = "ptr"))]
+pub fn shared_new<T>(v: T) -> Shared<T> {
+    alloc::rc::Rc::new(v)
+}
 use core::fmt::Display;
 use core::fmt::Formatter;
 use os_page::GuestMemory as _;
