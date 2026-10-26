@@ -463,6 +463,14 @@ impl Reactor {
             Ok(a) => a,
             Err(e) => {
                 if hart_enabled {
+                    if std::env::var("VANE_DEBUG_DECODE").is_ok() {
+                        let present = mem.pages.contains_key(&(fetch_pa >> 16));
+                        let b0 = (0..4)
+                            .map(|i| mem.read_byte(fetch_pa.wrapping_add(i)))
+                            .collect::<Vec<_>>();
+                        eprintln!("STEP-DECODE-FAIL pc={pc:#x} va={pc:#x} fetch_pa={fetch_pa:#x} present={present} bytes={b0:02x?} tlb_hit={}",
+                            hart.tlb_contains(pc));
+                    }
                     // Illegal/unrecognized instruction → trap with the raw
                     // encoding in xtval.
                     let t = Trap::exception(CAUSE_ILLEGAL, code as u64);
@@ -1403,6 +1411,21 @@ impl Reactor {
     ) -> vane_arch::interp::PrivOutcome {
         let mut guard = self.core.lock();
         let core = &mut *guard;
+        // Debug: a Privileged op carrying an undecodable instruction (a zero
+        // fetch baked into a trace at compile time). Record the translated
+        // pa + residency to distinguish a fetch/translation bug from a wild
+        // guest pc (state corruption).
+        if std::env::var("VANE_DEBUG_DECODE").is_ok()
+            && Inst::decode(raw, Xlen::Rv64).is_err()
+        {
+            let pa = core.hart.translate_exec(&mut core.mem, pc);
+            let present = pa.ok().map(|p| core.mem.pages.contains_key(&(p >> 16)));
+            let first = pa.ok().map(|p| {
+                let base = p & !0xffff;
+                (0..8).map(|i| core.mem.read_byte(base + i)).collect::<Vec<_>>()
+            });
+            eprintln!("DECODE-FAIL-RT pc={pc:#x} pa={pa:?} present={present:?} page0={first:02x?}");
+        }
         let r =
             vane_riscv::privileged::execute_privileged(&mut core.hart, &mut core.mem, pc, raw, regs);
         if r.clear_traces {

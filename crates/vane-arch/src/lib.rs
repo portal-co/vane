@@ -542,6 +542,16 @@ pub trait JitCtx {
     fn bytes4(&self, a: u64) -> [u8; 4] {
         core::array::from_fn(|i| self.byte(a + i as u64))
     }
+
+    /// Fetch 4 instruction bytes at `a`, or `None` if the fetch *faults*
+    /// (Sv39 page fault). The default infallibly returns `bytes4` (backends
+    /// without translation). Trace emitters must stop inlining at a `None`
+    /// (boundary) so the runtime re-dispatch raises the in-guest page fault
+    /// — baking a swallowed-fault read into a trace makes a demand-paged
+    /// page execute as zeros instead of faulting it in.
+    fn fetch4(&self, a: u64) -> Option<[u8; 4]> {
+        Some(self.bytes4(a))
+    }
 }
 
 impl JitCtx for Mem {

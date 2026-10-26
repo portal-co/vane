@@ -618,6 +618,14 @@ impl HartState {
     }
 
     /// `sfence.vma`: flush TLB entries matching vaddr/asid (x0 = all).
+    /// Debug helper (VANE_DEBUG_DECODE): is there a TLB entry covering
+    /// `vaddr` under the current asid?
+    pub fn tlb_contains(&self, vaddr: u64) -> bool {
+        let asid = (self.satp >> 44) & 0xFFFF;
+        let vpn = vaddr >> 12;
+        self.tlb.contains_key(&(vpn, asid))
+    }
+
     pub fn sfence_vma(&mut self, vaddr: u64, asid: u64) {
         let all_addr = vaddr == 0;
         let all_asid = asid == 0;

@@ -175,8 +175,20 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
 
     // ── Instruction fetch & integrity check ──────────────────────────────────
     // Instruction fetch: one lock + one translation for the whole word
-    // (JitCtx::bytes4), rather than 4 separate lock+translate round-trips.
-    let inst_bytes: [u8; 4] = this.params.react.bytes4(this.pc);
+    // (JitCtx::fetch4). A fetch FAULT (a not-yet-populated demand-paged
+    // page) stops inlining here: boundary to this pc so the runtime
+    // re-dispatch steps it and raises the in-guest page fault (which the
+    // kernel uses to populate the page), rather than baking a swallowed
+    // zero/garbage read into the trace (which would execute as an illegal
+    // instruction the kernel cannot recover).
+    let inst_bytes: [u8; 4] = match this.params.react.fetch4(this.pc) {
+        Some(b) => b,
+        None => {
+            ops.push(StackOp::PushImm(this.pc));
+            ops.push(StackOp::TailCall);
+            return ops;
+        }
+    };
     ops.push(StackOp::CheckCode {
         addr: this.pc,
         expected: Box::from(inst_bytes),

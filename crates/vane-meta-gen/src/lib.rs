@@ -58,10 +58,22 @@ macro_rules! vane_meta {
                 // (the hot path in trace compilation). A 4-byte word may
                 // straddle a page boundary, so re-translate per byte only
                 // when the word crosses into the next page.
+                match self.fetch4(a) {
+                    Some(b) => b,
+                    // A faulting fetch has no bytes; return zeros (the
+                    // emitter should have used fetch4 and boundary'd, so
+                    // this is a defensive fallback).
+                    None => [0; 4],
+                }
+            }
+            fn fetch4(&self, a: u64) -> Option<[u8; 4]> {
+                // Returns None when the fetch faults (a not-yet-populated
+                // demand-paged page): the emitter boundaries there so the
+                // runtime re-dispatch raises the in-guest page fault.
                 let mut lock = self.core.lock();
                 let lock = &mut *lock;
-                let pa0 = lock.hart.translate_exec(&mut lock.mem, a).unwrap_or(a);
-                core::array::from_fn(|i| {
+                let pa0 = lock.hart.translate_exec(&mut lock.mem, a).ok()?;
+                Some(core::array::from_fn(|i| {
                     let b = a.wrapping_add(i as u64);
                     let pa = if (a & 0xFFF) + i as u64 > 0xFFF {
                         lock.hart.translate_exec(&mut lock.mem, b).unwrap_or(b)
@@ -69,7 +81,7 @@ macro_rules! vane_meta {
                         pa0.wrapping_add(i as u64)
                     };
                     lock.mem.read_byte(pa)
-                })
+                }))
             }
         }
         struct $c {
