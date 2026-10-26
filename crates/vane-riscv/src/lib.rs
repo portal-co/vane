@@ -1,4 +1,9 @@
 #![no_std]
+// gen blocks power the lazy, iterative trace emitter (`rv_emit_ops`); gated
+// behind the `gen-blocks` cargo feature (nightly-only) so the stable
+// interpreter build (spday's plain-Rust twin) still compiles the eager
+// worklist fallback (`rv_emit`).
+#![cfg_attr(feature = "gen-blocks", feature(gen_blocks))]
 extern crate alloc;
 
 // Re-export everything from vane-arch so downstream users get the full stack

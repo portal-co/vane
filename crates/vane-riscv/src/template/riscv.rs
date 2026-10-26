@@ -104,73 +104,140 @@ fn rv_float_ops(word: u32) -> Option<alloc::vec::Vec<StackOp>> {
     Some(ops)
 }
 
-pub fn rv_emit(this: &TemplateJit<'_>) -> alloc::vec::Vec<StackOp> {
-    // If this PC is already compiled, jump straight to the cached block.
-    if (this.params.trial)(this.pc) == Heat::Cached {
-        return alloc::vec![StackOp::PushImm(this.pc), StackOp::TailCall];
-    }
+// Cap on the fallthrough inline-chain length (per work item's depth).
+// rv_emit inlines reachable code; without a bound, a single trace can inline
+// a huge region. Capping the chain bounds each trace's compile cost; the
+// dispatch loop follows the emitted TailCall to the next trace.
+const MAX_INLINE: u32 = 128;
+// Cap on the total ops emitted into one trace. `branch` inlines BOTH arms,
+// so the emit tree grows exponentially in branch count: without a global
+// bound, one trace can reach ~1M ops. The interpreter's per-trace op budget
+// (4096) bounds *dynamic* execution, so static ops past it can never run in
+// one dispatch anyway.
+const MAX_OPS: usize = 2048;
 
-    // Open (or back-branch to) the loop for this PC via the label map.
-    let mut labels = this.labels.clone();
-    let mut ops = alloc::vec::Vec::new();
-
-    match labels.0.entry(this.pc) {
-        alloc::collections::btree_map::Entry::Vacant(e) => {
-            let label = alloc::format!("x{}", this.pc);
-            e.insert(Label {
-                ident_name: label.clone(),
-                index: this.depth,
-            });
-            let nd = this.depth + 1;
-            ops.push(StackOp::LoopBegin { label });
-            ops.extend(rv_body(this, labels, nd));
-            ops.push(StackOp::LoopEnd);
-        }
-        alloc::collections::btree_map::Entry::Occupied(e) => {
-            let lbl: Label = e.get().clone();
-            let relative_depth = this.depth - lbl.index;
-            ops.push(StackOp::Br {
-                relative_depth,
-                label: lbl.ident_name,
-            });
-        }
-    }
-    ops
+/// A unit of pending trace emission for the iterative `rv_emit_ops`: either
+/// inline the block at `pc` (an [`Emit`]), or yield a literal [`StackOp`]
+/// (an [`Op`] — a control-flow marker such as `IfElse`/`IfEnd`/`LoopEnd`
+/// that follows a continuation in emission order).
+enum Work {
+    Emit { pc: u64, labels: Labels, depth: u32 },
+    Op(StackOp),
 }
 
-/// Emit a helper to jump to `pc` using the current labels/depth.
-#[inline]
-fn emit_to(
-    ops: &mut alloc::vec::Vec<StackOp>,
-    params: Params<'_>,
+/// Emit one block of the trace rooted at `pc`: the cached/cap checks, the
+/// `LoopBegin`/`Br`, and (for a fresh block) the instruction's ops (→
+/// `out_ops`) plus its continuation work items (→ `out_work`, in emission
+/// order, the closing `LoopEnd` last). Shared by the eager (`rv_emit`) and
+/// lazy (`rv_emit_ops`) drivers so both emit byte-identical traces.
+fn emit_block(
+    params: &Params<'_>,
     pc: u64,
     labels: Labels,
     depth: u32,
+    total_ops: usize,
+    out_ops: &mut alloc::vec::Vec<StackOp>,
+    out_work: &mut alloc::vec::Vec<Work>,
 ) {
-    let jit = TemplateJit {
-        pc,
-        labels,
-        depth,
-        params,
-    };
-    ops.extend(rv_emit(&jit));
+    // Already compiled? Jump straight to the cached block.
+    if (params.trial)(pc) == Heat::Cached {
+        out_ops.push(StackOp::PushImm(pc));
+        out_ops.push(StackOp::TailCall);
+        return;
+    }
+    // Inline-chain caps: depth (per chain) and total ops.
+    if depth >= MAX_INLINE || total_ops >= MAX_OPS {
+        out_ops.push(StackOp::PushImm(pc));
+        out_ops.push(StackOp::TailCall);
+        return;
+    }
+    let mut labels = labels;
+    match labels.0.entry(pc) {
+        alloc::collections::btree_map::Entry::Occupied(e) => {
+            let lbl = e.get().clone();
+            out_ops.push(StackOp::Br {
+                relative_depth: depth - lbl.index,
+                label: lbl.ident_name,
+            });
+        }
+        alloc::collections::btree_map::Entry::Vacant(e) => {
+            let label = alloc::format!("x{}", pc);
+            e.insert(Label {
+                ident_name: label.clone(),
+                index: depth,
+            });
+            out_ops.push(StackOp::LoopBegin { label });
+            rv_body(params, pc, labels, depth + 1, out_ops, out_work);
+            // LoopEnd closes this block *after* its continuations.
+            out_work.push(Work::Op(StackOp::LoopEnd));
+        }
+    }
 }
 
-fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<StackOp> {
-    let mut ops: alloc::vec::Vec<StackOp> = alloc::vec::Vec::new();
+// The lazy, streaming emitter `rv_emit_ops` lives in `gen_stream` (a `gen`
+// block). `gen`/`yield` syntax is a parse-time nightly gate that `#[cfg]`
+// cannot hide, so it must live in a file that is only *read* when the
+// `gen-blocks` feature is on — hence the cfg-gated `mod`.
+#[cfg(feature = "gen-blocks")]
+pub mod gen_stream;
+#[cfg(feature = "gen-blocks")]
+pub use gen_stream::rv_emit_ops;
+
+/// Emit the trace rooted at `this.pc` as a materialized `Vec<StackOp>` (the
+/// cached form the dispatch loop interprets). Iterative worklist driver over
+/// [`emit_block`] (no recursion; stable — no `gen`-block requirement).
+pub fn rv_emit(this: &TemplateJit<'_>) -> alloc::vec::Vec<StackOp> {
+    let mut result = alloc::vec::Vec::new();
+    let mut work: alloc::vec::Vec<Work> = alloc::vec![Work::Emit {
+        pc: this.pc,
+        labels: this.labels.clone(),
+        depth: this.depth,
+    }];
+    let mut total_ops = 0usize;
+    let mut out_ops: alloc::vec::Vec<StackOp> = alloc::vec::Vec::new();
+    let mut out_work: alloc::vec::Vec<Work> = alloc::vec::Vec::new();
+    while let Some(w) = work.pop() {
+        match w {
+            Work::Op(op) => {
+                total_ops += 1;
+                result.push(op);
+            }
+            Work::Emit { pc, labels, depth } => {
+                out_ops.clear();
+                out_work.clear();
+                emit_block(&this.params, pc, labels, depth, total_ops, &mut out_ops, &mut out_work);
+                total_ops += out_ops.len();
+                result.append(&mut out_ops);
+                for wi in out_work.drain(..).rev() {
+                    work.push(wi);
+                }
+            }
+        }
+    }
+    result
+}
+
+fn rv_body(
+    params: &Params<'_>,
+    pc: u64,
+    labels: Labels,
+    nd: u32,
+    ops: &mut alloc::vec::Vec<StackOp>,
+    cont: &mut alloc::vec::Vec<Work>,
+) {
 
     // ── Hook boundary (vane-arch::hooks) ─────────────────────────────────────
     // A hooked address must start its own trace: cut the inlining chain
     // here so the dispatch loop observes the arrival. The trace root is
     // exempt — it is already a trace start (checking it would loop
     // forever: the boundary trace would re-trigger the predicate).
-    if this.pc != this.params.root
-        && let Some(boundaries) = this.params.boundaries
-        && boundaries(this.pc)
+    if pc != params.root
+        && let Some(boundaries) = params.boundaries
+        && boundaries(pc)
     {
-        ops.push(StackOp::PushImm(this.pc));
+        ops.push(StackOp::PushImm(pc));
         ops.push(StackOp::TailCall);
-        return ops;
+        return;
     }
 
     // ── Instruction fetch & integrity check ──────────────────────────────────
@@ -181,105 +248,104 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
     // kernel uses to populate the page), rather than baking a swallowed
     // zero/garbage read into the trace (which would execute as an illegal
     // instruction the kernel cannot recover).
-    let inst_bytes: [u8; 4] = match this.params.react.fetch4(this.pc) {
+    let inst_bytes: [u8; 4] = match params.react.fetch4(pc) {
         Some(b) => b,
         None => {
-            ops.push(StackOp::PushImm(this.pc));
+            ops.push(StackOp::PushImm(pc));
             ops.push(StackOp::TailCall);
-            return ops;
+            return;
         }
     };
     ops.push(StackOp::CheckCode {
-        addr: this.pc,
+        addr: pc,
         expected: Box::from(inst_bytes),
-        miss_label: alloc::format!("{}", this.params.root),
+        miss_label: alloc::format!("{}", params.root),
     });
 
     let inst_code = u32::from_le_bytes(inst_bytes);
     if let Some(mut fp_ops) = rv_float_ops(inst_code) {
         ops.append(&mut fp_ops);
-        emit_to(&mut ops, this.params, this.pc + 4, labels, nd);
-        return ops;
+        // (emit_next isn't defined yet at this point in the fn; push the
+        // fallthrough continuation directly.)
+        cont.push(Work::Emit {
+            pc: pc + 4,
+            labels,
+            depth: nd,
+        });
+        return;
     }
     let (inst, compressed) = match Inst::decode(inst_code, Xlen::Rv64) {
         Err(e) => {
-            if this.params.flags.privileged {
+            if params.flags.privileged {
                 // Decode failure under the privileged architecture: route
                 // through the hart (StackOp::Privileged → execute_privileged
                 // raises the in-guest illegal-instruction trap) rather than
                 // fatal-exiting the interpreter. An all-zero / unmapped fetch
                 // is a guest fault the kernel handles (or panics on) in-guest.
                 ops.push(StackOp::Privileged {
-                    pc: this.pc,
+                    pc: pc,
                     raw: inst_code,
                 });
                 // On the (always-taken) Divert the interpreter tail-calls the
                 // trap handler directly; the PushImm fallthrough is dead.
-                ops.push(StackOp::PushImm(this.pc));
+                ops.push(StackOp::PushImm(pc));
                 ops.push(StackOp::TailCall);
-                return ops;
+                return;
             }
             ops.push(StackOp::Trap(alloc::format!("decoding: {e}")));
-            return ops;
+            return;
         }
         Ok(v) => v,
     };
 
-    let next_pc = this.pc
+    let next_pc = pc
         + match compressed {
             IsCompressed::Yes => 2,
             IsCompressed::No => 4,
         };
 
     // ── Hint / test-mode logging ──────────────────────────────────────────────
-    if this.params.flags.test_mode
+    if params.flags.test_mode
         && let Some(hint_value) = hint::detect_test_marker(&inst)
     {
         ops.push(StackOp::Log(alloc::format!(
             "[HINT] PC=0x{:x}: Test case {}",
-            this.pc,
+            pc,
             hint_value
         )));
     }
 
     // ── Instruction → StackOp mapping ────────────────────────────────────────
 
-    // Cap on the fallthrough inline-chain length. rv_emit inlines reachable
-    // code recursively; without a bound, a single trace can inline a huge
-    // region and the per-level `Labels` clone makes compilation O(N^2).
-    // Capping the chain at MAX_INLINE bounds each trace's compile cost; the
-    // dispatch loop follows the emitted TailCall to the next trace.
-    const MAX_INLINE: u32 = 128;
-    // Cap on the total ops emitted into one trace. `branch` inlines BOTH
-    // arms, so the emit tree grows exponentially in branch count: without a
-    // global bound, one trace can reach ~1M ops and cost ~7ms to compile
-    // (measured: compiles were ~95% of trace-engine boot time). The
-    // interpreter's per-trace op budget (4096) bounds *dynamic* execution,
-    // so static ops past it can never run in one dispatch anyway.
-    const MAX_OPS: usize = 2048;
-    let emit_next = |ops: &mut alloc::vec::Vec<StackOp>, target: u64, labels: Labels| {
-        if nd >= MAX_INLINE || ops.len() >= MAX_OPS {
-            ops.push(StackOp::PushImm(target));
-            ops.push(StackOp::TailCall);
-        } else {
-            emit_to(ops, this.params, target, labels, nd);
-        }
+    // Push the continuation for `target` onto the worklist (inline the block
+    // at `target` via an `Emit`). The depth (MAX_INLINE) and total-ops
+    // (MAX_OPS) caps are applied when the Emit is popped in `rv_emit_ops`.
+    let emit_next = |cont: &mut alloc::vec::Vec<Work>, target: u64, labels: Labels| {
+        cont.push(Work::Emit {
+            pc: target,
+            labels,
+            depth: nd,
+        });
     };
 
     // Shorthand: emit fallthrough to next sequential PC.
-    let ft = |ops: &mut alloc::vec::Vec<StackOp>, labels: Labels| {
-        emit_next(ops, next_pc, labels);
+    let ft = |cont: &mut alloc::vec::Vec<Work>, labels: Labels| {
+        emit_next(cont, next_pc, labels);
     };
 
     // Shorthand: emit a conditional branch (taken = branch_target, not-taken = next_pc).
     let branch =
-        |ops: &mut alloc::vec::Vec<StackOp>, cmp: StackOp, branch_target: u64, labels: Labels| {
+        |ops: &mut alloc::vec::Vec<StackOp>,
+         cont: &mut alloc::vec::Vec<Work>,
+         cmp: StackOp,
+         branch_target: u64,
+         labels: Labels| {
             ops.push(cmp);
             ops.push(StackOp::IfBegin);
-            emit_next(ops, branch_target, labels.clone());
-            ops.push(StackOp::IfElse);
-            emit_next(ops, next_pc, labels);
-            ops.push(StackOp::IfEnd);
+            emit_next(cont, branch_target, labels.clone());
+            cont.push(Work::Op(StackOp::IfElse));
+            emit_next(cont, next_pc, labels);
+            cont.push(Work::Op(StackOp::IfEnd));
         };
 
     // `rv-asm`'s B-type/J-type immediate accessors (`imm_b`/`imm_j`, and
@@ -295,48 +361,48 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
     match inst {
         // ── Branches ─────────────────────────────────────────────────────────
         Inst::Beq { src1, src2, offset } => {
-            let target = this.pc.wrapping_add_signed(offset.as_i64());
+            let target = pc.wrapping_add_signed(offset.as_i64());
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
-            branch(&mut ops, StackOp::Eq64, target, labels);
+            branch(ops, cont, StackOp::Eq64, target, labels);
         }
         Inst::Bne { src1, src2, offset } => {
-            let target = this.pc.wrapping_add_signed(offset.as_i64());
+            let target = pc.wrapping_add_signed(offset.as_i64());
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
-            branch(&mut ops, StackOp::Ne64, target, labels);
+            branch(ops, cont, StackOp::Ne64, target, labels);
         }
         Inst::Blt { src1, src2, offset } => {
-            let target = this.pc.wrapping_add_signed(offset.as_i64());
+            let target = pc.wrapping_add_signed(offset.as_i64());
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
-            branch(&mut ops, StackOp::LtS64, target, labels);
+            branch(ops, cont, StackOp::LtS64, target, labels);
         }
         Inst::Bge { src1, src2, offset } => {
-            let target = this.pc.wrapping_add_signed(offset.as_i64());
+            let target = pc.wrapping_add_signed(offset.as_i64());
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
-            branch(&mut ops, StackOp::GeS64, target, labels);
+            branch(ops, cont, StackOp::GeS64, target, labels);
         }
         Inst::Bltu { src1, src2, offset } => {
-            let target = this.pc.wrapping_add_signed(offset.as_i64());
+            let target = pc.wrapping_add_signed(offset.as_i64());
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
-            branch(&mut ops, StackOp::LtU64, target, labels);
+            branch(ops, cont, StackOp::LtU64, target, labels);
         }
         Inst::Bgeu { src1, src2, offset } => {
-            let target = this.pc.wrapping_add_signed(offset.as_i64());
+            let target = pc.wrapping_add_signed(offset.as_i64());
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
-            branch(&mut ops, StackOp::GeU64, target, labels);
+            branch(ops, cont, StackOp::GeU64, target, labels);
         }
 
         // ── Jumps ─────────────────────────────────────────────────────────────
         Inst::Jal { offset, dest } => {
-            let target = this.pc.wrapping_add_signed(offset.as_i64());
+            let target = pc.wrapping_add_signed(offset.as_i64());
             ops.push(StackOp::PushImm(next_pc));
             ops.push(StackOp::StoreReg(dest.0));
-            emit_to(&mut ops, this.params, target, labels, nd);
+            emit_next(cont, target, labels);
         }
         Inst::Jalr { offset, base, dest } => {
             // Compute the jump target from `base`'s value *before* writing
@@ -364,12 +430,12 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
         Inst::Lui { uimm, dest } => {
             ops.push(StackOp::PushImm(uimm.as_u64()));
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Auipc { uimm, dest } => {
-            ops.push(StackOp::PushImm(uimm.as_u64().wrapping_add(this.pc)));
+            ops.push(StackOp::PushImm(uimm.as_u64().wrapping_add(pc)));
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
 
         // ── Loads ─────────────────────────────────────────────────────────────
@@ -382,7 +448,7 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
                 signed: true,
             });
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Lbu { offset, dest, base } => {
             ops.push(StackOp::LoadReg(base.0));
@@ -393,7 +459,7 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
                 signed: false,
             });
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Lh { offset, dest, base } => {
             ops.push(StackOp::LoadReg(base.0));
@@ -404,7 +470,7 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
                 signed: true,
             });
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Lhu { offset, dest, base } => {
             ops.push(StackOp::LoadReg(base.0));
@@ -415,7 +481,7 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
                 signed: false,
             });
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Lw { offset, dest, base } => {
             ops.push(StackOp::LoadReg(base.0));
@@ -426,7 +492,7 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
                 signed: true,
             });
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Lwu { offset, dest, base } => {
             ops.push(StackOp::LoadReg(base.0));
@@ -437,7 +503,7 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
                 signed: false,
             });
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Ld { offset, dest, base } => {
             ops.push(StackOp::LoadReg(base.0));
@@ -448,7 +514,7 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
                 signed: false,
             });
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
 
         // ── Stores ────────────────────────────────────────────────────────────
@@ -461,7 +527,7 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
             ops.push(StackOp::StoreMem {
                 width: MemWidth::B1,
             });
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Sh { offset, src, base } => {
             ops.push(StackOp::LoadReg(base.0));
@@ -471,7 +537,7 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
             ops.push(StackOp::StoreMem {
                 width: MemWidth::B2,
             });
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Sw { offset, src, base } => {
             ops.push(StackOp::LoadReg(base.0));
@@ -481,7 +547,7 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
             ops.push(StackOp::StoreMem {
                 width: MemWidth::B4,
             });
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Sd { offset, src, base } => {
             ops.push(StackOp::LoadReg(base.0));
@@ -491,7 +557,7 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
             ops.push(StackOp::StoreMem {
                 width: MemWidth::B8,
             });
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
 
         // ── Register-register 64-bit arithmetic ───────────────────────────────
@@ -500,126 +566,126 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::Add64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Sub { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::Sub64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Mul { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::Mul64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Mulh { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::MulHS64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Mulhu { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::MulHU64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Mulhsu { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::MulHSU64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Div { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::DivS64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Divu { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::DivU64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Rem { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::RemS64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Remu { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::RemU64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::And { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::And64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Or { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::Or64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Xor { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::Xor64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Sll { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::Shl64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Srl { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::ShrU64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Sra { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::ShrS64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Slt { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::LtS64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Sltu { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::LtU64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
 
         // ── Register-register 32-bit arithmetic (sign-extend result) ──────────
@@ -628,70 +694,70 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::Add32);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::SubW { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::Sub32);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::MulW { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::Mul32);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::DivW { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::DivS32);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::DivuW { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::DivU32);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::RemW { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::RemS32);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::RemuW { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::RemU32);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::SllW { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::Shl32);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::SrlW { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::ShrU32);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::SraW { dest, src1, src2 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::LoadReg(src2.0));
             ops.push(StackOp::ShrS32);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
 
         // ── Immediate arithmetic ───────────────────────────────────────────────
@@ -700,117 +766,117 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
             ops.push(StackOp::PushImm(imm.as_i64() as u64));
             ops.push(StackOp::Add64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::AddiW { imm, dest, src1 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::PushImm(imm.as_i64() as u64));
             ops.push(StackOp::Add32);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Slti { imm, dest, src1 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::PushImm(imm.as_i64() as u64));
             ops.push(StackOp::LtS64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Sltiu { imm, dest, src1 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::PushImm(imm.as_i64() as u64));
             ops.push(StackOp::LtU64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Andi { imm, dest, src1 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::PushImm(imm.as_i64() as u64));
             ops.push(StackOp::And64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Ori { imm, dest, src1 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::PushImm(imm.as_i64() as u64));
             ops.push(StackOp::Or64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Xori { imm, dest, src1 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::PushImm(imm.as_i64() as u64));
             ops.push(StackOp::Xor64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Slli { imm, dest, src1 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::PushImm(imm.as_i64() as u64));
             ops.push(StackOp::Shl64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Srli { imm, dest, src1 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::PushImm(imm.as_i64() as u64));
             ops.push(StackOp::ShrU64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Srai { imm, dest, src1 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::PushImm(imm.as_i64() as u64));
             ops.push(StackOp::ShrS64);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::SlliW { imm, dest, src1 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::PushImm(imm.as_i64() as u64));
             ops.push(StackOp::Shl32);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::SrliW { imm, dest, src1 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::PushImm(imm.as_i64() as u64));
             ops.push(StackOp::ShrU32);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::SraiW { imm, dest, src1 } => {
             ops.push(StackOp::LoadReg(src1.0));
             ops.push(StackOp::PushImm(imm.as_i64() as u64));
             ops.push(StackOp::ShrS32);
             ops.push(StackOp::StoreReg(dest.0));
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
 
         // ── Misc ──────────────────────────────────────────────────────────────
         Inst::Fence { .. } => {
             // Fence is a no-op in this JIT; fall through.
-            ft(&mut ops, labels);
+            ft(cont, labels);
         }
         Inst::Ecall => {
-            if this.params.flags.privileged {
+            if params.flags.privileged {
                 // Privileged mode (PLAN_LINUX_WASM.md §7): ecall raises an
                 // environment-call exception through the trap engine, so it
                 // never reaches `StackOp::Ecall` (the userspace syscall
                 // hook). End the trace *before* the ecall; the dispatch
                 // loop executes it via the privileged stepper.
-                ops.push(StackOp::PushImm(this.pc));
+                ops.push(StackOp::PushImm(pc));
                 ops.push(StackOp::TailCall);
-                return ops;
+                return;
             }
             ops.push(StackOp::Ecall);
-            if this.params.flags.ecall_boundary {
+            if params.flags.ecall_boundary {
                 // Terminate the block at the syscall (see Flags::ecall_-
                 // boundary): the fallthrough becomes the next block.
                 ops.push(StackOp::PushImm(next_pc));
                 ops.push(StackOp::TailCall);
             } else {
-                ft(&mut ops, labels);
+                ft(cont, labels);
             }
         }
         // Privileged instructions: trace boundary in privileged mode so the
@@ -827,7 +893,7 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
         | Inst::Wfi
         | Inst::SfenceVma { .. }
         | Inst::Ebreak
-            if this.params.flags.privileged =>
+            if params.flags.privileged =>
         {
             // PLAN_TRACE_CUTOVER: execute the privileged op inline via the
             // hart (StackHost::privileged) instead of boundarying out to a
@@ -836,7 +902,7 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
             // trap) the interpreter tail-calls the hart's pc directly,
             // skipping the fallthrough.
             ops.push(StackOp::Privileged {
-                pc: this.pc,
+                pc: pc,
                 raw: inst_code,
             });
             ops.push(StackOp::PushImm(next_pc));
@@ -847,7 +913,7 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
         // execute_privileged (fp_load!/fp_store! for memory ops, exec_fp for
         // compute) instead of boundarying to the stepper — PLAN_TRACE_CUTOVER
         // P3. The op ends the trace (PushImm; TailCall after it).
-        | Inst::FaddD { .. }
+        Inst::FaddD { .. }
         | Inst::FaddS { .. }
         | Inst::FclassD { .. }
         | Inst::FclassS { .. }
@@ -909,12 +975,12 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
         | Inst::FsubD { .. }
         | Inst::FsubS { .. }
         | Inst::Fsw { .. }
-            if this.params.flags.privileged =>
+            if params.flags.privileged =>
         {
             // Inline FP via the hart (execute_privileged): fp_load!/fp_store!
             // for the memory ops, exec_fp for compute. Ends the trace.
             ops.push(StackOp::Privileged {
-                pc: this.pc,
+                pc: pc,
                 raw: inst_code,
             });
             ops.push(StackOp::PushImm(next_pc));
@@ -924,8 +990,8 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
         // boundary instead so the stepper raises a proper in-guest
         // illegal-instruction trap (D5: same semantics as step_one).
         inst => {
-            if this.params.flags.privileged {
-                ops.push(StackOp::PushImm(this.pc));
+            if params.flags.privileged {
+                ops.push(StackOp::PushImm(pc));
                 ops.push(StackOp::TailCall);
             } else {
                 ops.push(StackOp::Trap(alloc::format!("op:{inst}")));
@@ -933,7 +999,6 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
         }
     }
 
-    ops
 }
 
 // ── Target impls ─────────────────────────────────────────────────────────────
