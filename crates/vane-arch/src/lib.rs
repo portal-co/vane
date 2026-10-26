@@ -485,6 +485,44 @@ pub enum ExecEngine {
     JsJit,
 }
 
+/// Trace-dispatch counters: (cache hits, misses, compiles). Used to
+/// diagnose the trace engine's effective miss rate (M-perf). Incremented
+/// from macro-generated dispatch code (`$crate::vane_arch::TRACE_*`).
+pub static TRACE_HIT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static TRACE_MISS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static TRACE_COMPILE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Read the trace-dispatch counters: (hits, misses, compiles).
+pub fn trace_dispatch_counters() -> (u64, u64, u64) {
+    (
+        TRACE_HIT.load(core::sync::atomic::Ordering::Relaxed),
+        TRACE_MISS.load(core::sync::atomic::Ordering::Relaxed),
+        TRACE_COMPILE.load(core::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+/// Accumulated nanoseconds spent in each trace-dispatch segment (M-perf):
+/// (batched lock block, deliver_pending_interrupt, hook+compiled lookup,
+/// interpret, compile). Populated only when the dispatch loop is built with
+/// the VANE_PROFILE env var set (checked once per process start would be
+/// racy, so the macro checks per call — cheap relative to a trace).
+pub static PROF_LOCK_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static PROF_IRQ_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static PROF_HOOK_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static PROF_INTERP_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static PROF_COMPILE_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Read the profiling accumulators: (lock, irq, hook, interp, compile) ns.
+pub fn prof_counters() -> (u64, u64, u64, u64, u64) {
+    (
+        PROF_LOCK_NS.load(core::sync::atomic::Ordering::Relaxed),
+        PROF_IRQ_NS.load(core::sync::atomic::Ordering::Relaxed),
+        PROF_HOOK_NS.load(core::sync::atomic::Ordering::Relaxed),
+        PROF_INTERP_NS.load(core::sync::atomic::Ordering::Relaxed),
+        PROF_COMPILE_NS.load(core::sync::atomic::Ordering::Relaxed),
+    )
+}
+
 pub trait JitCtx {
     fn bytes(&self, a: u64) -> Box<dyn Iterator<Item = u8> + '_>;
 
@@ -495,6 +533,14 @@ pub trait JitCtx {
     /// this method.
     fn byte(&self, a: u64) -> u8 {
         self.bytes(a).next().unwrap_or(0)
+    }
+
+    /// Read 4 bytes (a RISC-V instruction word) at `a`. The default reads
+    /// each byte via `byte`; implementors that can batch the read (one lock
+    /// + one translation for the whole word) should override — instruction
+    /// fetch during trace compilation is the hot path (M-perf).
+    fn bytes4(&self, a: u64) -> [u8; 4] {
+        core::array::from_fn(|i| self.byte(a + i as u64))
     }
 }
 

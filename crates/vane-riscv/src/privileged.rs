@@ -13,6 +13,7 @@ use crate::hart::{
 };
 use rv_asm::{Inst, Xlen};
 use vane_arch::interp::PrivOutcome;
+use vane_arch::{Mem, MemWidth};
 
 /// The result of executing one privileged instruction.
 pub struct PrivExec {
@@ -44,10 +45,12 @@ impl PrivExec {
 }
 
 /// Execute the privileged instruction `raw` at guest `pc` against `hart`,
-/// reading/writing the register file `regs`. Mirrors the privileged arms of
-/// the reference stepper (one semantics).
+/// reading/writing the register file `regs`. `mem` backs the FP load/store
+/// arms (translation + MMIO-or-RAM access, one semantics with the stepper).
+/// Mirrors the privileged arms of the reference stepper (one semantics).
 pub fn execute_privileged(
     hart: &mut HartState,
+    mem: &mut Mem,
     pc: u64,
     raw: u32,
     regs: &mut [u64; 32],
@@ -69,6 +72,67 @@ pub fn execute_privileged(
     let illegal = |hart: &mut HartState| {
         PrivExec::divert(hart.raise(Trap::exception(CAUSE_ILLEGAL, raw as u64), pc))
     };
+
+    // FP load helper (Flw/Fld): translate, read MMIO-or-RAM, write the FP
+    // register (write_f* marks mstatus.FS dirty). Mirrors step_one's Flw/Fld
+    // (FS gate, xlate, loadv). Trap atomicity is free: the op ends its trace
+    // and a fault diverts to the trap handler without committing anything.
+    macro_rules! fp_load {
+        ($offset:expr, $dest:expr, $base:expr, $w:expr, $n:expr, $is64:expr) => {{
+            if hart.mstatus & MSTATUS_FS == 0 {
+                return illegal(hart);
+            }
+            let va = regs[($base.0 % 32) as usize].wrapping_add_signed($offset.as_i64());
+            let pa = match hart.translate_load(mem, va) {
+                Ok(p) => p,
+                Err(t) => return PrivExec::divert(hart.raise(t, pc)),
+            };
+            let v = if let Some(r) = hart.machine_load(pa, $w, false) {
+                match r {
+                    Ok(v) => v,
+                    Err(t) => return PrivExec::divert(hart.raise(t, pc)),
+                }
+            } else {
+                let mut v = 0u64;
+                for i in 0..$n {
+                    v |= (mem.read_byte(pa.wrapping_add(i)) as u64) << (8 * i);
+                }
+                v
+            };
+            if $is64 {
+                hart.write_f64($dest, f64::from_bits(v));
+            } else {
+                hart.write_f32($dest, f32::from_bits(v as u32));
+            }
+            return PrivExec::cont();
+        }};
+    }
+    // FP store helper (Fsw/Fsd): translate, write MMIO-or-RAM. Mirrors
+    // step_one's Fsw/Fsd.
+    macro_rules! fp_store {
+        ($offset:expr, $src:expr, $base:expr, $w:expr, $n:expr, $mask:expr) => {{
+            if hart.mstatus & MSTATUS_FS == 0 {
+                return illegal(hart);
+            }
+            let va = regs[($base.0 % 32) as usize].wrapping_add_signed($offset.as_i64());
+            let pa = match hart.translate_store(mem, va) {
+                Ok(p) => p,
+                Err(t) => return PrivExec::divert(hart.raise(t, pc)),
+            };
+            let v = hart.fregs[($src).0 as usize] & $mask;
+            if let Some(r) = hart.machine_store(pa, $w, v) {
+                match r {
+                    Ok(()) => {}
+                    Err(t) => return PrivExec::divert(hart.raise(t, pc)),
+                }
+            } else {
+                for i in 0..$n {
+                    mem.write_byte(pa.wrapping_add(i), (v >> (8 * i)) as u8);
+                }
+            }
+            return PrivExec::cont();
+        }};
+    }
 
     // CSR op helper: run hart.csr_op, write the old value to `dest` on
     // success, divert to the trap handler on a fault. Returns clear_traces
@@ -149,31 +213,46 @@ pub fn execute_privileged(
             r
         }
         Inst::Ebreak => PrivExec::divert(hart.raise(Trap::exception(CAUSE_BREAKPOINT, pc), pc)),
+        // FP loads/stores (rv_emit lowers them as Privileged, PLAN_TRACE_
+        // CUTOVER): memory ops with an FP-register destination/source.
+        Inst::Flw { offset, dest, base } => {
+            fp_load!(offset, dest, base, MemWidth::B4, 4, false)
+        }
+        Inst::Fld { offset, dest, base } => {
+            fp_load!(offset, dest, base, MemWidth::B8, 8, true)
+        }
+        Inst::Fsw { offset, src, base } => {
+            fp_store!(offset, src, base, MemWidth::B4, 4, 0xffff_ffff)
+        }
+        Inst::Fsd { offset, src, base } => {
+            fp_store!(offset, src, base, MemWidth::B8, 8, u64::MAX)
+        }
         Inst::FenceI => {
             // Self-modifying code: the trace cache must be revalidated.
             let mut r = PrivExec::cont();
             r.code_dirty = true;
             r
         }
-        // Not a privileged instruction we handle inline. The extended FP ops
-        // rv_float_ops doesn't lower (fmadd, fsgnj, min/max, classify, moves,
-        // conversions) go through the shared `exec_fp` (one semantics with the
-        // stepper). AMOs and anything else divert to the stepper for now.
+        // The remaining F/D compute ops (arithmetic, min/max, classify,
+        // moves, conversions, fused multiply-add) go through the shared
+        // `exec_fp` (one semantics with the stepper). rv_emit routes every FP
+        // op here (Privileged), so this catch-all only ever sees FP compute
+        // ops; with FS off they trap illegal (NOT divert(pc), which would
+        // re-dispatch to this same op forever).
         other => {
-            // FS gate: F/D instructions trap illegal when FP is off; divert so
-            // the stepper raises it. exec_fp has no side effects for a non-FP
-            // op (it returns NotFp), so it's safe to try first when FS is on.
-            if hart.mstatus & MSTATUS_FS != 0 {
-                match crate::fp::exec_fp(hart, regs, &other) {
-                    crate::fp::FpOutcome::Done => return PrivExec::cont(),
-                    crate::fp::FpOutcome::Writeback(rd, v) => {
-                        set_reg(regs, rd, v);
-                        return PrivExec::cont();
-                    }
-                    crate::fp::FpOutcome::NotFp => {}
-                }
+            if hart.mstatus & MSTATUS_FS == 0 {
+                return illegal(hart);
             }
-            PrivExec::divert(pc)
+            match crate::fp::exec_fp(hart, regs, &other) {
+                crate::fp::FpOutcome::Done => return PrivExec::cont(),
+                crate::fp::FpOutcome::Writeback(rd, v) => {
+                    set_reg(regs, rd, v);
+                    return PrivExec::cont();
+                }
+                // Unreachable: rv_emit only routes FP ops here and exec_fp
+                // covers the whole F/D compute set.
+                crate::fp::FpOutcome::NotFp => PrivExec::divert(pc),
+            }
         }
     }
 }

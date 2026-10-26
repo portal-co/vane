@@ -53,6 +53,24 @@ macro_rules! vane_meta {
                 let pa = lock.hart.translate_exec(&mut lock.mem, a).unwrap_or(a);
                 lock.mem.read_byte(pa)
             }
+            fn bytes4(&self, a: u64) -> [u8; 4] {
+                // One lock + one translation for the whole instruction word
+                // (the hot path in trace compilation). A 4-byte word may
+                // straddle a page boundary, so re-translate per byte only
+                // when the word crosses into the next page.
+                let mut lock = self.core.lock();
+                let lock = &mut *lock;
+                let pa0 = lock.hart.translate_exec(&mut lock.mem, a).unwrap_or(a);
+                core::array::from_fn(|i| {
+                    let b = a.wrapping_add(i as u64);
+                    let pa = if (a & 0xFFF) + i as u64 > 0xFFF {
+                        lock.hart.translate_exec(&mut lock.mem, b).unwrap_or(b)
+                    } else {
+                        pa0.wrapping_add(i as u64)
+                    };
+                    lock.mem.read_byte(pa)
+                })
+            }
         }
         struct $c {
             mem: $crate::vane_arch::Mem,
@@ -320,7 +338,28 @@ macro_rules! vane_meta {
                         // resident (not under js-host, where regs live in JS).
                         reg_cache: $crate::vane_arch::interp::LocalReactor::lr_has_local_regfile(self),
                     };
+                    let mut _hb_last = std::time::Instant::now();
+                    let _hb = std::env::var_os("VANE_HEARTBEAT").is_some();
+                    // Per-segment nanosecond profiling: gated so the
+                    // Instant pairs cost nothing in normal runs (the
+                    // counters below are cheap atomics and stay on).
+                    let _prof = std::env::var_os("VANE_PROFILE").is_some();
                     loop {
+                        if _hb && _hb_last.elapsed().as_secs() >= 2 {
+                            _hb_last = std::time::Instant::now();
+                            eprintln!(
+                                "  ..trace progress pc={:#x} td=({},{},{}) prof=(lk={} irq={} hk={} it={} cc={})",
+                                host.pc,
+                                $crate::vane_arch::TRACE_HIT.load(core::sync::atomic::Ordering::Relaxed),
+                                $crate::vane_arch::TRACE_MISS.load(core::sync::atomic::Ordering::Relaxed),
+                                $crate::vane_arch::TRACE_COMPILE.load(core::sync::atomic::Ordering::Relaxed),
+                                $crate::vane_arch::PROF_LOCK_NS.load(core::sync::atomic::Ordering::Relaxed),
+                                $crate::vane_arch::PROF_IRQ_NS.load(core::sync::atomic::Ordering::Relaxed),
+                                $crate::vane_arch::PROF_HOOK_NS.load(core::sync::atomic::Ordering::Relaxed),
+                                $crate::vane_arch::PROF_INTERP_NS.load(core::sync::atomic::Ordering::Relaxed),
+                                $crate::vane_arch::PROF_COMPILE_NS.load(core::sync::atomic::Ordering::Relaxed),
+                            );
+                        }
                         if let Some(f) = &mut fuel {
                             if *f == 0 {
                                 host.flush_regs();
@@ -328,59 +367,72 @@ macro_rules! vane_meta {
                             }
                             *f -= 1;
                         }
-                        // A guest poweroff stops the run.
-                        if self.core.lock().hart.power_pending() {
-                            host.flush_regs();
-                            return Ok(host.pc);
-                        }
-                        // Advance the instruction-time counter each trace so the
-                        // machine timer (mtime = itime * rate, hart.rs) keeps
-                        // running under the trace engine. step_one advances it
-                        // per-instruction; here per-trace is the cheap
-                        // approximation (PLAN_TRACE_CUTOVER: the privileged ops
-                        // no longer step through step_one, so they no longer
-                        // advance itime — without this the guest's timer spins).
-                        if hart_enabled0 {
-                            // Lock once (spin::Mutex is not reentrant).
-                            let mut lock = self.core.lock();
-                            lock.hart.itime = lock.hart.itime.wrapping_add(1);
+                        if std::env::var("VANE_DEBUG_PC").is_ok() {
+                            eprintln!("TRACE pc={:#x}", host.pc);
                         }
                         // Fetch (or compile-and-cache) the trace for pc.
                         // Neither the mutex nor the RefCell borrow is held
                         // across an await.
                         let pc = host.pc;
-                        // fence.i contract: revalidate code only once per
-                        // fence, not per trace (see Core::code_dirty).
-                        {
+                        // One lock per trace: power check + itime advance +
+                        // code-dirty fence check + trace-cache lookup. (The
+                        // itime advance keeps the itime-driven mtime running
+                        // under the trace engine; the fence.i contract
+                        // revalidates code once per fence, not per trace.)
+                        let _t_lookup = _prof.then(std::time::Instant::now);
+                        let (power_off, cached_ops) = {
                             let mut lock = self.core.lock();
-                            if lock.code_dirty {
-                                lock.trace_cache.borrow_mut().clear();
-                                lock.compiled.borrow_mut().clear();
-                                lock.code_dirty = false;
+                            if lock.hart.power_pending() {
+                                (true, None)
+                            } else {
+                                if hart_enabled0 {
+                                    lock.hart.itime = lock.hart.itime.wrapping_add(1);
+                                }
+                                if lock.code_dirty {
+                                    if std::env::var("VANE_PROFILE").is_ok() {
+                                        eprintln!("CACHE-CLEAR pc={:#x} cachelen={}", pc, lock.trace_cache.borrow().len());
+                                    }
+                                    lock.trace_cache.borrow_mut().clear();
+                                    lock.compiled.borrow_mut().clear();
+                                    lock.code_dirty = false;
+                                }
+                                let ops = lock.trace_cache.borrow().get(&pc).cloned();
+                                (false, ops)
                             }
+                        };
+                        if let Some(t) = _t_lookup {
+                            $crate::vane_arch::PROF_LOCK_NS
+                                .fetch_add(t.elapsed().as_nanos() as u64, core::sync::atomic::Ordering::Relaxed);
                         }
-                        // A cached trace is always non-privileged: privileged
-                        // instructions are stepped (below) and never compiled,
-                        // so a cache hit lets us skip the per-instruction peek
-                        // and only deliver pending interrupts (cheap).
-                        let cached_ops =
-                            self.core.lock().trace_cache.borrow().get(&pc).cloned();
+                        if power_off {
+                            host.flush_regs();
+                            return Ok(host.pc);
+                        }
                         // Fresh undo log for this trace (trap atomicity).
                         host.undo_log.clear();
                         host.undo_mark = 0;
                         // The stepper reads/writes the reactor's registers, so
                         // flush the register cache first.
                         host.flush_regs();
+                        let _t_flush = _prof.then(std::time::Instant::now);
                         let ops = if let Some(ops) = cached_ops {
+                            $crate::vane_arch::TRACE_HIT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                             // Deliver any pending interrupt before running the
                             // cached (non-privileged) trace — no peek needed.
-                            if let Some(np) = self.deliver_pending_interrupt(host.pc)? {
+                            let _t_irq = _prof.then(std::time::Instant::now);
+                            let _irq_divert = self.deliver_pending_interrupt(host.pc)?;
+                            if let Some(t) = _t_irq {
+                                $crate::vane_arch::PROF_IRQ_NS
+                                    .fetch_add(t.elapsed().as_nanos() as u64, core::sync::atomic::Ordering::Relaxed);
+                            }
+                            if let Some(np) = _irq_divert {
                                 host.load_regs();
                                 host.pc = np;
                                 continue;
                             }
                             ops
                         } else {
+                            $crate::vane_arch::TRACE_MISS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                             // Uncached pc: full privileged step (interrupts +
                             // instruction peek). Privileged instructions step
                             // here and are never compiled/cached.
@@ -446,7 +498,14 @@ macro_rules! vane_meta {
                                 labels: $crate::vane_arch::template::Labels::default(),
                                 depth: 0,
                             };
+                            let _t_compile = _prof.then(std::time::Instant::now);
                             let ops = $crate::alloc::rc::Rc::new($emit(&jit));
+                            if let Some(t) = _t_compile {
+                                $crate::vane_arch::PROF_COMPILE_NS
+                                    .fetch_add(t.elapsed().as_nanos() as u64, core::sync::atomic::Ordering::Relaxed);
+                            }
+                            $crate::vane_arch::TRACE_COMPILE
+                                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                             self.core
                                 .lock()
                                 .trace_cache
@@ -494,6 +553,11 @@ macro_rules! vane_meta {
                         // the StackOps. The callable is synchronous.
                         let compiled = lock.compiled.borrow().get(&pc).cloned();
                         drop(lock);
+                        if let Some(t) = _t_flush {
+                            $crate::vane_arch::PROF_HOOK_NS
+                                .fetch_add(t.elapsed().as_nanos() as u64, core::sync::atomic::Ordering::Relaxed);
+                        }
+                        let _t_interp = _prof.then(std::time::Instant::now);
                         let exit = if let Some(cf) = compiled {
                             cf(&mut host)
                         } else {
@@ -509,6 +573,10 @@ macro_rules! vane_meta {
                             .await
                             .expect("a fuel budget was supplied, so FuelExhausted is unreachable")
                         };
+                        if let Some(t) = _t_interp {
+                            $crate::vane_arch::PROF_INTERP_NS
+                                .fetch_add(t.elapsed().as_nanos() as u64, core::sync::atomic::Ordering::Relaxed);
+                        }
                         match exit {
                             $crate::vane_arch::interp::Exit::TailCall(next) => {
                                 host.pc = next;

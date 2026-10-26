@@ -1,4 +1,3 @@
-use core::array;
 use core::fmt::Formatter;
 
 use alloc::boxed::Box;
@@ -175,7 +174,9 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
     }
 
     // ── Instruction fetch & integrity check ──────────────────────────────────
-    let inst_bytes: [u8; 4] = array::from_fn(|i| this.params.react.byte(this.pc + i as u64));
+    // Instruction fetch: one lock + one translation for the whole word
+    // (JitCtx::bytes4), rather than 4 separate lock+translate round-trips.
+    let inst_bytes: [u8; 4] = this.params.react.bytes4(this.pc);
     ops.push(StackOp::CheckCode {
         addr: this.pc,
         expected: Box::from(inst_bytes),
@@ -190,6 +191,22 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
     }
     let (inst, compressed) = match Inst::decode(inst_code, Xlen::Rv64) {
         Err(e) => {
+            if this.params.flags.privileged {
+                // Decode failure under the privileged architecture: route
+                // through the hart (StackOp::Privileged → execute_privileged
+                // raises the in-guest illegal-instruction trap) rather than
+                // fatal-exiting the interpreter. An all-zero / unmapped fetch
+                // is a guest fault the kernel handles (or panics on) in-guest.
+                ops.push(StackOp::Privileged {
+                    pc: this.pc,
+                    raw: inst_code,
+                });
+                // On the (always-taken) Divert the interpreter tail-calls the
+                // trap handler directly; the PushImm fallthrough is dead.
+                ops.push(StackOp::PushImm(this.pc));
+                ops.push(StackOp::TailCall);
+                return ops;
+            }
             ops.push(StackOp::Trap(alloc::format!("decoding: {e}")));
             return ops;
         }
@@ -221,8 +238,15 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
     // Capping the chain at MAX_INLINE bounds each trace's compile cost; the
     // dispatch loop follows the emitted TailCall to the next trace.
     const MAX_INLINE: u32 = 128;
+    // Cap on the total ops emitted into one trace. `branch` inlines BOTH
+    // arms, so the emit tree grows exponentially in branch count: without a
+    // global bound, one trace can reach ~1M ops and cost ~7ms to compile
+    // (measured: compiles were ~95% of trace-engine boot time). The
+    // interpreter's per-trace op budget (4096) bounds *dynamic* execution,
+    // so static ops past it can never run in one dispatch anyway.
+    const MAX_OPS: usize = 2048;
     let emit_next = |ops: &mut alloc::vec::Vec<StackOp>, target: u64, labels: Labels| {
-        if nd >= MAX_INLINE {
+        if nd >= MAX_INLINE || ops.len() >= MAX_OPS {
             ops.push(StackOp::PushImm(target));
             ops.push(StackOp::TailCall);
         } else {
@@ -799,6 +823,84 @@ fn rv_body(this: &TemplateJit<'_>, labels: Labels, nd: u32) -> alloc::vec::Vec<S
             // PushImm/TailCall dispatch to next_pc; on Divert (trap return /
             // trap) the interpreter tail-calls the hart's pc directly,
             // skipping the fallthrough.
+            ops.push(StackOp::Privileged {
+                pc: this.pc,
+                raw: inst_code,
+            });
+            ops.push(StackOp::PushImm(next_pc));
+            ops.push(StackOp::TailCall);
+        }
+        // F/D extension: every FP op (loads, stores, compute) is lowered as
+        // StackOp::Privileged so the trace engine executes it inline via
+        // execute_privileged (fp_load!/fp_store! for memory ops, exec_fp for
+        // compute) instead of boundarying to the stepper — PLAN_TRACE_CUTOVER
+        // P3. The op ends the trace (PushImm; TailCall after it).
+        | Inst::FaddD { .. }
+        | Inst::FaddS { .. }
+        | Inst::FclassD { .. }
+        | Inst::FclassS { .. }
+        | Inst::FcvtDL { .. }
+        | Inst::FcvtDLu { .. }
+        | Inst::FcvtDS { .. }
+        | Inst::FcvtDW { .. }
+        | Inst::FcvtDWu { .. }
+        | Inst::FcvtLD { .. }
+        | Inst::FcvtLS { .. }
+        | Inst::FcvtLuD { .. }
+        | Inst::FcvtLuS { .. }
+        | Inst::FcvtSD { .. }
+        | Inst::FcvtSL { .. }
+        | Inst::FcvtSLu { .. }
+        | Inst::FcvtSW { .. }
+        | Inst::FcvtSWu { .. }
+        | Inst::FcvtWD { .. }
+        | Inst::FcvtWS { .. }
+        | Inst::FcvtWuD { .. }
+        | Inst::FcvtWuS { .. }
+        | Inst::FdivD { .. }
+        | Inst::FdivS { .. }
+        | Inst::FeqD { .. }
+        | Inst::FeqS { .. }
+        | Inst::Fld { .. }
+        | Inst::FleD { .. }
+        | Inst::FleS { .. }
+        | Inst::FltD { .. }
+        | Inst::FltS { .. }
+        | Inst::Flw { .. }
+        | Inst::FmaddD { .. }
+        | Inst::FmaddS { .. }
+        | Inst::FmaxD { .. }
+        | Inst::FmaxS { .. }
+        | Inst::FminD { .. }
+        | Inst::FminS { .. }
+        | Inst::FmsubD { .. }
+        | Inst::FmsubS { .. }
+        | Inst::FmulD { .. }
+        | Inst::FmulS { .. }
+        | Inst::FmvDX { .. }
+        | Inst::FmvWX { .. }
+        | Inst::FmvXD { .. }
+        | Inst::FmvXW { .. }
+        | Inst::FnmaddD { .. }
+        | Inst::FnmaddS { .. }
+        | Inst::FnmsubD { .. }
+        | Inst::FnmsubS { .. }
+        | Inst::Fsd { .. }
+        | Inst::FsgnjD { .. }
+        | Inst::FsgnjnD { .. }
+        | Inst::FsgnjnS { .. }
+        | Inst::FsgnjS { .. }
+        | Inst::FsgnjxD { .. }
+        | Inst::FsgnjxS { .. }
+        | Inst::FsqrtD { .. }
+        | Inst::FsqrtS { .. }
+        | Inst::FsubD { .. }
+        | Inst::FsubS { .. }
+        | Inst::Fsw { .. }
+            if this.params.flags.privileged =>
+        {
+            // Inline FP via the hart (execute_privileged): fp_load!/fp_store!
+            // for the memory ops, exec_fp for compute. Ends the trace.
             ops.push(StackOp::Privileged {
                 pc: this.pc,
                 raw: inst_code,

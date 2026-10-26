@@ -48,6 +48,12 @@ pub const IRQ_M_WRITABLE: u64 = IRQ_SSIP | IRQ_STIP | IRQ_SEIP;
 /// S-level interrupt bits.
 pub const IRQ_S: u64 = IRQ_SSIP | IRQ_STIP | IRQ_SEIP;
 
+/// Last illegal-instruction trap recorded by `raise` (trace-engine
+/// debugging): (pc, raw instruction bits, count).
+pub static LAST_ILLEGAL_PC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static LAST_ILLEGAL_RAW: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static LAST_ILLEGAL_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// Synchronous exception causes.
 pub const CAUSE_MISALIGNED_FETCH: u64 = 0;
 pub const CAUSE_FETCH_ACCESS: u64 = 1;
@@ -523,6 +529,13 @@ impl HartState {
     /// Raise a trap, applying delegation. Returns the new pc (the trap
     /// vector address).
     pub fn raise(&mut self, trap: Trap, pc: u64) -> u64 {
+        // Record the last illegal-instruction trap for trace-engine
+        // debugging (the kernel's panic path overwrites sepc/stval).
+        if !trap.interrupt && trap.cause == CAUSE_ILLEGAL {
+            LAST_ILLEGAL_PC.store(pc, core::sync::atomic::Ordering::Relaxed);
+            LAST_ILLEGAL_RAW.store(trap.tval, core::sync::atomic::Ordering::Relaxed);
+            LAST_ILLEGAL_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
         // Trap entry clears the LR/SC reservation (spec requirement).
         self.reservation = None;
         let cause_field = trap.cause | ((trap.interrupt as u64) << 63);

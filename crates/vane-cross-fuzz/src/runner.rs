@@ -17,8 +17,8 @@
 //! failing.
 
 use alloc::{string::String, vec::Vec};
-use unicorn_engine::unicorn_const::{Arch, Mode, Prot};
 use unicorn_engine::Unicorn;
+use unicorn_engine::unicorn_const::{Arch, Mode, Prot};
 
 use crate::compare::{FieldDiff, diff_states};
 use crate::skip::Verdict;
@@ -132,10 +132,12 @@ impl<P: ArchProfile> CrossRunner<P> {
         };
         // Same regions mapped into both engines so a load/store that faults
         // in only one is a genuine mismatch, not a skip (plan §5).
-        runner.uc
+        runner
+            .uc
             .mem_map(CODE_BASE, CODE_LEN, Prot::ALL)
             .expect("map code page");
-        runner.uc
+        runner
+            .uc
             .mem_map(DATA_BASE, PAGE, Prot::ALL)
             .expect("map data page");
         runner
@@ -162,7 +164,9 @@ impl<P: ArchProfile> CrossRunner<P> {
         for (i, b) in data.iter().take(PAGE as usize).enumerate() {
             self.mem.write_byte(DATA_BASE + i as u64, *b);
         }
-        self.uc.mem_write(CODE_BASE, unicorn_code).expect("uc code write");
+        self.uc
+            .mem_write(CODE_BASE, unicorn_code)
+            .expect("uc code write");
         if !data.is_empty() {
             self.uc
                 .mem_write(DATA_BASE, &data[..data.len().min(PAGE as usize)])

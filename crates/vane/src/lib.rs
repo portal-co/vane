@@ -8,6 +8,29 @@ use std::cell::OnceCell;
 use std::rc::Rc;
 /// Engine selection for `run` (interpreter vs JS JIT); see PLAN_LINUX_WASM.md §4.
 pub use vane_arch::ExecEngine;
+
+/// Step-fallback counters (see `Reactor::privileged_step`): (bail/force,
+/// needs_step peek, decode error). Used to diagnose why the trace dispatch
+/// falls back to the stepper (M-perf).
+static STEP_FALLBACK_BAIL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static STEP_FALLBACK_NEEDS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static STEP_FALLBACK_DECODE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Read the step-fallback counters: (bail/force, needs_step, decode_error).
+pub fn step_fallback_counters() -> (u64, u64, u64) {
+    (
+        STEP_FALLBACK_BAIL.load(core::sync::atomic::Ordering::Relaxed),
+        STEP_FALLBACK_NEEDS.load(core::sync::atomic::Ordering::Relaxed),
+        STEP_FALLBACK_DECODE.load(core::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+/// Read the trace-dispatch counters: (hits, misses, compiles). The
+/// statics live in vane-arch (macro-generated dispatch code reaches them
+/// as `$crate::vane_arch::TRACE_*`).
+pub fn trace_dispatch_counters() -> (u64, u64, u64) {
+    vane_arch::trace_dispatch_counters()
+}
 /// Re-exported for host/test access to the privileged hart state.
 pub use vane_riscv;
 pub use vane_riscv::hint;
@@ -1227,7 +1250,15 @@ impl Reactor {
         Ok(None)
     }
 
+    /// Diagnose why the trace dispatch falls back to the stepper: counts
+    /// step_privileged_full entries by path (Bail/force, instruction-peek
+    /// needs_step, decode error). Read via [`step_fallback_counters`].
+    /// (M-perf investigation; cheap atomics, always on.)
     pub fn privileged_step(&self, pc: u64, force: bool) -> Result<Option<u64>, String> {
+        // Set inside the peek below when the instruction is an ecall; logged
+        // AFTER the core guard drops (lr_load_reg locks the core, so logging
+        // inside the guard would self-deadlock the spin::Mutex).
+        let mut is_ecall = false;
         {
             let mut guard = self.core.lock();
             if !guard.hart.enabled {
@@ -1250,6 +1281,7 @@ impl Reactor {
             // The Bail path calls with force=true: the stepper re-runs the
             // faulting instruction (a regular load/store) to raise the trap.
             if force {
+                STEP_FALLBACK_BAIL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 // Drop the core lock first — step_privileged_full locks it
                 // (spin::Mutex is not reentrant).
                 drop(guard);
@@ -1264,14 +1296,23 @@ impl Reactor {
                 match hart.translate_exec(&mut *mem, pc) {
                     Ok(p) => p,
                     // Fetch fault: the stepper raises it properly.
-                    Err(_) => return self.step_privileged_full(pc).map(Some),
+                    Err(_) => {
+                        STEP_FALLBACK_DECODE
+                            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        // Drop the core lock first — step_privileged_full
+                        // locks it (spin::Mutex is not reentrant).
+                        drop(guard);
+                        return self.step_privileged_full(pc).map(Some);
+                    }
                 }
             } else {
                 pc
             };
             let code = unsafe { (mem.get_page(fetch_pa) as *mut u32).read_unaligned() };
             let needs_step = match Inst::decode(code, Xlen::Rv64) {
-                Ok((inst, _)) => matches!(
+                Ok((inst, _)) => {
+                    is_ecall = matches!(inst, Inst::Ecall);
+                    matches!(
                     inst,
                     // The CSR/trap-return/misc privileged ops (Csrr*, Mret,
                     // Sret, Wfi, SfenceVma, Ebreak) are now traced inline via
@@ -1290,65 +1331,31 @@ impl Reactor {
                         | Inst::LrD { .. }
                         | Inst::ScD { .. }
                         | Inst::AmoD { .. }
-                        // FP ops rv_float_ops doesn't lower (moves, min/max,
-                        // comparisons, conversions, classify, sign-inject,
-                        // fused multiply-add) — boundary out of traces and
-                        // step via step_one's exec_fp (D5: one semantics).
-                        | Inst::FmaddS { .. }
-                        | Inst::FmsubS { .. }
-                        | Inst::FnmsubS { .. }
-                        | Inst::FnmaddS { .. }
-                        | Inst::FmaddD { .. }
-                        | Inst::FmsubD { .. }
-                        | Inst::FnmsubD { .. }
-                        | Inst::FnmaddD { .. }
-                        | Inst::FsgnjS { .. }
-                        | Inst::FsgnjnS { .. }
-                        | Inst::FsgnjxS { .. }
-                        | Inst::FsgnjD { .. }
-                        | Inst::FsgnjnD { .. }
-                        | Inst::FsgnjxD { .. }
-                        | Inst::FminS { .. }
-                        | Inst::FmaxS { .. }
-                        | Inst::FminD { .. }
-                        | Inst::FmaxD { .. }
-                        | Inst::FeqS { .. }
-                        | Inst::FltS { .. }
-                        | Inst::FleS { .. }
-                        | Inst::FeqD { .. }
-                        | Inst::FltD { .. }
-                        | Inst::FleD { .. }
-                        | Inst::FclassS { .. }
-                        | Inst::FclassD { .. }
-                        | Inst::FmvXW { .. }
-                        | Inst::FmvXD { .. }
-                        | Inst::FmvWX { .. }
-                        | Inst::FmvDX { .. }
-                        | Inst::FcvtWS { .. }
-                        | Inst::FcvtWuS { .. }
-                        | Inst::FcvtLS { .. }
-                        | Inst::FcvtLuS { .. }
-                        | Inst::FcvtWD { .. }
-                        | Inst::FcvtWuD { .. }
-                        | Inst::FcvtLD { .. }
-                        | Inst::FcvtLuD { .. }
-                        | Inst::FcvtSW { .. }
-                        | Inst::FcvtSWu { .. }
-                        | Inst::FcvtSL { .. }
-                        | Inst::FcvtSLu { .. }
-                        | Inst::FcvtDW { .. }
-                        | Inst::FcvtDWu { .. }
-                        | Inst::FcvtDL { .. }
-                        | Inst::FcvtDLu { .. }
-                        | Inst::FcvtSD { .. }
-                        | Inst::FcvtDS { .. }
-                ),
+                )
+                },
                 // Decode failure: let the stepper raise the trap.
                 Err(_) => true,
             };
             if !needs_step {
                 return Ok(None);
             }
+        }
+        if is_ecall && std::env::var("VANE_DEBUG_ECALL").is_ok() {
+            // Identify the SBI call in a tight ecall loop: print when the
+            // extension id (a7) changes.
+            use vane_arch::interp::LocalReactor;
+            let a7 = self.lr_load_reg(17);
+            static LAST_ECALL_A7: core::sync::atomic::AtomicU64 =
+                core::sync::atomic::AtomicU64::new(u64::MAX);
+            if LAST_ECALL_A7.swap(a7, core::sync::atomic::Ordering::Relaxed) != a7 {
+                let a6 = self.lr_load_reg(16);
+                let a0 = self.lr_load_reg(10);
+                eprintln!("ECALL a7={a7:#x} a6={a6:#x} a0={a0:#x} pc={pc:#x}");
+            }
+        }
+        let n = STEP_FALLBACK_NEEDS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if std::env::var("VANE_DEBUG_STEPFALL").is_ok() {
+            eprintln!("STEPFALL #{n} pc={pc:#x}");
         }
         self.step_privileged_full(pc).map(Some)
     }
@@ -1357,11 +1364,19 @@ impl Reactor {
     /// path (registers synced through the [`LocalReactor`] interface).
     fn step_privileged_full(&self, pc: u64) -> Result<u64, String> {
         use vane_arch::interp::LocalReactor;
+        let dbg = std::env::var("VANE_DEBUG_STEPFALL").is_ok();
+        let t0 = std::time::Instant::now();
         let mut regs = [0u64; 32];
         for i in 1..32u8 {
             regs[i as usize] = self.lr_load_reg(i);
         }
-        match self.step_one(pc, &mut regs) {
+        let t1 = std::time::Instant::now();
+        let r = self.step_one(pc, &mut regs);
+        let t2 = std::time::Instant::now();
+        if dbg {
+            eprintln!("  step_privileged_full pc={pc:#x} loadregs={:?} step_one={:?}", t1-t0, t2-t1);
+        }
+        match r {
             Ok(StepOutcome::Next(np)) => {
                 for i in 1..32u8 {
                     self.lr_store_reg(i, regs[i as usize]);
@@ -1388,7 +1403,8 @@ impl Reactor {
     ) -> vane_arch::interp::PrivOutcome {
         let mut guard = self.core.lock();
         let core = &mut *guard;
-        let r = vane_riscv::privileged::execute_privileged(&mut core.hart, pc, raw, regs);
+        let r =
+            vane_riscv::privileged::execute_privileged(&mut core.hart, &mut core.mem, pc, raw, regs);
         if r.clear_traces {
             core.trace_cache.borrow_mut().clear();
         }

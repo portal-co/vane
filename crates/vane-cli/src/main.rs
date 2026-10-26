@@ -506,7 +506,9 @@ fn main() {
         // architecture (the user-mode syscall-shim micro-OS was removed;
         // payloads complete via --tohost or the trap engine).
         if !args.hart {
-            eprintln!("vane-cli: payload mode requires --hart (the user-mode syscall shim was removed; use --machine for Linux)");
+            eprintln!(
+                "vane-cli: payload mode requires --hart (the user-mode syscall shim was removed; use --machine for Linux)"
+            );
             std::process::exit(2);
         }
         let elf_path = match &args.elf_path {
@@ -591,6 +593,20 @@ fn main() {
         const FUEL_TRACE: u64 = 50_000;
         let mut total: u64 = 0;
         let t0 = std::time::Instant::now();
+        // Watchdog: dump the trace-dispatch prof accumulators every 5s so a
+        // long-running quantum reveals which segment is accumulating time
+        // (the per-quantum heartbeat only prints at quantum end).
+        if std::env::var_os("VANE_HEARTBEAT").is_some() {
+            std::thread::spawn(|| loop {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                let (h, m, c) = vane::trace_dispatch_counters();
+                let (lk, irq, hk, it, cc) = vane::vane_riscv::prof_counters();
+                let (fb0, fb1, fb2) = vane::step_fallback_counters();
+                eprintln!(
+                    "  ..wd td=({h},{m},{c}) prof=(lk={lk} irq={irq} hk={hk} it={it} cc={cc}) fb=({fb0},{fb1},{fb2})"
+                );
+            });
+        }
         loop {
             let result = if args.engine == "trace" {
                 // The StackOp trace engine (the port): traces run translated
@@ -630,13 +646,31 @@ fn main() {
             // Heartbeat for boot debugging: VANE_HEARTBEAT=1 prints
             // pc/priv/mcause each round.
             if std::env::var_os("VANE_HEARTBEAT").is_some() {
-                let (privm, mcause, mip, mepc, mtval, stvec) =
-                    reactor.with_hart(|h| (h.priv_mode, h.mcause, h.mip, h.mepc, h.mtval, h.stvec));
-                let (mtime, mtimecmp) = reactor
-                    .with_machine(|m| (m.aclint.mtime(), m.aclint.mtimecmp))
-                    .unwrap_or((0, 0));
+                let (privm, mcause, mip, mepc, _mtval, _stvec, mie, mstatus) =
+                    reactor.with_hart(|h| {
+                        (h.priv_mode, h.mcause, h.mip, h.mepc, h.mtval, h.stvec, h.mie, h.mstatus)
+                    });
+                let (mtime, mtimecmp, msip) = reactor
+                    .with_machine(|m| (m.aclint.mtime(), m.aclint.mtimecmp, m.aclint.msip))
+                    .unwrap_or((0, 0, false));
+                let (ra, sp, a0, a1) = (
+                    reactor.read_reg(1),
+                    reactor.read_reg(2),
+                    reactor.read_reg(10),
+                    reactor.read_reg(11),
+                );
+                let (a6, a7) = (reactor.read_reg(16), reactor.read_reg(17));
+                let (il_pc, il_raw, il_n) = (
+                    vane::vane_riscv::hart::LAST_ILLEGAL_PC.load(std::sync::atomic::Ordering::Relaxed),
+                    vane::vane_riscv::hart::LAST_ILLEGAL_RAW.load(std::sync::atomic::Ordering::Relaxed),
+                    vane::vane_riscv::hart::LAST_ILLEGAL_COUNT.load(std::sync::atomic::Ordering::Relaxed),
+                );
+                let (fb_bail, fb_needs, fb_decode) = vane::step_fallback_counters();
+                let (t_hit, t_miss, t_compile) = vane::trace_dispatch_counters();
+                let (p_lock, p_irq, p_hook, p_interp, p_compile) =
+                    vane::vane_riscv::prof_counters();
                 eprintln!(
-                    "[{total}M] pc={pc:#x} priv={privm:?} mcause={mcause:#x} mepc={mepc:#x} mtval={mtval:#x} stvec={stvec:#x} mip={mip:#x} mtime={mtime} mtimecmp={mtimecmp:#x}"
+                    "[{total}M] pc={pc:#x} priv={privm:?} mcause={mcause:#x} mepc={mepc:#x} mip={mip:#x} mie={mie:#x} mstatus={mstatus:#x} msip={msip} mtime={mtime} mtimecmp={mtimecmp:#x} ra={ra:#x} sp={sp:#x} a0={a0:#x} a1={a1:#x} a6={a6:#x} a7={a7:#x} fb=({fb_bail},{fb_needs},{fb_decode}) td=({t_hit},{t_miss},{t_compile}) il=({il_pc:#x},{il_raw:#x},{il_n}) prof=(lk={p_lock} irq={p_irq} hk={p_hook} it={p_interp} cc={p_compile})"
                 );
             }
 
@@ -656,7 +690,14 @@ fn main() {
                 }
                 // machine_io_tick processes virtio queues (needs guest-memory
                 // access) in addition to feeding UART RX and folding IRQs.
+                let _hb2 = std::env::var_os("VANE_HEARTBEAT").is_some();
+                if _hb2 {
+                    eprintln!("  ..io_tick begin");
+                }
                 let power = reactor.machine_io_tick(&rx_bytes);
+                if _hb2 {
+                    eprintln!("  ..io_tick end");
+                }
                 if let Some(tx) = reactor.with_machine(|m| m.uart.drain_tx()) {
                     for b in tx {
                         host.uart_write(b);
@@ -698,5 +739,4 @@ fn main() {
             }
         }
     }
-
 }
