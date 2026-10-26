@@ -303,6 +303,16 @@ pub struct VirtioMmio {
     deferred: alloc::vec::Vec<(usize, DescriptorChain)>,
 }
 
+// SAFETY: a `VirtioMmio` (and its boxed device/backend) is only ever accessed
+// while holding the reactor's `core` `spin::Mutex` — the interpreter's MMIO
+// dispatch and `machine_io_tick` lock the core, and the Phase-B background
+// compile thread locks the core only to read instruction bytes (fetch4 reads
+// `mem`, never the devices). So device state is never touched concurrently,
+// and sharing the containing `Core` across threads (via `Arc<spin::Mutex>`)
+// cannot race on the devices. This is what lets the trace engine's `Core` be
+// `Send` for parallel trace compilation.
+unsafe impl Send for VirtioMmio {}
+
 impl VirtioMmio {
     pub fn new(device: alloc::boxed::Box<dyn VirtioDevice>, irq: u32) -> Self {
         let n = device.num_queues();
