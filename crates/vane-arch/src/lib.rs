@@ -466,6 +466,26 @@ impl Mem {
             .unwrap_or(0)
     }
 
+    /// Read 4 bytes (one instruction word) with a single page lookup when the
+    /// word lies within one 64 KiB page of legacy-paged RAM — the common case
+    /// for instruction fetch, which is the hot path in trace compilation.
+    /// Falls back to per-byte reads at a page boundary or for shared/swap
+    /// memory.
+    pub fn read4(&self, addr: u64) -> [u8; 4] {
+        let off = (addr & 0xffff) as usize;
+        if self.shared.is_none()
+            && off + 4 <= 65536
+            && !self.in_swap_region(addr)
+            && !self.in_swap_region(addr.wrapping_add(3))
+        {
+            if let Some(page) = self.pages.get(&(addr >> 16)) {
+                return page[off..off + 4].try_into().unwrap();
+            }
+            return [0; 4];
+        }
+        core::array::from_fn(|i| self.read_byte(addr.wrapping_add(i as u64)))
+    }
+
     /// True if `addr` is in the swap-backed RAM region (swap enabled).
     #[inline]
     fn in_swap_region(&self, addr: u64) -> bool {

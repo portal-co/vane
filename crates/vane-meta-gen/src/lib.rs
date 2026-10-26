@@ -73,13 +73,15 @@ macro_rules! vane_meta {
                 let mut lock = self.core.lock();
                 let lock = &mut *lock;
                 let pa0 = lock.hart.translate_exec(&mut lock.mem, a).ok()?;
+                // If the 4-byte word fits within one 4 KiB translation page,
+                // all four bytes share pa0's translation; read them with a
+                // single page lookup instead of four.
+                if (a & 0xFFF) + 4 <= 0x1000 {
+                    return Some(lock.mem.read4(pa0));
+                }
                 Some(core::array::from_fn(|i| {
                     let b = a.wrapping_add(i as u64);
-                    let pa = if (a & 0xFFF) + i as u64 > 0xFFF {
-                        lock.hart.translate_exec(&mut lock.mem, b).unwrap_or(b)
-                    } else {
-                        pa0.wrapping_add(i as u64)
-                    };
+                    let pa = lock.hart.translate_exec(&mut lock.mem, b).unwrap_or(b);
                     lock.mem.read_byte(pa)
                 }))
             }
