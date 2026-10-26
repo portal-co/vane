@@ -597,14 +597,16 @@ fn main() {
         // long-running quantum reveals which segment is accumulating time
         // (the per-quantum heartbeat only prints at quantum end).
         if std::env::var_os("VANE_HEARTBEAT").is_some() {
-            std::thread::spawn(|| loop {
-                std::thread::sleep(std::time::Duration::from_secs(5));
-                let (h, m, c) = vane::trace_dispatch_counters();
-                let (lk, irq, hk, it, cc) = vane::vane_riscv::prof_counters();
-                let (fb0, fb1, fb2) = vane::step_fallback_counters();
-                eprintln!(
-                    "  ..wd td=({h},{m},{c}) prof=(lk={lk} irq={irq} hk={hk} it={it} cc={cc}) fb=({fb0},{fb1},{fb2})"
-                );
+            std::thread::spawn(|| {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    let (h, m, c) = vane::trace_dispatch_counters();
+                    let (lk, irq, hk, it, cc) = vane::vane_riscv::prof_counters();
+                    let (fb0, fb1, fb2) = vane::step_fallback_counters();
+                    eprintln!(
+                        "  ..wd td=({h},{m},{c}) prof=(lk={lk} irq={irq} hk={hk} it={it} cc={cc}) fb=({fb0},{fb1},{fb2})"
+                    );
+                }
             });
         }
         loop {
@@ -648,7 +650,16 @@ fn main() {
             if std::env::var_os("VANE_HEARTBEAT").is_some() {
                 let (privm, mcause, mip, mepc, _mtval, _stvec, mie, mstatus) =
                     reactor.with_hart(|h| {
-                        (h.priv_mode, h.mcause, h.mip, h.mepc, h.mtval, h.stvec, h.mie, h.mstatus)
+                        (
+                            h.priv_mode,
+                            h.mcause,
+                            h.mip,
+                            h.mepc,
+                            h.mtval,
+                            h.stvec,
+                            h.mie,
+                            h.mstatus,
+                        )
                     });
                 let (mtime, mtimecmp, msip) = reactor
                     .with_machine(|m| (m.aclint.mtime(), m.aclint.mtimecmp, m.aclint.msip))
@@ -661,9 +672,12 @@ fn main() {
                 );
                 let (a6, a7) = (reactor.read_reg(16), reactor.read_reg(17));
                 let (il_pc, il_raw, il_n) = (
-                    vane::vane_riscv::hart::LAST_ILLEGAL_PC.load(std::sync::atomic::Ordering::Relaxed),
-                    vane::vane_riscv::hart::LAST_ILLEGAL_RAW.load(std::sync::atomic::Ordering::Relaxed),
-                    vane::vane_riscv::hart::LAST_ILLEGAL_COUNT.load(std::sync::atomic::Ordering::Relaxed),
+                    vane::vane_riscv::hart::LAST_ILLEGAL_PC
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    vane::vane_riscv::hart::LAST_ILLEGAL_RAW
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    vane::vane_riscv::hart::LAST_ILLEGAL_COUNT
+                        .load(std::sync::atomic::Ordering::Relaxed),
                 );
                 let (fb_bail, fb_needs, fb_decode) = vane::step_fallback_counters();
                 let (t_hit, t_miss, t_compile) = vane::trace_dispatch_counters();

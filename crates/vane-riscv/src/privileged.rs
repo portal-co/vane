@@ -244,10 +244,10 @@ pub fn execute_privileged(
                 return illegal(hart);
             }
             match crate::fp::exec_fp(hart, regs, &other) {
-                crate::fp::FpOutcome::Done => return PrivExec::cont(),
+                crate::fp::FpOutcome::Done => PrivExec::cont(),
                 crate::fp::FpOutcome::Writeback(rd, v) => {
                     set_reg(regs, rd, v);
-                    return PrivExec::cont();
+                    PrivExec::cont()
                 }
                 // Unreachable: rv_emit only routes FP ops here and exec_fp
                 // covers the whole F/D compute set.

@@ -52,7 +52,8 @@ pub const IRQ_S: u64 = IRQ_SSIP | IRQ_STIP | IRQ_SEIP;
 /// debugging): (pc, raw instruction bits, count).
 pub static LAST_ILLEGAL_PC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub static LAST_ILLEGAL_RAW: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-pub static LAST_ILLEGAL_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static LAST_ILLEGAL_COUNT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
 
 /// Synchronous exception causes.
 pub const CAUSE_MISALIGNED_FETCH: u64 = 0;

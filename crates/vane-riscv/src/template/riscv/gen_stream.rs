@@ -48,7 +48,15 @@ pub fn rv_emit_ops<'a>(this: &TemplateJit<'a>) -> impl Iterator<Item = StackOp> 
                 Work::Emit { pc, labels, depth } => {
                     out_ops.clear();
                     out_work.clear();
-                    emit_block(&params, pc, labels, depth, total_ops, &mut out_ops, &mut out_work);
+                    emit_block(
+                        &params,
+                        pc,
+                        labels,
+                        depth,
+                        total_ops,
+                        &mut out_ops,
+                        &mut out_work,
+                    );
                     total_ops += out_ops.len();
                     // Yield by moving each op out (mem::replace), so no
                     // borrow of the scratch buffer is held across a `yield`.

@@ -1305,8 +1305,7 @@ impl Reactor {
                     Ok(p) => p,
                     // Fetch fault: the stepper raises it properly.
                     Err(_) => {
-                        STEP_FALLBACK_DECODE
-                            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        STEP_FALLBACK_DECODE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                         // Drop the core lock first — step_privileged_full
                         // locks it (spin::Mutex is not reentrant).
                         drop(guard);
@@ -1321,14 +1320,14 @@ impl Reactor {
                 Ok((inst, _)) => {
                     is_ecall = matches!(inst, Inst::Ecall);
                     matches!(
-                    inst,
-                    // The CSR/trap-return/misc privileged ops (Csrr*, Mret,
-                    // Sret, Wfi, SfenceVma, Ebreak) are now traced inline via
-                    // StackOp::Privileged (PLAN_TRACE_CUTOVER P2) — not
-                    // boundary'd here. Ecall and fence.i still boundary
-                    // (traced in a later phase), as do the AMOs and the FP
-                    // ops rv_float_ops doesn't lower.
-                    Inst::Ecall
+                        inst,
+                        // The CSR/trap-return/misc privileged ops (Csrr*, Mret,
+                        // Sret, Wfi, SfenceVma, Ebreak) are now traced inline via
+                        // StackOp::Privileged (PLAN_TRACE_CUTOVER P2) — not
+                        // boundary'd here. Ecall and fence.i still boundary
+                        // (traced in a later phase), as do the AMOs and the FP
+                        // ops rv_float_ops doesn't lower.
+                        Inst::Ecall
                         | Inst::FenceI
                         // AMOs (lr/sc + atomic ops): not lowered to StackOps
                         // by rv_emit, so they boundary out of traces and the
@@ -1339,8 +1338,8 @@ impl Reactor {
                         | Inst::LrD { .. }
                         | Inst::ScD { .. }
                         | Inst::AmoD { .. }
-                )
-                },
+                    )
+                }
                 // Decode failure: let the stepper raise the trap.
                 Err(_) => true,
             };
@@ -1382,7 +1381,11 @@ impl Reactor {
         let r = self.step_one(pc, &mut regs);
         let t2 = std::time::Instant::now();
         if dbg {
-            eprintln!("  step_privileged_full pc={pc:#x} loadregs={:?} step_one={:?}", t1-t0, t2-t1);
+            eprintln!(
+                "  step_privileged_full pc={pc:#x} loadregs={:?} step_one={:?}",
+                t1 - t0,
+                t2 - t1
+            );
         }
         match r {
             Ok(StepOutcome::Next(np)) => {
@@ -1415,19 +1418,24 @@ impl Reactor {
         // fetch baked into a trace at compile time). Record the translated
         // pa + residency to distinguish a fetch/translation bug from a wild
         // guest pc (state corruption).
-        if std::env::var("VANE_DEBUG_DECODE").is_ok()
-            && Inst::decode(raw, Xlen::Rv64).is_err()
-        {
+        if std::env::var("VANE_DEBUG_DECODE").is_ok() && Inst::decode(raw, Xlen::Rv64).is_err() {
             let pa = core.hart.translate_exec(&mut core.mem, pc);
             let present = pa.ok().map(|p| core.mem.pages.contains_key(&(p >> 16)));
             let first = pa.ok().map(|p| {
                 let base = p & !0xffff;
-                (0..8).map(|i| core.mem.read_byte(base + i)).collect::<Vec<_>>()
+                (0..8)
+                    .map(|i| core.mem.read_byte(base + i))
+                    .collect::<Vec<_>>()
             });
             eprintln!("DECODE-FAIL-RT pc={pc:#x} pa={pa:?} present={present:?} page0={first:02x?}");
         }
-        let r =
-            vane_riscv::privileged::execute_privileged(&mut core.hart, &mut core.mem, pc, raw, regs);
+        let r = vane_riscv::privileged::execute_privileged(
+            &mut core.hart,
+            &mut core.mem,
+            pc,
+            raw,
+            regs,
+        );
         if r.clear_traces {
             core.trace_cache.borrow_mut().clear();
         }
