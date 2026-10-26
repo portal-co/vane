@@ -1735,6 +1735,573 @@ pub async fn interpret_async_fueled(
         }
     }
 }
+#[cfg(feature = "async-host")]
+pub async fn interpret_async_producing(
+    producer: &mut impl Iterator<Item = StackOp>,
+    ops: &mut Vec<StackOp>,
+    host: &mut impl AsyncStackHost,
+    mut fuel: Option<&mut u64>,
+) -> Result<Exit, FuelExhausted> {
+    let mut val: Vec<u64> = Vec::new();
+    let mut loop_stack: Vec<usize> = Vec::new();
+    let mut ip = 0usize;
+    // The pc of the instruction whose ops are running (from its CheckCode).
+    // Used as the Bail target when a memory access traps mid-trace.
+    let mut cur_inst_pc: u64 = 0;
+
+    macro_rules! pop {
+        () => {
+            val.pop().unwrap_or_default()
+        };
+    }
+    macro_rules! pop2 {
+        () => {{
+            let b = pop!();
+            let a = pop!();
+            (a, b)
+        }};
+    }
+
+    loop {
+        // Pull from the producer until `ip` is available (lazy trace stream).
+        while ip >= ops.len() {
+            match producer.next() {
+                Some(o) => ops.push(o),
+                None => {
+                    return Ok(Exit::Trap(alloc::format!("trace underflow at ip={ip}")));
+                }
+            }
+        }
+        // Peel the two forward-scanning unit ops (IfBegin/IfElse): they may
+        // pull more ops to find the matching marker, so handle them without
+        // holding an `ops` borrow.
+        if matches!(ops.get(ip), Some(StackOp::IfBegin)) {
+            let cond = pop!();
+            if cond != 0 {
+                ip += 1;
+            } else {
+                ip = find_if_else_p(ops, producer, ip) + 1;
+            }
+            continue;
+        }
+        if matches!(ops.get(ip), Some(StackOp::IfElse)) {
+            ip = find_if_end_p(ops, producer, ip) + 1;
+            continue;
+        }
+        // Ensure the fusion lookahead window (ip+1..=ip+4) is produced.
+        while ops.len() <= ip + 4 {
+            match producer.next() {
+                Some(o) => ops.push(o),
+                None => break,
+            }
+        }
+        let op = &ops[ip];
+        match op {
+            StackOp::LoopBegin { .. } => {
+                loop_stack.push(ip + 1);
+                ip += 1;
+            }
+            StackOp::LoopEnd => {
+                loop_stack.pop();
+                ip += 1;
+            }
+            StackOp::Br { relative_depth, .. } => {
+                let idx = loop_stack.len() - *relative_depth as usize;
+                let target = loop_stack[idx];
+                loop_stack.truncate(idx + 1);
+                ip = target;
+            }
+            // `IfBegin`/`IfElse` are peeled above (they may pull more ops), so
+            // they never reach this match; these arms exist only for
+            // exhaustiveness.
+            StackOp::IfBegin | StackOp::IfElse => {
+                unreachable!("IfBegin/IfElse are peeled before the match")
+            }
+            StackOp::IfEnd => {
+                ip += 1;
+            }
+            StackOp::PushImm(v) => {
+                val.push(*v);
+                ip += 1;
+            }
+            StackOp::LoadReg(r) => {
+                // Interpret-time superinstruction fusion (M7+): recognize
+                // common straight-line StackOp subsequences and run them as
+                // one step, skipping the value-stack round-trips. The fused
+                // ops use the same host.register/memory calls (preserving
+                // the register cache, undo log, and trap-atomic bail).
+                let a = *r;
+                let n1 = ops.get(ip + 1);
+                let n2 = ops.get(ip + 2);
+                let n3 = ops.get(ip + 3);
+                // LoadReg(a), LoadReg(b), <alu64>, StoreReg(d)
+                if let (Some(StackOp::LoadReg(b)), Some(alu), Some(StackOp::StoreReg(d))) =
+                    (n1, n2, n3)
+                {
+                    if let Some(f) = alu64_fn(alu) {
+                        let (x, y) = (host.load_reg(a).await, host.load_reg(*b).await);
+                        host.store_reg(*d, f(x, y)).await;
+                        ip += 4;
+                        continue;
+                    }
+                }
+                // LoadReg(a), PushImm(i), <alu64>, StoreReg(d)
+                if let (Some(StackOp::PushImm(i)), Some(alu), Some(StackOp::StoreReg(d))) =
+                    (n1, n2, n3)
+                {
+                    if let Some(f) = alu64_fn(alu) {
+                        let x = host.load_reg(a).await;
+                        host.store_reg(*d, f(x, *i)).await;
+                        ip += 4;
+                        continue;
+                    }
+                }
+                // LoadReg(b), PushImm(o), Add64, LoadMem{w,s}, StoreReg(d)
+                if let (
+                    Some(StackOp::PushImm(o)),
+                    Some(StackOp::Add64),
+                    Some(StackOp::LoadMem { width, signed }),
+                    Some(StackOp::StoreReg(d)),
+                ) = (n1, n2, n3, ops.get(ip + 4))
+                {
+                    let addr = host.load_reg(a).await.wrapping_add(*o);
+                    let v = host.load_mem(addr, *width, *signed).await;
+                    host.store_reg(*d, v).await;
+                    ip += 5;
+                    continue;
+                }
+                // LoadReg(b), PushImm(o), Add64, LoadReg(s), StoreMem{w}
+                if let (
+                    Some(StackOp::PushImm(o)),
+                    Some(StackOp::Add64),
+                    Some(StackOp::LoadReg(s)),
+                    Some(StackOp::StoreMem { width }),
+                ) = (n1, n2, n3, ops.get(ip + 4))
+                {
+                    let addr = host.load_reg(a).await.wrapping_add(*o);
+                    let v = host.load_reg(*s).await;
+                    host.store_mem(addr, *width, v).await;
+                    ip += 5;
+                    continue;
+                }
+                val.push(if a == 0 { 0 } else { host.load_reg(a).await });
+                ip += 1;
+            }
+            StackOp::StoreReg(r) => {
+                let v = pop!();
+                if *r != 0 {
+                    host.store_reg(*r, v).await;
+                }
+                ip += 1;
+            }
+            StackOp::Drop => {
+                let _ = pop!();
+                ip += 1;
+            }
+            StackOp::LoadState(slot) => {
+                val.push(host.load_state(slot).await);
+                ip += 1;
+            }
+            StackOp::StoreState(slot) => {
+                host.store_state(slot, pop!()).await;
+                ip += 1;
+            }
+            StackOp::Add64 => {
+                let (a, b) = pop2!();
+                val.push(a.wrapping_add(b));
+                ip += 1;
+            }
+            StackOp::Sub64 => {
+                let (a, b) = pop2!();
+                val.push(a.wrapping_sub(b));
+                ip += 1;
+            }
+            StackOp::Mul64 => {
+                let (a, b) = pop2!();
+                val.push(a.wrapping_mul(b));
+                ip += 1;
+            }
+            StackOp::DivU64 => {
+                let (a, b) = pop2!();
+                val.push(if b == 0 { u64::MAX } else { a / b });
+                ip += 1;
+            }
+            StackOp::DivS64 => {
+                let (a, b) = pop2!();
+                val.push(if b == 0 {
+                    u64::MAX
+                } else {
+                    (a as i64).wrapping_div(b as i64) as u64
+                });
+                ip += 1;
+            }
+            StackOp::RemU64 => {
+                let (a, b) = pop2!();
+                // RISC-V M extension: remainder-by-zero is the *dividend*.
+                val.push(if b == 0 { a } else { a % b });
+                ip += 1;
+            }
+            StackOp::RemS64 => {
+                let (a, b) = pop2!();
+                val.push(if b == 0 {
+                    a // RISC-V: remainder-by-zero is the dividend
+                } else {
+                    (a as i64).wrapping_rem(b as i64) as u64
+                });
+                ip += 1;
+            }
+            StackOp::And64 => {
+                let (a, b) = pop2!();
+                val.push(a & b);
+                ip += 1;
+            }
+            StackOp::Or64 => {
+                let (a, b) = pop2!();
+                val.push(a | b);
+                ip += 1;
+            }
+            StackOp::Xor64 => {
+                let (a, b) = pop2!();
+                val.push(a ^ b);
+                ip += 1;
+            }
+            StackOp::Shl64 => {
+                let (a, b) = pop2!();
+                val.push(a.wrapping_shl((b & 63) as u32));
+                ip += 1;
+            }
+            StackOp::ShrU64 => {
+                let (a, b) = pop2!();
+                val.push(a.wrapping_shr((b & 63) as u32));
+                ip += 1;
+            }
+            StackOp::ShrS64 => {
+                let (a, b) = pop2!();
+                val.push(((a as i64).wrapping_shr((b & 63) as u32)) as u64);
+                ip += 1;
+            }
+            StackOp::MulHU64 => {
+                let (a, b) = pop2!();
+                val.push(((a as u128 * b as u128) >> 64) as u64);
+                ip += 1;
+            }
+            StackOp::MulHSU64 => {
+                let (a, b) = pop2!();
+                val.push((((a as i64 as i128) * (b as u128 as i128)) >> 64) as u64);
+                ip += 1;
+            }
+            StackOp::MulHS64 => {
+                let (a, b) = pop2!();
+                val.push((((a as i64 as i128) * (b as i64 as i128)) >> 64) as u64);
+                ip += 1;
+            }
+            StackOp::Add32 => {
+                let (a, b) = pop2!();
+                val.push(sext32((a as u32).wrapping_add(b as u32)));
+                ip += 1;
+            }
+            StackOp::Sub32 => {
+                let (a, b) = pop2!();
+                val.push(sext32((a as u32).wrapping_sub(b as u32)));
+                ip += 1;
+            }
+            StackOp::Mul32 => {
+                let (a, b) = pop2!();
+                val.push(sext32((a as u32).wrapping_mul(b as u32)));
+                ip += 1;
+            }
+            StackOp::DivU32 => {
+                let (a, b) = pop2!();
+                let (a, b) = (a as u32, b as u32);
+                val.push(if b == 0 { u64::MAX } else { sext32(a / b) });
+                ip += 1;
+            }
+            StackOp::DivS32 => {
+                let (a, b) = pop2!();
+                let (a, b) = (a as u32 as i32, b as u32 as i32);
+                val.push(if b == 0 {
+                    u64::MAX
+                } else {
+                    sext32(a.wrapping_div(b) as u32)
+                });
+                ip += 1;
+            }
+            StackOp::RemU32 => {
+                let (a, b) = pop2!();
+                let (a, b) = (a as u32, b as u32);
+                val.push(if b == 0 { sext32(a) } else { sext32(a % b) });
+                ip += 1;
+            }
+            StackOp::RemS32 => {
+                let (a, b) = pop2!();
+                let (a, b) = (a as u32 as i32, b as u32 as i32);
+                val.push(if b == 0 {
+                    sext32(a as u32)
+                } else {
+                    sext32(a.wrapping_rem(b) as u32)
+                });
+                ip += 1;
+            }
+            StackOp::Shl32 => {
+                let (a, b) = pop2!();
+                val.push(sext32((a as u32).wrapping_shl(b as u32 & 31)));
+                ip += 1;
+            }
+            StackOp::ShrU32 => {
+                let (a, b) = pop2!();
+                val.push(sext32((a as u32).wrapping_shr(b as u32 & 31)));
+                ip += 1;
+            }
+            StackOp::ShrS32 => {
+                let (a, b) = pop2!();
+                val.push(sext32(
+                    ((a as u32 as i32).wrapping_shr(b as u32 & 31)) as u32,
+                ));
+                ip += 1;
+            }
+            StackOp::Trunc32 => {
+                let a = pop!();
+                val.push(a & 0xffff_ffff);
+                ip += 1;
+            }
+            StackOp::SignExt32 => {
+                let a = pop!();
+                val.push(sext32(a as u32));
+                ip += 1;
+            }
+            StackOp::AsSigned64 => {
+                let a = pop!();
+                val.push(a);
+                ip += 1;
+            }
+            StackOp::AsUnsigned64 => {
+                let a = pop!();
+                val.push(a);
+                ip += 1;
+            }
+            StackOp::Eq64 => {
+                let (a, b) = pop2!();
+                val.push((a == b) as u64);
+                ip += 1;
+            }
+            StackOp::Ne64 => {
+                let (a, b) = pop2!();
+                val.push((a != b) as u64);
+                ip += 1;
+            }
+            StackOp::LtU64 => {
+                let (a, b) = pop2!();
+                val.push((a < b) as u64);
+                ip += 1;
+            }
+            StackOp::LtS64 => {
+                let (a, b) = pop2!();
+                val.push(((a as i64) < (b as i64)) as u64);
+                ip += 1;
+            }
+            StackOp::GeU64 => {
+                let (a, b) = pop2!();
+                val.push((a >= b) as u64);
+                ip += 1;
+            }
+            StackOp::GeS64 => {
+                let (a, b) = pop2!();
+                val.push(((a as i64) >= (b as i64)) as u64);
+                ip += 1;
+            }
+            StackOp::FloatUnary { width, op } => {
+                let value = pop!();
+                val.push(float_unary(*width, *op, value));
+                ip += 1;
+            }
+            StackOp::FloatBinary { width, op } => {
+                let (a, b) = pop2!();
+                val.push(float_binary(*width, *op, a, b));
+                ip += 1;
+            }
+            StackOp::FloatLt { width } => {
+                let (a, b) = pop2!();
+                val.push(float_lt(*width, a, b) as u64);
+                ip += 1;
+            }
+            StackOp::FloatEq { width } => {
+                let (a, b) = pop2!();
+                val.push(float_eq(*width, a, b) as u64);
+                ip += 1;
+            }
+            StackOp::FloatUnordered { width } => {
+                let (a, b) = pop2!();
+                val.push(float_unordered(*width, a, b) as u64);
+                ip += 1;
+            }
+            StackOp::IntToFloat {
+                width,
+                signed,
+                int_width,
+            } => {
+                let value = pop!();
+                val.push(int_to_float(*width, *signed, *int_width, value));
+                ip += 1;
+            }
+            StackOp::FloatToInt {
+                width,
+                signed,
+                int_width,
+            } => {
+                let value = pop!();
+                val.push(float_to_int(*width, *signed, *int_width, value));
+                ip += 1;
+            }
+            StackOp::FloatConvert { from, to } => {
+                let value = pop!();
+                val.push(float_convert(*from, *to, value));
+                ip += 1;
+            }
+            StackOp::LoadMem { width, signed } => {
+                let addr = pop!();
+                val.push(host.load_mem(addr, *width, *signed).await);
+                ip += 1;
+            }
+            StackOp::StoreMem { width } => {
+                let v = pop!();
+                let addr = pop!();
+                host.store_mem(addr, *width, v).await;
+                ip += 1;
+            }
+            StackOp::Ecall => {
+                if host.ecall().await {
+                    ip += 1;
+                } else {
+                    return Ok(Exit::Ecall);
+                }
+            }
+            StackOp::Privileged { pc, raw } => match host.privileged(*pc, *raw).await {
+                PrivOutcome::Continue => ip += 1,
+                PrivOutcome::Divert(addr) => return Ok(Exit::TailCall(addr)),
+            },
+            StackOp::Trap(msg) => return Ok(Exit::Trap(msg.clone())),
+            StackOp::TailCall => {
+                let addr = pop!();
+                // A trap in the last instruction of the trace takes priority
+                // over the transfer (the stepper re-runs it).
+                if host.take_pending_trap() {
+                    return Ok(Exit::Bail(cur_inst_pc));
+                }
+                // A device access may have pended an interrupt; exit to the
+                // target so the dispatch loop delivers it before the target
+                // instruction runs.
+                if host.take_irq_check() {
+                    return Ok(Exit::TailCall(addr));
+                }
+                return Ok(Exit::TailCall(addr));
+            }
+            StackOp::Log(msg) => {
+                host.log(msg).await;
+                ip += 1;
+            }
+            StackOp::CheckCode {
+                addr,
+                expected,
+                miss_label: _,
+            } => {
+                // Instruction boundary: a trapped memory access from the
+                // *previous* instruction bails to the stepper here, before
+                // this instruction's ops commit anything.
+                if host.take_pending_trap() {
+                    return Ok(Exit::Bail(cur_inst_pc));
+                }
+                // A device access may have pended an interrupt; exit the
+                // trace here so the dispatch loop delivers it before this
+                // instruction runs.
+                if host.take_irq_check() {
+                    return Ok(Exit::TailCall(*addr));
+                }
+                // Op budget, checked at instruction boundaries.
+                if let Some(f) = fuel.as_deref_mut() {
+                    if *f == 0 {
+                        return Ok(Exit::TailCall(*addr));
+                    }
+                    *f -= 1;
+                }
+                // Code-integrity re-read, skipped when the host's fence.i/
+                // satp invalidation contract covers self-modifying code
+                // (the privileged hart). Boundary marking/fuel/trap above
+                // still run regardless.
+                let mut matches = true;
+                if host.check_code_integrity() {
+                    for (i, b) in expected.iter().enumerate() {
+                        if host.byte(addr + i as u64).await != *b {
+                            matches = false;
+                            break;
+                        }
+                    }
+                }
+                if matches {
+                    cur_inst_pc = *addr;
+                    host.note_inst_boundary();
+                    ip += 1;
+                } else {
+                    return Ok(Exit::TailCall(*addr));
+                }
+            }
+        }
+    }
+}
+
+/// Pull-aware [`find_if_else`]: scans `ops` from an `IfBegin` at `idx`,
+/// producing more ops from `producer` as the scan advances.
+#[cfg(feature = "async-host")]
+fn find_if_else_p(
+    ops: &mut Vec<StackOp>,
+    producer: &mut impl Iterator<Item = StackOp>,
+    idx: usize,
+) -> usize {
+    let mut depth = 0i32;
+    let mut i = idx + 1;
+    loop {
+        while i >= ops.len() {
+            match producer.next() {
+                Some(o) => ops.push(o),
+                None => return i,
+            }
+        }
+        match &ops[i] {
+            StackOp::IfBegin => depth += 1,
+            StackOp::IfElse if depth == 0 => return i,
+            StackOp::IfEnd => depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
+/// Pull-aware [`find_if_end`]: scans `ops` from an `IfElse` at `idx`,
+/// producing more ops from `producer` as the scan advances.
+#[cfg(feature = "async-host")]
+fn find_if_end_p(
+    ops: &mut Vec<StackOp>,
+    producer: &mut impl Iterator<Item = StackOp>,
+    idx: usize,
+) -> usize {
+    let mut depth = 0i32;
+    let mut i = idx + 1;
+    loop {
+        while i >= ops.len() {
+            match producer.next() {
+                Some(o) => ops.push(o),
+                None => return i,
+            }
+        }
+        match &ops[i] {
+            StackOp::IfBegin => depth += 1,
+            StackOp::IfEnd if depth == 0 => return i,
+            StackOp::IfEnd => depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
 
 fn sext32(v: u32) -> u64 {
     v as i32 as i64 as u64
@@ -2254,5 +2821,50 @@ mod async_tests {
         let mut host = AsyncTestHost::new();
         let exit = block_on(interpret_async(&ops, &mut host));
         assert!(matches!(exit, Exit::Ecall));
+    }
+
+    #[test]
+    fn producing_matches_eager_interpreter() {
+        // A countdown loop with an else arm: exercises the loop back-edge
+        // (Br) and the peeled IfBegin-false / IfElse forward scans that the
+        // streaming interpreter pulls through the producer. (StackOp is not
+        // Clone, so the trace is built fresh for each run.)
+        fn make_trace() -> Vec<StackOp> {
+            vec![
+                StackOp::LoopBegin { label: "L".into() },   // 0
+                StackOp::LoadReg(1),                        // 1
+                StackOp::IfBegin,                           // 2
+                StackOp::LoadReg(1),                        // 3
+                StackOp::PushImm(-1i64 as u64),             // 4
+                StackOp::Add64,                             // 5
+                StackOp::StoreReg(1),                       // 6
+                StackOp::Br { relative_depth: 1, label: "L".into() }, // 7
+                StackOp::IfElse,                            // 8
+                StackOp::PushImm(99),                       // 9
+                StackOp::StoreReg(3),                       // 10
+                StackOp::IfEnd,                             // 11
+                StackOp::LoopEnd,                           // 12
+                StackOp::PushImm(42),                       // 13
+                StackOp::TailCall,                          // 14
+            ]
+        }
+        // Eager interpreter on the materialized trace.
+        let ops = make_trace();
+        let mut h1 = AsyncTestHost::new();
+        h1.regs[1] = 3;
+        let e1 = block_on(interpret_async_fueled(&ops, &mut h1, None));
+        // Streaming interpreter pulling from a fresh trace's iterator.
+        let mut h2 = AsyncTestHost::new();
+        h2.regs[1] = 3;
+        let mut buf = Vec::new();
+        let mut producer = make_trace().into_iter();
+        let e2 = block_on(interpret_async_producing(&mut producer, &mut buf, &mut h2, None));
+        assert!(matches!(e1, Ok(Exit::TailCall(42))));
+        assert!(matches!(e2, Ok(Exit::TailCall(42))));
+        assert_eq!(h1.regs, h2.regs);
+        assert_eq!(h1.regs[1], 0);
+        assert_eq!(h1.regs[3], 99);
+        // The streaming buffer holds the full produced trace (15 ops).
+        assert_eq!(buf.len(), 15);
     }
 }
