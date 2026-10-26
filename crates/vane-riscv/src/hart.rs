@@ -1046,6 +1046,13 @@ impl HartState {
         }
 
         let shift = 12 + 9 * level as u64;
+        // Bound the TLB: it grows unboundedly with the working set, and every
+        // `sfence.vma` does an O(len) `retain` scan, so an unbounded TLB makes
+        // each flush scan the entire map. Cap it — the TLB is a cache, so a
+        // clear-on-full just costs re-walks.
+        if self.tlb.len() >= 4096 {
+            self.tlb.clear();
+        }
         // Assemble: the PTE's PPN above the page offset + the vaddr's
         // in-page (and, for superpages, in-superpage) offset.
         let pa = (ppn << 12 & !((1 << shift) - 1)) | (vaddr & ((1 << shift) - 1));
