@@ -363,6 +363,42 @@ benchmarked with the fixed-quantum / fixed-marker harness.
 5. **Phase 5 — Weval adapter + cleanup.** Share the registry with the WASM path;
    remove the now-dead `TraceFn`-closure machinery.
 
+## 7.1 Status (2026-10-27)
+
+**Phase 1** (`de6f253`) and **Phase 2** (`8319d05`, `c3b11cf`, `a29aa95`) are
+landed. Phase 2 delivered the hand-rolled aarch64 backend (all `StackOp`s
+lowered inline or via the `TraceCtx` shims, FP bit-exact via the vane-arch float
+helpers), the W^X `ExecRegion`, the heat-policy integration (per-pc heat counter
+on the macro `Core`, promote-to-native past a threshold, gated on the
+off-by-default `native-jit` feature), and a differential test suite
+(`crates/vane-jit/tests/differential.rs`).
+
+**Two real-trace bugs** surfaced only under a real Linux boot (the hand-written
+differential traces + the tiny M1 guest were too simple): (a) `Br` must NOT
+truncate the compile-time loop-offset stack — the truncate is a runtime artifact
+of the interpreter re-executing loop bodies, and at compile time it diverges the
+stack from the `relative_depth` emission depth → index underflow; (b) the
+fixed-size undo buffer must be RESET at each instruction boundary, because a
+loop re-executes its `StoreReg`s and the un-reset buffer overflows into the
+adjacent `ctx.regs`/`ctx.host` fields → null host → SIGSEGV. Both fixed in
+`a29aa95`, which also added a `catch_unwind` around codegen (any lowering bug
+falls back to the interpreter) and an env-gated `VANE_JIT_TRACE` run-log.
+
+**Validation:** a full Linux boot under the native JIT reaches userspace and
+powers down cleanly — all M4 milestones pass, including the sha256sum match
+(bit-correct guest computation).
+
+**Benchmark (honest):** on the Linux boot the JIT is roughly *performance-neutral*
+— interpreter full boot ≈ 187s, JIT full boot ≈ 204s. The boot is dominated by
+cold, run-once code that the heat threshold leaves interpreted, and the JIT's
+per-trace overheads (the ~12KB `TraceCtx` zeroing per call, the per-trace
+mmap/mprotect exec region) roughly cancel the hot-loop gains. The old "~30 min"
+interpreter estimate in `run-linux-boot-gate.sh` was stale. The JIT
+infrastructure is correct and in place; it should win on hot-loop-heavy
+workloads. Candidate perf follow-ups: share one `ExecRegion` across traces
+(amortize mmap), skip the `stack`/`undo_buf` zeroing, tune the heat threshold.
+`native-jit` stays off by default.
+
 ## 8. Risks + validation
 
 - **Correctness of codegen** — the big one. Mitigation: the interpreter producer
