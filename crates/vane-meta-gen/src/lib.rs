@@ -147,6 +147,22 @@ macro_rules! vane_meta {
             heat: $crate::core::cell::RefCell<
                 $crate::alloc::collections::BTreeMap<u64, u32>,
             >,
+            /// Code-generation counter for LAZY trace revalidation. A full
+            /// invalidation (satp write / full sfence.vma / fence.i) increments
+            /// this instead of dropping the trace cache; each cached trace
+            /// records the generation it was last validated at (`trace_gen`).
+            /// A stale trace is re-validated on its next dispatch (its code
+            /// bytes re-read via the current translation and compared to the
+            /// baked `CheckCode` bytes); only a real code change forces a
+            /// re-emit. Most invalidations don't change the code (a sfence.vma
+            /// is a TLB flush, not a code edit), so this avoids the drop +
+            /// re-emit + recompile thrash. (PLAN_NATIVE_JIT: the retain +
+            /// revalidate invalidation strategy.)
+            code_gen: $crate::core::cell::Cell<u64>,
+            /// The generation each cached trace was last validated at.
+            trace_gen: $crate::core::cell::RefCell<
+                $crate::alloc::collections::BTreeMap<u64, u64>,
+            >,
             /// Which execution engine `run` dispatches to.
             engine: $crate::vane_arch::ExecEngine,
             /// Current guest pc: the register file lives in JS (`r`) under
@@ -426,31 +442,32 @@ macro_rules! vane_meta {
                         // under the trace engine; the fence.i contract
                         // revalidates code once per fence, not per trace.)
                         let _t_lookup = _prof.then(std::time::Instant::now);
-                        let (power_off, cached_ops) = {
+                        let (power_off, mut cached_ops, needs_reval) = {
                             let mut lock = self.core.lock();
                             if lock.hart.power_pending() {
-                                (true, None)
+                                (true, None, false)
                             } else {
                                 if hart_enabled0 {
                                     lock.hart.itime = lock.hart.itime.wrapping_add(1);
                                 }
                                 if lock.code_dirty {
-                                    if std::env::var("VANE_PROFILE").is_ok() {
-                                        eprintln!("CACHE-CLEAR pc={:#x} cachelen={}", pc, lock.trace_cache.borrow().len());
-                                    }
-                                    let dropped = lock.trace_cache.borrow().len() as u64;
+                                    // fence.i: the code may have changed. Bump the
+                                    // code generation so cached traces are lazily
+                                    // re-validated on their next dispatch (retain +
+                                    // revalidate) instead of dropping + recompiling
+                                    // them all (PLAN_NATIVE_JIT).
                                     $crate::vane_arch::TRACE_FLUSH
                                         .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                                    $crate::vane_arch::TRACE_FLUSH_DROPPED
-                                        .fetch_add(dropped, core::sync::atomic::Ordering::Relaxed);
-                                    lock.trace_cache.borrow_mut().clear();
-                                    lock.trace_pages.borrow_mut().clear();
-                                    lock.page_index.borrow_mut().clear();
-                                    lock.compiled.borrow_mut().clear();
+                                    lock.code_gen.set(lock.code_gen.get() + 1);
                                     lock.code_dirty = false;
                                 }
+                                // Lazy revalidation: is the cached trace stale
+                                // (its recorded generation != the current one)?
+                                let cg = lock.code_gen.get();
+                                let needs_reval = lock.trace_cache.borrow().contains_key(&pc)
+                                    && lock.trace_gen.borrow().get(&pc).copied() != Some(cg);
                                 let ops = lock.trace_cache.borrow().get(&pc).cloned();
-                                (false, ops)
+                                (false, ops, needs_reval)
                             }
                         };
                         if let Some(t) = _t_lookup {
@@ -460,6 +477,31 @@ macro_rules! vane_meta {
                         if power_off {
                             host.flush_regs();
                             return Ok(host.pc);
+                        }
+                        // Lazy revalidation (retain + revalidate): a trace whose
+                        // code generation is stale is re-checked against the
+                        // current guest memory before it runs. Valid → refresh
+                        // its generation and run it. Stale → drop it (from every
+                        // map) and fall through to re-emit.
+                        if needs_reval {
+                            if self.revalidate_trace(pc) {
+                                let mut lock = self.core.lock();
+                                let cg = lock.code_gen.get();
+                                lock.trace_gen.borrow_mut().insert(pc, cg);
+                            } else {
+                                let mut lock = self.core.lock();
+                                lock.trace_cache.borrow_mut().remove(&pc);
+                                lock.trace_gen.borrow_mut().remove(&pc);
+                                lock.compiled.borrow_mut().remove(&pc);
+                                if let Some(pages) = lock.trace_pages.borrow_mut().remove(&pc) {
+                                    for p in pages.iter() {
+                                        if let Some(v) = lock.page_index.borrow_mut().get_mut(p) {
+                                            v.retain(|&x| x != pc);
+                                        }
+                                    }
+                                }
+                                cached_ops = None; // force a re-emit (the miss path)
+                            }
                         }
                         // Fresh undo log for this trace (trap atomicity).
                         host.undo_log.clear();
@@ -586,6 +628,9 @@ macro_rules! vane_meta {
                                     .borrow_mut()
                                     .insert(pc, pages.into_boxed_slice());
                                 lock.trace_cache.borrow_mut().insert(pc, ops.clone());
+                                // Freshly emitted + valid at the current code
+                                // generation (for lazy revalidation).
+                                lock.trace_gen.borrow_mut().insert(pc, lock.code_gen.get());
                             }
                             ops
 
@@ -739,6 +784,7 @@ macro_rules! vane_meta {
                     lock.trace_pages.borrow_mut().clear();
                     lock.page_index.borrow_mut().clear();
                     lock.compiled.borrow_mut().clear();
+                    lock.trace_gen.borrow_mut().clear();
                     lock.code_dirty = false;
                 }
 

@@ -177,6 +177,8 @@ impl Reactor {
                 page_index: std::cell::RefCell::new(std::collections::BTreeMap::new()),
                 compiled: std::cell::RefCell::new(std::collections::BTreeMap::new()),
                 heat: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+                code_gen: std::cell::Cell::new(0),
+                trace_gen: std::cell::RefCell::new(std::collections::BTreeMap::new()),
                 engine: vane_arch::ExecEngine::Interp,
                 pc: 0,
                 code_dirty: false,
@@ -353,6 +355,40 @@ impl Reactor {
         }
         #[cfg(not(feature = "native-jit"))]
         let _ = pc;
+    }
+
+    /// Re-validate a cached trace against the current guest memory: re-read the
+    /// code bytes at each `CheckCode`'s address (via the current translation)
+    /// and compare to the bytes baked at compile time. Returns true iff the
+    /// trace is still valid. This is the lazy-invalidation check that lets the
+    /// engine RETAIN traces across a full sfence.vma / satp write instead of
+    /// dropping + re-emitting + recompiling them (PLAN_NATIVE_JIT): most such
+    /// invalidations don't change the code (a sfence.vma is a TLB flush, not a
+    /// code edit), so the trace is still good. Conservative — any byte mismatch
+    /// (or a now-unmapped code page) returns false and the caller re-emits.
+    fn revalidate_trace(&self, pc: u64) -> bool {
+        let mut guard = self.core.lock();
+        let core = &mut *guard;
+        let ops = {
+            let tc = core.trace_cache.borrow();
+            match tc.get(&pc) {
+                Some(o) => o.clone(),
+                None => return false,
+            }
+        };
+        for op in ops.iter() {
+            if let vane_riscv::StackOp::CheckCode { addr, expected, .. } = op {
+                for (i, &b) in expected.iter().enumerate() {
+                    let va = addr.wrapping_add(i as u64);
+                    // Same read path as `lr_read_byte` (translate as exec).
+                    let pa = core.hart.translate_exec(&mut core.mem, va).unwrap_or(va);
+                    if core.mem.read_byte(pa) != b {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
     }
 
     /// Compile the trace rooted at `pc` with the default producer (the dense
@@ -1508,14 +1544,26 @@ impl Reactor {
                         .borrow_mut()
                         .remove(&page)
                         .unwrap_or_default();
+                    // Debug (VANE_DEBUG_SFENCE): log the flushed page + how many
+                    // traces it drops, to understand the recompile thrash.
+                    if std::env::var_os("VANE_DEBUG_SFENCE").is_some() {
+                        static N: core::sync::atomic::AtomicU64 =
+                            core::sync::atomic::AtomicU64::new(0);
+                        let n = N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if !pcs.is_empty() || n < 20 {
+                            eprintln!("[sfence] page_va={:#x} dropped={}", page << 12, pcs.len());
+                        }
+                    }
                     vane_arch::TRACE_FLUSH.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     vane_arch::TRACE_FLUSH_DROPPED
                         .fetch_add(pcs.len() as u64, core::sync::atomic::Ordering::Relaxed);
                     for pc in pcs {
                         if core.trace_cache.borrow_mut().remove(&pc).is_some() {
                             // The compiled (native/Weval) artifact for this
-                            // trace is now stale too — drop it in sync.
+                            // trace is now stale too — drop it in sync, along
+                            // with its revalidation generation.
                             core.compiled.borrow_mut().remove(&pc);
+                            core.trace_gen.borrow_mut().remove(&pc);
                             if let Some(pages) = core.trace_pages.borrow_mut().remove(&pc) {
                                 for p in pages.iter() {
                                     if let Some(v) = core.page_index.borrow_mut().get_mut(p) {
@@ -1526,16 +1574,17 @@ impl Reactor {
                         }
                     }
                 }
-                // Full clear (satp write / full sfence.vma): drop everything.
+                // Full invalidation (satp write / full sfence.vma): DON'T drop
+                // the trace cache. Bump the code generation so cached traces
+                // are lazily re-validated (their code bytes re-read + compared
+                // via `revalidate_trace`) on their next dispatch. Most such
+                // flushes don't change the code (a sfence.vma is a TLB flush,
+                // and the satp write doesn't touch the shared kernel text), so
+                // this avoids the drop + re-emit + recompile thrash. A trace
+                // whose code DID change fails revalidation and is re-emitted.
                 None => {
-                    let dropped = core.trace_cache.borrow().len() as u64;
                     vane_arch::TRACE_FLUSH.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    vane_arch::TRACE_FLUSH_DROPPED
-                        .fetch_add(dropped, core::sync::atomic::Ordering::Relaxed);
-                    core.trace_cache.borrow_mut().clear();
-                    core.trace_pages.borrow_mut().clear();
-                    core.page_index.borrow_mut().clear();
-                    core.compiled.borrow_mut().clear();
+                    core.code_gen.set(core.code_gen.get() + 1);
                 }
             }
         }
