@@ -621,19 +621,15 @@ macro_rules! vane_meta {
                         // (Weval/JIT/patcher artifact, or the default compiled
                         // interpreter) runs the trace instead of interpreting
                         // the StackOps. The callable is synchronous.
-                        let compiled = lock
-                            .compiled
-                            .borrow()
-                            .get(&pc)
-                            .map(|ct| (ct.f, ct.ops.clone()));
+                        let compiled = lock.compiled.borrow().get(&pc).cloned();
                         drop(lock);
                         if let Some(t) = _t_flush {
                             $crate::vane_arch::PROF_HOOK_NS
                                 .fetch_add(t.elapsed().as_nanos() as u64, core::sync::atomic::Ordering::Relaxed);
                         }
                         let _t_interp = _prof.then(std::time::Instant::now);
-                        let exit = if let Some((f, cops)) = compiled {
-                            f(&mut host, &cops)
+                        let exit = if let Some(ct) = compiled {
+                            (ct.f)(&mut host, &ct)
                         } else {
                             // Per-trace op budget: bounds how long a trace
                             // runs before yielding to the dispatch loop

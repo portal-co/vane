@@ -2332,6 +2332,10 @@ name = "volar-wasm-circuit-import"
 version = "0.1.0"
 
 [[patch.unused]]
+name = "dreamcompiler-ffi-sig"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "os-abi-codegen"
 version = "0.1.0"
 

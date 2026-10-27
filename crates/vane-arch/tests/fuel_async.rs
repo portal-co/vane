@@ -26,7 +26,7 @@ fn spin_loop_yields_on_fuel() {
         },
         StackOp::Br {
             relative_depth: 1,
-            label: "x".into(),
+            label: 0x1000,
         },
         StackOp::LoopEnd,
     ];
