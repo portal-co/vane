@@ -1,0 +1,10 @@
+[package]
+name = "vane-jit"
+version = "0.0.0"
+edition = "2021"
+description = "Native JIT (aarch64/x86_64/riscv64) for vane StackOp traces (PLAN_NATIVE_JIT)"
+
+[dependencies]
+vane-arch = { path = "../vane-arch", default-features = false, features = ["async-host"] }
+vane-target-core = { path = "../vane-target-core" }
+libc = "0.2"

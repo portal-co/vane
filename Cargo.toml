@@ -11,6 +11,7 @@ members = [
     "crates/vane-swap",
     "crates/vane-web",
     "crates/vane-aarch64",
+    "crates/vane-jit",
     "crates/vane-wsdom",
     "crates/vane-patch",
 ]

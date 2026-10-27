@@ -1547,6 +1547,15 @@ name = "vane-host"
 version = "0.1.0"
 
 [[package]]
+name = "vane-jit"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "vane-arch",
+ "vane-target-core",
+]
+
+[[package]]
 name = "vane-meta-gen"
 version = "0.1.0"
 dependencies = [
