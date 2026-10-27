@@ -333,3 +333,101 @@ fn hot_loop_microbench() {
         interp.as_secs_f64() / native.as_secs_f64()
     );
 }
+
+/// Convert a width discriminant back to `MemWidth` (matches the shim's `mw`).
+#[cfg(target_arch = "aarch64")]
+fn mw(d: u8) -> MemWidth {
+    match d {
+        0 => MemWidth::B1,
+        1 => MemWidth::B2,
+        2 => MemWidth::B4,
+        _ => MemWidth::B8,
+    }
+}
+
+/// Run a trace through the interpreter AND the async (fiber) native JIT,
+/// fulfilling each pending memory op against the host; assert they match. This
+/// is the Phase-A async-host proof: a JIT'd trace suspends on a host op, the
+/// driver fulfills it (a real non-local host would await here), the fiber
+/// resumes, and the result is bit-exact with the interpreter.
+#[cfg(target_arch = "aarch64")]
+fn check_async(ops: Vec<StackOp>) {
+    use vane_jit::arun::{AsyncTraceRun, PendingOp, Step};
+    let shared = vane_arch::shared_new(ops);
+    let ct_interp = compile_trace_ptr::<MockReactor>(shared.clone());
+    let ct_native = compiled_trace::<MockReactor>(shared.clone()).expect("compiles");
+    let mut host_i = make_host();
+    let mut host_n = make_host();
+    let exit_i = (ct_interp.f)(&mut host_i, &ct_interp);
+    let exit_n = {
+        let mut run = AsyncTraceRun::start(&mut host_n, &ct_native);
+        let tag = loop {
+            match run.step() {
+                Step::Done(tag) => break tag,
+                Step::Suspended(PendingOp::LoadMem {
+                    addr,
+                    width,
+                    signed,
+                }) => {
+                    let v = host_n.reactor.lr_load_mem(addr, mw(width), signed);
+                    run.resume_with(v);
+                }
+                Step::Suspended(PendingOp::StoreMem { addr, width, value }) => {
+                    host_n.reactor.lr_store_mem(addr, mw(width), value);
+                    run.resume_with(0);
+                }
+            }
+        };
+        run.finish(tag, &mut host_n, &ct_native)
+    };
+    assert_eq!(
+        exit_key(&exit_i),
+        exit_key(&exit_n),
+        "async exit divergence"
+    );
+    assert_eq!(host_i.regs, host_n.regs, "async register divergence");
+    assert_eq!(
+        *host_i.reactor.mem.borrow(),
+        *host_n.reactor.mem.borrow(),
+        "async memory divergence"
+    );
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn async_memory_ops_suspend_and_resume() {
+    // A memory round-trip (the canonical "remote memory" async op): each
+    // LoadMem/StoreMem suspends the fiber; the driver fulfills it; the trace
+    // resumes. Multiple suspensions (three memory ops) must all work.
+    check_async(vec![
+        StackOp::CheckCode {
+            addr: 0x7000,
+            expected: Box::from([0u8; 4]),
+            miss_label: String::new(),
+        },
+        StackOp::PushImm(0x2000),
+        StackOp::PushImm(0xcafe_f00d),
+        StackOp::StoreMem {
+            width: MemWidth::B8,
+        },
+        StackOp::PushImm(0x2000),
+        StackOp::LoadMem {
+            width: MemWidth::B8,
+            signed: false,
+        },
+        StackOp::StoreReg(1), // x1 = 0xcafe_f00d
+        StackOp::PushImm(0x2001),
+        StackOp::LoadMem {
+            width: MemWidth::B1,
+            signed: true,
+        },
+        StackOp::StoreReg(2), // x2 = the sign-extended byte at 0x2001
+        StackOp::PushImm(0x2008),
+        StackOp::LoadReg(1),
+        StackOp::StoreMem {
+            width: MemWidth::B4,
+        },
+        StackOp::PushImm(0xe000),
+        StackOp::TailCall,
+    ]);
+}

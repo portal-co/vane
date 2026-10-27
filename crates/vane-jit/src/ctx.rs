@@ -97,4 +97,25 @@ pub struct TraceCtx {
     pub int_to_fp: ShimIntToFp,
     pub fp_to_int: ShimFpToInt,
     pub fp_convert: ShimFpConvert,
+    // ── async suspension state (PLAN_ASYNC_JIT Phase A) ─────────────────────
+    // When a trace runs on a fiber against an async host, a suspending shim
+    // writes a `pending_op::*` tag + args here and yields; the driver fulfills
+    // the op, stores the result in `pending_result`, and resumes the fiber.
+    // These are appended at the end so the existing field offsets (which the
+    // codegen bakes via `offset_of!`) are unchanged.
+    /// The pending async op tag (`pending_op::NONE` when not suspended).
+    pub pending_op: u32,
+    /// Pending op args (op-specific: addr / width / value / ...).
+    pub pending_a: u64,
+    pub pending_b: u64,
+    pub pending_c: u64,
+    /// The fulfilled op's result, read by the shim on resume.
+    pub pending_result: u64,
+}
+
+/// Pending-op tags written by the async shims into `TraceCtx::pending_op`.
+pub mod pending_op {
+    pub const NONE: u32 = 0;
+    pub const LOAD_MEM: u32 = 1;
+    pub const STORE_MEM: u32 = 2;
 }

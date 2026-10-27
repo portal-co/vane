@@ -19,6 +19,10 @@ pub mod shims;
 
 #[cfg(target_arch = "aarch64")]
 pub mod aarch64;
+#[cfg(target_arch = "aarch64")]
+pub mod arun;
+#[cfg(target_arch = "aarch64")]
+pub mod fiber;
 
 // ── the native-trace exit tags ──────────────────────────────────────────────
 // The native entry returns one of these (in `x0`); the exit pc is written to
@@ -94,6 +98,19 @@ pub fn native_adapter<R: LocalReactor>(
     // Safety: the ctx is valid for the call; `ct.ops` outlives it (the
     // dispatch loop holds the `CompiledTrace`).
     let tag = unsafe { code(&mut ctx, ct.ops.as_ptr(), ct.ops.len()) };
+    map_exit(host, &ctx, ct, tag)
+}
+
+/// Translate a native exit tag + the resulting `TraceCtx` into the
+/// interpreter's `Exit` (shared by the sync adapter and the async driver).
+/// Marks the register cache dirty and, on `Bail`, hands the current
+/// instruction's register writes to the host's undo log.
+pub(crate) fn map_exit<R: LocalReactor>(
+    host: &mut LocalStackHost<R>,
+    ctx: &ctx::TraceCtx,
+    ct: &CompiledTrace<R>,
+    tag: u8,
+) -> Exit {
     // The native code wrote the register cache (`ctx.regs` aliases
     // `host.regs`); mark it dirty so the host flushes it.
     host.regs_dirty = true;

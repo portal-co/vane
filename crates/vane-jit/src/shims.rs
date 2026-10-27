@@ -164,6 +164,54 @@ pub unsafe extern "C" fn shim_fp_convert(from: u8, to: u8, val: u64) -> u64 {
     float_convert(fw(from), fw(to), val)
 }
 
+// ── async host shims (PLAN_ASYNC_JIT Phase A, aarch64 fiber-based) ──────────
+// These SUSPEND the fiber instead of touching the reactor: the pending op is
+// stashed in the ctx, the driver fulfills it (awaiting a non-local host), and
+// the fiber resumes with the result in `pending_result`. The generated trace
+// code is unchanged — it just calls the shim fn-pointer; only the shim
+// implementation differs, so one compiled trace serves both sync and async
+// hosts.
+#[cfg(target_arch = "aarch64")]
+pub unsafe extern "C" fn shim_mem_load_async(
+    ctx: *mut TraceCtx,
+    addr: u64,
+    width: u8,
+    signed: u8,
+) -> u64 {
+    let c = unsafe { &mut *ctx };
+    c.pending_op = crate::ctx::pending_op::LOAD_MEM;
+    c.pending_a = addr;
+    c.pending_b = width as u64;
+    c.pending_c = signed as u64;
+    unsafe { crate::fiber::fiber_suspend() };
+    c.pending_result
+}
+
+#[cfg(target_arch = "aarch64")]
+pub unsafe extern "C" fn shim_mem_store_async(ctx: *mut TraceCtx, addr: u64, width: u8, val: u64) {
+    let c = unsafe { &mut *ctx };
+    c.pending_op = crate::ctx::pending_op::STORE_MEM;
+    c.pending_a = addr;
+    c.pending_b = width as u64;
+    c.pending_c = val;
+    unsafe { crate::fiber::fiber_suspend() };
+}
+
+/// Build a `TraceCtx` whose memory shims SUSPEND the fiber (for an async host)
+/// instead of touching the reactor. The other shims are the sync ones.
+#[cfg(target_arch = "aarch64")]
+pub fn build_async_ctx<R: LocalReactor>(host: &mut LocalStackHost<R>) -> TraceCtx {
+    let mut ctx = build_ctx(host);
+    ctx.mem_load = shim_mem_load_async;
+    ctx.mem_store = shim_mem_store_async;
+    ctx.pending_op = crate::ctx::pending_op::NONE;
+    ctx.pending_a = 0;
+    ctx.pending_b = 0;
+    ctx.pending_c = 0;
+    ctx.pending_result = 0;
+    ctx
+}
+
 /// Build the `TraceCtx` for a native trace run against `host`: the shim table,
 /// the register-cache pointer (`host.regs`), and a zeroed depth/undo/fuel.
 ///
