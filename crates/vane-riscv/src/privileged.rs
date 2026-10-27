@@ -146,6 +146,10 @@ pub fn execute_privileged(
                     set_reg(regs, $dest, old);
                     let mut r = PrivExec::cont();
                     r.clear_traces = is_satp;
+                    if is_satp {
+                        vane_arch::FLUSH_SATP
+                            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    }
                     return r;
                 }
                 Err(t) => return PrivExec::divert(hart.raise(t, pc)),
@@ -206,8 +210,15 @@ pub fn execute_privileged(
             {
                 return illegal(hart);
             }
-            hart.sfence_vma(regs[(addr.0 % 32) as usize], regs[(asid.0 % 32) as usize]);
+            let sva = regs[(addr.0 % 32) as usize];
+            if sva == 0 {
+                vane_arch::SFENCE_FULL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            } else {
+                vane_arch::SFENCE_SPECIFIC.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+            hart.sfence_vma(sva, regs[(asid.0 % 32) as usize]);
             // Mappings changed: the VA-keyed trace cache is stale.
+            vane_arch::FLUSH_SFENCE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             let mut r = PrivExec::cont();
             r.clear_traces = true;
             r
@@ -229,6 +240,7 @@ pub fn execute_privileged(
         }
         Inst::FenceI => {
             // Self-modifying code: the trace cache must be revalidated.
+            vane_arch::FLUSH_FENCEI.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             let mut r = PrivExec::cont();
             r.code_dirty = true;
             r

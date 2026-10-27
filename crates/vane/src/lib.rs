@@ -1447,7 +1447,11 @@ impl Reactor {
             regs,
         );
         if r.clear_traces {
-            core.trace_cache.borrow_mut().clear();
+            let mut tc = core.trace_cache.borrow_mut();
+            vane_arch::TRACE_FLUSH.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            vane_arch::TRACE_FLUSH_DROPPED
+                .fetch_add(tc.len() as u64, core::sync::atomic::Ordering::Relaxed);
+            tc.clear();
         }
         if r.code_dirty {
             core.code_dirty = true;

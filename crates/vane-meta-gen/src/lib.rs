@@ -362,11 +362,18 @@ macro_rules! vane_meta {
                         if _hb && _hb_last.elapsed().as_secs() >= 2 {
                             _hb_last = std::time::Instant::now();
                             eprintln!(
-                                "  ..trace progress pc={:#x} td=({},{},{}) prof=(lk={} irq={} hk={} it={} cc={})",
+                                "  ..trace progress pc={:#x} td=({},{},{}) tf=({},{}) fs=(satp={},sf={},fi={}) sff=(full={},spec={}) prof=(lk={} irq={} hk={} it={} cc={})",
                                 host.pc,
                                 $crate::vane_arch::TRACE_HIT.load(core::sync::atomic::Ordering::Relaxed),
                                 $crate::vane_arch::TRACE_MISS.load(core::sync::atomic::Ordering::Relaxed),
                                 $crate::vane_arch::TRACE_COMPILE.load(core::sync::atomic::Ordering::Relaxed),
+                                $crate::vane_arch::TRACE_FLUSH.load(core::sync::atomic::Ordering::Relaxed),
+                                $crate::vane_arch::TRACE_FLUSH_DROPPED.load(core::sync::atomic::Ordering::Relaxed),
+                                $crate::vane_arch::FLUSH_SATP.load(core::sync::atomic::Ordering::Relaxed),
+                                $crate::vane_arch::FLUSH_SFENCE.load(core::sync::atomic::Ordering::Relaxed),
+                                $crate::vane_arch::FLUSH_FENCEI.load(core::sync::atomic::Ordering::Relaxed),
+                                $crate::vane_arch::SFENCE_FULL.load(core::sync::atomic::Ordering::Relaxed),
+                                $crate::vane_arch::SFENCE_SPECIFIC.load(core::sync::atomic::Ordering::Relaxed),
                                 $crate::vane_arch::PROF_LOCK_NS.load(core::sync::atomic::Ordering::Relaxed),
                                 $crate::vane_arch::PROF_IRQ_NS.load(core::sync::atomic::Ordering::Relaxed),
                                 $crate::vane_arch::PROF_HOOK_NS.load(core::sync::atomic::Ordering::Relaxed),
@@ -406,6 +413,11 @@ macro_rules! vane_meta {
                                     if std::env::var("VANE_PROFILE").is_ok() {
                                         eprintln!("CACHE-CLEAR pc={:#x} cachelen={}", pc, lock.trace_cache.borrow().len());
                                     }
+                                    let dropped = lock.trace_cache.borrow().len() as u64;
+                                    $crate::vane_arch::TRACE_FLUSH
+                                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                    $crate::vane_arch::TRACE_FLUSH_DROPPED
+                                        .fetch_add(dropped, core::sync::atomic::Ordering::Relaxed);
                                     lock.trace_cache.borrow_mut().clear();
                                     lock.compiled.borrow_mut().clear();
                                     lock.code_dirty = false;

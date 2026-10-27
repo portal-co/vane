@@ -536,6 +536,20 @@ pub enum ExecEngine {
 pub static TRACE_HIT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub static TRACE_MISS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub static TRACE_COMPILE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Trace-cache flush instrumentation: `TRACE_FLUSH` counts cache clears
+/// (satp write / sfence.vma / fence.i), `TRACE_FLUSH_DROPPED` sums the number
+/// of cached traces dropped across those clears (the recompile debt).
+pub static TRACE_FLUSH: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static TRACE_FLUSH_DROPPED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Per-source flush counters (which privileged op triggered the clear).
+pub static FLUSH_SATP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static FLUSH_SFENCE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static FLUSH_FENCEI: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// sfence.vma granularity: `SFENCE_FULL` is addr==0 (whole-asid), `SFENCE_SPECIFIC`
+/// is a single-page flush. Determines whether a fine-grained trace-cache
+/// invalidation (vs the current whole-cache clear) is feasible.
+pub static SFENCE_FULL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static SFENCE_SPECIFIC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Read the trace-dispatch counters: (hits, misses, compiles).
 pub fn trace_dispatch_counters() -> (u64, u64, u64) {
