@@ -1197,24 +1197,19 @@ pub fn a64_emit(this: &TemplateJit<'_>) -> Vec<StackOp> {
     let mut ops = Vec::new();
     match this.labels.lookup(this.pc) {
         None => {
-            let label = alloc::format!("a64_{:x}", this.pc);
             let labels = this.labels.insert(
                 this.pc,
-                vane_arch::template::Label {
-                    ident_name: label.clone(),
-                    index: this.depth,
-                },
+                vane_arch::template::Label { index: this.depth },
             );
-            ops.push(StackOp::LoopBegin { label });
+            ops.push(StackOp::LoopBegin { label: this.pc });
             ops.extend(a64_body(this, labels, this.depth + 1));
             ops.push(StackOp::LoopEnd);
         }
         Some(lbl) => {
             let relative_depth = this.depth - lbl.index;
-            let label = lbl.ident_name.clone();
             ops.push(StackOp::Br {
                 relative_depth,
-                label,
+                label: this.pc,
             });
         }
     }

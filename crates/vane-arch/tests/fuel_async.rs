@@ -18,7 +18,7 @@ impl LocalReactor for H {
 fn spin_loop_yields_on_fuel() {
     // A trace for `spin: j spin` — LoopBegin, CheckCode(match), Br(0).
     let ops = vec![
-        StackOp::LoopBegin { label: "x".into() },
+        StackOp::LoopBegin { label: 0 },
         StackOp::CheckCode {
             addr: 0x1000,
             expected: Box::from([0u8; 4]),

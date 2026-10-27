@@ -73,18 +73,24 @@ pub enum StackOp {
     // ── Control flow ──────────────────────────────────────────────────────
     /// Open a named infinite loop.  All opcodes up to the matching `LoopEnd`
     /// form the loop body.  Created by `CoreOpcode::loop`.
+    ///
+    /// `label` is the guest pc of the block that opened the loop. The
+    /// interpreter and WASM shim ignore it (they match on position /
+    /// `relative_depth`); only the JS shim renders it, as `x{pc}`.
     LoopBegin {
-        label: alloc::string::String,
+        label: u64,
     },
     /// Close the most recently opened `LoopBegin`.
     LoopEnd,
 
     /// Unconditional backward branch.
     /// `relative_depth` counts open loops outward from the branch site
-    /// (WASM semantics).  `label` is used by the JS shim (`continue label`).
+    /// (WASM semantics).  `label` is the guest pc of the target loop's block
+    /// (the JS shim renders it `continue x{pc}`); the interpreter and WASM
+    /// shim use only `relative_depth`.
     Br {
         relative_depth: u32,
-        label: alloc::string::String,
+        label: u64,
     },
 
     /// Conditional split: pop top-of-stack (u64; 0 = false), enter the
@@ -271,18 +277,17 @@ pub enum StackOp {
 impl<'op> CoreOpcode<'op> for StackOp {
     fn r#loop(
         body: impl Iterator<Item = Self> + 'op,
-        name: impl Display,
+        name: u64,
     ) -> impl Iterator<Item = Self> + 'op {
-        let label = alloc::format!("{name}");
-        core::iter::once(StackOp::LoopBegin { label })
+        core::iter::once(StackOp::LoopBegin { label: name })
             .chain(body)
             .chain(core::iter::once(StackOp::LoopEnd))
     }
 
-    fn br(relative_depth: u32, name: impl Display) -> impl Iterator<Item = Self> {
+    fn br(relative_depth: u32, name: u64) -> impl Iterator<Item = Self> {
         core::iter::once(StackOp::Br {
             relative_depth,
-            label: alloc::format!("{name}"),
+            label: name,
         })
     }
 }

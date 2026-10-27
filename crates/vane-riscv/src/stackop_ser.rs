@@ -80,7 +80,7 @@ pub fn encode_op(op: &StackOp, w: &mut Writer) {
     match op {
         LoopBegin { label } => {
             w.u8(0);
-            w.str(label);
+            w.u64(*label);
         }
         LoopEnd => w.u8(1),
         Br {
@@ -89,7 +89,7 @@ pub fn encode_op(op: &StackOp, w: &mut Writer) {
         } => {
             w.u8(2);
             w.u32(*relative_depth);
-            w.str(label);
+            w.u64(*label);
         }
         IfBegin => w.u8(3),
         IfElse => w.u8(4),
@@ -239,11 +239,11 @@ pub fn encode_op(op: &StackOp, w: &mut Writer) {
 pub fn decode_op(r: &mut Reader) -> Result<StackOp, SerError> {
     use StackOp::*;
     Ok(match r.u8()? {
-        0 => LoopBegin { label: r.str()? },
+        0 => LoopBegin { label: r.u64()? },
         1 => LoopEnd,
         2 => Br {
             relative_depth: r.u32()?,
-            label: r.str()?,
+            label: r.u64()?,
         },
         3 => IfBegin,
         4 => IfElse,

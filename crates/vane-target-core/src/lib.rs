@@ -22,13 +22,14 @@ pub trait CoreOpcode<'op>: Sized + 'op {
     /// - WASM: `loop … end`
     fn r#loop(
         body: impl Iterator<Item = Self> + 'op,
-        name: impl Display,
+        name: u64,
     ) -> impl Iterator<Item = Self> + 'op;
 
     /// Emit an unconditional branch to a previously-opened loop.
     ///
     /// `relative_depth` is `depth_at_branch_site − depth_at_label_definition`
-    /// (WASM semantics). `name` is the label identifier used by the JS shim
-    /// (`continue name`); the WASM shim uses `relative_depth` and ignores it.
-    fn br(relative_depth: u32, name: impl Display) -> impl Iterator<Item = Self>;
+    /// (WASM semantics). `name` is the guest pc of the loop's block, rendered
+    /// as `x{pc}` by the JS shim (`continue x{pc}`); the WASM shim and the
+    /// interpreter use `relative_depth` and ignore it.
+    fn br(relative_depth: u32, name: u64) -> impl Iterator<Item = Self>;
 }

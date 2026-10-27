@@ -1115,8 +1115,7 @@ pub async fn interpret_async(ops: &[StackOp], host: &mut impl AsyncStackHost) ->
 /// artifact is a plain function pointer, and the interpreter fallback never
 /// actually pends for a local host.
 #[cfg(all(feature = "async-host", target_has_atomic = "ptr"))]
-pub type TraceFn<R> =
-    alloc::sync::Arc<dyn Fn(&mut LocalStackHost<R>) -> Exit + Send + Sync>;
+pub type TraceFn<R> = alloc::sync::Arc<dyn Fn(&mut LocalStackHost<R>) -> Exit + Send + Sync>;
 /// Single-threaded (atomic-less wasm) build: no `Send + Sync` needed.
 #[cfg(all(feature = "async-host", not(target_has_atomic = "ptr")))]
 pub type TraceFn<R> = alloc::rc::Rc<dyn Fn(&mut LocalStackHost<R>) -> Exit>;
@@ -1125,9 +1124,7 @@ pub type TraceFn<R> = alloc::rc::Rc<dyn Fn(&mut LocalStackHost<R>) -> Exit>;
 /// is the always-available producer; Weval/JIT/patcher backends register
 /// their own callables instead (same registry, faster artifacts).
 #[cfg(all(feature = "async-host", target_has_atomic = "ptr"))]
-pub fn compile_trace<R: LocalReactor>(
-    ops: crate::Shared<alloc::vec::Vec<StackOp>>,
-) -> TraceFn<R> {
+pub fn compile_trace<R: LocalReactor>(ops: crate::Shared<alloc::vec::Vec<StackOp>>) -> TraceFn<R> {
     alloc::sync::Arc::new(move |host: &mut LocalStackHost<R>| {
         // The local host never pends, so this completes in one poll. The op
         // budget matters: a looping trace must still yield to the dispatch
@@ -1139,9 +1136,7 @@ pub fn compile_trace<R: LocalReactor>(
 }
 /// Single-threaded (atomic-less wasm) build.
 #[cfg(all(feature = "async-host", not(target_has_atomic = "ptr")))]
-pub fn compile_trace<R: LocalReactor>(
-    ops: alloc::rc::Rc<alloc::vec::Vec<StackOp>>,
-) -> TraceFn<R> {
+pub fn compile_trace<R: LocalReactor>(ops: alloc::rc::Rc<alloc::vec::Vec<StackOp>>) -> TraceFn<R> {
     alloc::rc::Rc::new(move |host: &mut LocalStackHost<R>| {
         let mut fuel: u64 = 4096;
         block_on_ready(interpret_async_fueled(&ops, host, Some(&mut fuel)))
@@ -2515,7 +2510,7 @@ mod tests {
     fn br_loops_back_to_loop_start() {
         // x1 counts down from 3 to 0 via a backward Br, then tail-calls.
         let ops = vec![
-            StackOp::LoopBegin { label: "L".into() },
+            StackOp::LoopBegin { label: 0 },
             StackOp::LoadReg(1),
             StackOp::PushImm(1),
             StackOp::Sub64,
@@ -2524,7 +2519,7 @@ mod tests {
             StackOp::IfBegin,
             StackOp::Br {
                 relative_depth: 1,
-                label: "L".into(),
+                label: 0,
             },
             StackOp::IfElse,
             StackOp::IfEnd,
@@ -2847,7 +2842,7 @@ mod async_tests {
         // Clone, so the trace is built fresh for each run.)
         fn make_trace() -> Vec<StackOp> {
             vec![
-                StackOp::LoopBegin { label: "L".into() }, // 0
+                StackOp::LoopBegin { label: 0 }, // 0
                 StackOp::LoadReg(1),                      // 1
                 StackOp::IfBegin,                         // 2
                 StackOp::LoadReg(1),                      // 3

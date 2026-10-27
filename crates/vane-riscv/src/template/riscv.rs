@@ -154,22 +154,14 @@ fn emit_block(
     match labels.lookup(pc) {
         Some(lbl) => {
             let relative_depth = depth - lbl.index;
-            let label = lbl.ident_name.clone();
             out_ops.push(StackOp::Br {
                 relative_depth,
-                label,
+                label: pc,
             });
         }
         None => {
-            let label = alloc::format!("x{}", pc);
-            let body_labels = labels.insert(
-                pc,
-                Label {
-                    ident_name: label.clone(),
-                    index: depth,
-                },
-            );
-            out_ops.push(StackOp::LoopBegin { label });
+            let body_labels = labels.insert(pc, Label { index: depth });
+            out_ops.push(StackOp::LoopBegin { label: pc });
             rv_body(params, pc, body_labels, depth + 1, out_ops, out_work);
             // LoopEnd closes this block *after* its continuations.
             out_work.push(Work::Op(StackOp::LoopEnd));

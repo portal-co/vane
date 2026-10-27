@@ -102,11 +102,11 @@ fn js_string_literal(input: &str) -> alloc::string::String {
     output
 }
 
-/// A single named loop label.  Owned strings so the label map can be cloned
-/// cheaply without lifetime constraints on the containing types.
+/// A single loop label: just the inline depth at which the loop opened. The
+/// label's identity is the block's guest pc (the [`Labels`] map key), which
+/// the JS shim renders as `x{pc}` — so no owned name string is stored here.
 #[derive(Clone)]
 pub struct Label {
-    pub ident_name: alloc::string::String,
     pub index: u32,
 }
 
@@ -306,21 +306,14 @@ impl<'b> TemplateJit<'b> {
         // the interpreter-only path (spday-exec).
         let out: alloc::vec::Vec<O> = match self.labels.lookup(self.pc) {
             None => {
-                let label_name = alloc::format!("x{}", self.pc);
-                let labels = self.labels.insert(
-                    self.pc,
-                    Label {
-                        ident_name: label_name.clone(),
-                        index: self.depth,
-                    },
-                );
+                let labels = self.labels.insert(self.pc, Label { index: self.depth });
                 let nd = self.depth + 1;
                 let i = go(labels, nd);
-                O::r#loop(i, label_name).collect()
+                O::r#loop(i, self.pc).collect()
             }
             Some(lbl) => {
                 let relative_depth = self.depth - lbl.index;
-                O::br(relative_depth, lbl.ident_name.clone()).collect()
+                O::br(relative_depth, self.pc).collect()
             }
         };
         out.into_iter()
@@ -365,7 +358,7 @@ pub fn render_stack_to_js_with_names<N: HostMethodNames<VaneHostMethod>>(
 
     let data = alloc::format!("{}", flate.flate("data"));
     let mut val: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
-    let mut lbls: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+    let mut lbls: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
     let mut tmp = 0usize;
 
     macro_rules! push {
@@ -393,15 +386,15 @@ pub fn render_stack_to_js_with_names<N: HostMethodNames<VaneHostMethod>>(
         match op {
             // ── Control flow ─────────────────────────────────────────────
             StackOp::LoopBegin { label } => {
-                write!(f, "{label}: for(;;){{")?;
+                write!(f, "x{label}: for(;;){{")?;
                 lbls.push(label);
             }
             StackOp::LoopEnd => {
                 let label = lbls.pop().unwrap_or_default();
-                write!(f, "break {label};}}")?;
+                write!(f, "break x{label};}}")?;
             }
             StackOp::Br { label, .. } => {
-                write!(f, "continue {label};")?;
+                write!(f, "continue x{label};")?;
             }
             StackOp::IfBegin => {
                 let cond = pop!();
