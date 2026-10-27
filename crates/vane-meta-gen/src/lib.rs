@@ -131,14 +131,14 @@ macro_rules! vane_meta {
                 >,
             >,
             /// Compiled-trace registry (Weval/JIT/binary-patcher artifacts,
-            /// or the default dense interpreter via `compile_trace`). Keyed by
-            /// the trace's root guest pc. The dispatch loop consults this
+            /// or the default dense interpreter via `compile_trace_ptr`). Keyed
+            /// by the trace's root guest pc. The dispatch loop consults this
             /// before interpreting the `trace_cache` ops — a registered
-            /// callable runs instead of interpreting the StackOps.
+            /// raw-fn-pointer runs instead of interpreting the StackOps.
             compiled: $crate::core::cell::RefCell<
                 $crate::alloc::collections::BTreeMap<
                     u64,
-                    $crate::vane_arch::interp::TraceFn<$t>,
+                    $crate::vane_arch::interp::CompiledTrace<$t>,
                 >,
             >,
             /// Which execution engine `run` dispatches to.
@@ -621,15 +621,19 @@ macro_rules! vane_meta {
                         // (Weval/JIT/patcher artifact, or the default compiled
                         // interpreter) runs the trace instead of interpreting
                         // the StackOps. The callable is synchronous.
-                        let compiled = lock.compiled.borrow().get(&pc).cloned();
+                        let compiled = lock
+                            .compiled
+                            .borrow()
+                            .get(&pc)
+                            .map(|ct| (ct.f, ct.ops.clone()));
                         drop(lock);
                         if let Some(t) = _t_flush {
                             $crate::vane_arch::PROF_HOOK_NS
                                 .fetch_add(t.elapsed().as_nanos() as u64, core::sync::atomic::Ordering::Relaxed);
                         }
                         let _t_interp = _prof.then(std::time::Instant::now);
-                        let exit = if let Some(cf) = compiled {
-                            cf(&mut host)
+                        let exit = if let Some((f, cops)) = compiled {
+                            f(&mut host, &cops)
                         } else {
                             // Per-trace op budget: bounds how long a trace
                             // runs before yielding to the dispatch loop

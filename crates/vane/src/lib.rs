@@ -5,7 +5,6 @@ mod utils;
 use rv_asm::{Inst, Reg, Xlen};
 #[cfg(feature = "js-host")]
 use std::cell::OnceCell;
-use std::rc::Rc;
 /// Engine selection for `run` (interpreter vs JS JIT); see PLAN_LINUX_WASM.md §4.
 pub use vane_arch::ExecEngine;
 
@@ -272,15 +271,16 @@ impl Reactor {
         self.with_machine(|m| m.add_virtio(device))
     }
 
-    /// Register a compiled trace callable for the trace rooted at guest
-    /// `pc` (M-perf / PLAN §4.2). This is the global exposure point for
-    /// Weval/JIT/binary-patcher backends: they produce a [`TraceFn`] (a
-    /// native/compiled callable) and insert it here; the dispatch loop then
-    /// runs it instead of interpreting the trace's `StackOp`s.
+    /// Register a compiled trace for the trace rooted at guest `pc`
+    /// (PLAN_NATIVE_JIT). This is the global exposure point for the
+    /// Weval/JIT/native-patcher backends: they produce a [`CompiledTrace`] (a
+    /// raw fn pointer + the ops + the backend tag) and insert it here; the
+    /// dispatch loop then calls the fn pointer instead of interpreting the
+    /// trace's `StackOp`s.
     ///
-    /// [`TraceFn`]: vane_arch::interp::TraceFn
-    pub fn register_compiled_trace(&self, pc: u64, f: vane_arch::interp::TraceFn<Self>) {
-        self.core.lock().compiled.borrow_mut().insert(pc, f);
+    /// [`CompiledTrace`]: vane_arch::interp::CompiledTrace
+    pub fn register_compiled_trace(&self, pc: u64, ct: vane_arch::interp::CompiledTrace<Self>) {
+        self.core.lock().compiled.borrow_mut().insert(pc, ct);
     }
 
     /// Serialize the hot trace cache (guest pc → `StackOp` trace) to bytes, so
@@ -314,11 +314,20 @@ impl Reactor {
     /// This is the hook a heat policy calls to promote hot traces; a
     /// Weval/JIT backend would instead call `register_compiled_trace` with a
     /// natively-compiled artifact.
+    /// Compile the trace rooted at `pc` with the default producer (the dense
+    /// interpreter as a raw fn pointer) and register it, so subsequent
+    /// dispatches call it as a function pointer instead of interpreting.
+    /// Returns false if the trace isn't compiled yet (run it once first to
+    /// populate the trace cache).
+    ///
+    /// This is the hook a heat policy calls to promote hot traces; a
+    /// Weval/JIT backend would instead call `register_compiled_trace` with a
+    /// natively-compiled artifact.
     pub fn compile_trace_at(&self, pc: u64) -> bool {
         let ops = self.core.lock().trace_cache.borrow().get(&pc).cloned();
         match ops {
             Some(ops) => {
-                self.register_compiled_trace(pc, vane_arch::interp::compile_trace(ops));
+                self.register_compiled_trace(pc, vane_arch::interp::compile_trace_ptr(ops));
                 true
             }
             None => false,

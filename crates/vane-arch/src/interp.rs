@@ -1140,8 +1140,73 @@ pub fn compile_trace<R: LocalReactor>(ops: alloc::rc::Rc<alloc::vec::Vec<StackOp
     alloc::rc::Rc::new(move |host: &mut LocalStackHost<R>| {
         let mut fuel: u64 = 4096;
         block_on_ready(interpret_async_fueled(&ops, host, Some(&mut fuel)))
-            .expect("a fuel budget yields Exit::TailCall, not FuelExhausted")
+            .expect("a fuel budget was supplied, so FuelExhausted is unreachable")
     })
+}
+
+// ── Raw-function-pointer compiled-trace ABI (PLAN_NATIVE_JIT) ───────────────
+
+/// Which backend produced a [`CompiledTrace`] (for stats/debug).
+#[cfg(feature = "async-host")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TraceBackend {
+    /// The default dense interpreter ([`interp_trace`]).
+    Interp,
+    /// Native JIT (aarch64 / x86_64 / riscv64 machine code).
+    Jit,
+    /// Ahead-of-time compiled (measured, generic hot traces).
+    Aot,
+    /// Weval / WASM binary-patcher artifact.
+    Weval,
+}
+
+/// A raw compiled-trace function pointer: runs one trace against the host,
+/// returning the exit reason. Unlike [`TraceFn`] (a closure that captures its
+/// ops), this is a plain `fn` — the `ops` are *passed in* (held alongside in
+/// [`CompiledTrace`]), so the artifact carries no captured environment and no
+/// `Arc`/`Rc` refcount. The native-JIT/AOT/Weval producers all register this
+/// same shape; the interpreter is the always-available fallback
+/// ([`interp_trace`]).
+///
+/// The fn pointer is monomorphized per reactor `R`: `CompiledTrace<R>` lives in
+/// the `R`-generic Core, so no type erasure is needed on this path. (The
+/// native-JIT C-ABI entry — `TraceCtx` + a non-generic `extern "C"` fn — is a
+/// Phase-2 addition layered on top.)
+#[cfg(feature = "async-host")]
+pub type CompiledTraceFn<R> = fn(&mut LocalStackHost<R>, &[StackOp]) -> Exit;
+
+/// One registered compiled trace: the callable + the ops it was built from +
+/// the producing backend.
+#[cfg(feature = "async-host")]
+pub struct CompiledTrace<R: LocalReactor> {
+    pub f: CompiledTraceFn<R>,
+    pub ops: crate::Shared<alloc::vec::Vec<StackOp>>,
+    pub kind: TraceBackend,
+}
+
+/// The default interpreter producer: run the fused interpreter over `ops`.
+/// This is the reference implementation the native JIT is differentially
+/// tested against (it must produce identical register state + `Exit`).
+#[cfg(feature = "async-host")]
+pub fn interp_trace<R: LocalReactor>(host: &mut LocalStackHost<R>, ops: &[StackOp]) -> Exit {
+    // The local host never pends, so this completes in one poll. The op
+    // budget matters: a looping trace must still yield to the dispatch loop
+    // (interrupt delivery, fuel) via Exit::TailCall.
+    let mut fuel: u64 = 4096;
+    block_on_ready(interpret_async_fueled(ops, host, Some(&mut fuel)))
+        .expect("a fuel budget yields Exit::TailCall, not FuelExhausted")
+}
+
+/// The default trace compiler: build a [`CompiledTrace`] backed by the
+/// interpreter. (Native-JIT/AOT/Weval producers register their own `f` with
+/// the same `ops`.)
+#[cfg(feature = "async-host")]
+pub fn compile_trace_ptr<R: LocalReactor>(ops: crate::Shared<alloc::vec::Vec<StackOp>>) -> CompiledTrace<R> {
+    CompiledTrace {
+        f: interp_trace::<R>,
+        ops,
+        kind: TraceBackend::Interp,
+    }
 }
 
 /// Drive a future that never pends to completion. Used to run the async
