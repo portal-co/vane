@@ -1484,6 +1484,7 @@ dependencies = [
  "rv-asm",
  "spin 0.10.0",
  "vane-arch",
+ "vane-jit",
  "vane-meta-gen",
  "vane-riscv",
  "vane-swap",
@@ -2176,6 +2177,10 @@ name = "lazy-repo-std"
 version = "0.1.0"
 
 [[patch.unused]]
+name = "dreamcompiler-ffi-sig"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "thin-mcp"
 version = "0.1.0"
 
@@ -2329,10 +2334,6 @@ version = "0.1.0"
 
 [[patch.unused]]
 name = "volar-wasm-circuit-import"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-ffi-sig"
 version = "0.1.0"
 
 [[patch.unused]]

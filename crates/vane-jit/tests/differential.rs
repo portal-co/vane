@@ -98,19 +98,19 @@ fn alu_and_registers() {
         },
         StackOp::LoadReg(1), // x1 = 0
         StackOp::PushImm(5),
-        StackOp::Add64, // 5
+        StackOp::Add64,       // 5
         StackOp::StoreReg(2), // x2 = 5
         StackOp::LoadReg(2),
         StackOp::PushImm(3),
-        StackOp::Mul64, // 15
+        StackOp::Mul64,       // 15
         StackOp::StoreReg(3), // x3 = 15
         StackOp::LoadReg(3),
         StackOp::PushImm(0),
-        StackOp::DivU64, // 15 / 0 = u64::MAX
+        StackOp::DivU64,      // 15 / 0 = u64::MAX
         StackOp::StoreReg(4), // x4 = u64::MAX
         StackOp::LoadReg(3),
         StackOp::PushImm(0),
-        StackOp::RemU64, // 15 % 0 = 15
+        StackOp::RemU64,      // 15 % 0 = 15
         StackOp::StoreReg(5), // x5 = 15
         StackOp::PushImm(0x8000_0000_0000_0000u64),
         StackOp::PushImm(0),
@@ -135,11 +135,11 @@ fn shifts_and_comparisons() {
         StackOp::StoreReg(1), // x1 = 64
         StackOp::PushImm(5),
         StackOp::PushImm(3),
-        StackOp::LtU64, // 5 < 3 = 0
+        StackOp::LtU64,       // 5 < 3 = 0
         StackOp::StoreReg(2), // x2 = 0
         StackOp::PushImm(5),
         StackOp::PushImm(3),
-        StackOp::GeS64, // 5 >= 3 = 1
+        StackOp::GeS64,       // 5 >= 3 = 1
         StackOp::StoreReg(3), // x3 = 1
         StackOp::PushImm(0x9000),
         StackOp::TailCall,

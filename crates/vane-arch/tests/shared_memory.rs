@@ -48,7 +48,11 @@ fn unshared_mem_instances_stay_independent() {
     let mut b = Mem::default();
     a.write_byte(0x10, 0xAA);
     assert_eq!(a.read_byte(0x10), 0xAA);
-    assert_eq!(b.read_byte(0x10), 0, "independent Mem instances must not share state");
+    assert_eq!(
+        b.read_byte(0x10),
+        0,
+        "independent Mem instances must not share state"
+    );
 }
 
 #[test]
@@ -61,7 +65,11 @@ fn shared_mem_respects_text_hole_across_handles() {
     // (write_byte is infallible — see its doc comment), not observed by
     // the other handle.
     aot.write_byte(0x350, 0x99);
-    assert_eq!(jit.read_byte(0x350), 0, "text-hole write must not land through any handle");
+    assert_eq!(
+        jit.read_byte(0x350),
+        0,
+        "text-hole write must not land through any handle"
+    );
 
     // Outside the hole, sharing still works normally.
     aot.write_byte(0x50, 0x77);
@@ -81,5 +89,9 @@ fn jit_ctx_bytes_iterator_observes_shared_writes() {
     aot.write_byte(0x12, 0x33);
 
     let collected: Vec<u8> = jit.bytes(0x10).take(3).collect();
-    assert_eq!(collected, vec![0x11, 0x22, 0x33], "JitCtx::bytes must observe writes made through a different Mem sharing the same backing");
+    assert_eq!(
+        collected,
+        vec![0x11, 0x22, 0x33],
+        "JitCtx::bytes must observe writes made through a different Mem sharing the same backing"
+    );
 }

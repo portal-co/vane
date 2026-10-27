@@ -13,6 +13,10 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["js-host", "console_error_panic_hook"]
+# The native JIT (PLAN_NATIVE_JIT Phase 2): compile hot StackOp traces to
+# aarch64/x86_64/riscv64 machine code and register them into the dispatch
+# loop's compiled registry. Host-only (std); off by default.
+native-jit = ["dep:vane-jit"]
 # The wasm-bindgen/JS surface (D1 in PLAN_LINUX_WASM.md). Disable for
 # `wasm32-wasip1`, WASIX, and native hosts; the plain-Rust twin API is
 # always available.
@@ -38,6 +42,7 @@ vane-meta-gen = {path = "../vane-meta-gen",version = "^0.1.0", default-features 
 # gated on it.
 vane-arch = {path = "../vane-arch",version = "^0.1.0", default-features = false, features = ["async-host", "target-js"]}
 vane-swap = {path = "../vane-swap", version = "^0.1.0"}
+vane-jit = { path = "../vane-jit", optional = true }
 
 # The `console_error_panic_hook` crate provides better debugging of panics by
 # logging them with `console.error`. This is great for development, but requires

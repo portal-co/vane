@@ -135,36 +135,51 @@ impl Asm {
     /// `stp x{t1}, x{t2}, [x{n}], #imm` (post-index; the undo-buffer append).
     fn stp_post(&mut self, t1: u8, t2: u8, n: u8, imm: i32) {
         self.u32(
-            0xa8800000 | ((((imm / 8) as u32) & 0x7f) << 15) | ((t2 as u32) << 10)
-                | ((n as u32) << 5) | t1 as u32,
+            0xa8800000
+                | ((((imm / 8) as u32) & 0x7f) << 15)
+                | ((t2 as u32) << 10)
+                | ((n as u32) << 5)
+                | t1 as u32,
         );
     }
     /// `stp x{t1}, x{t2}, [x{n}, #imm]!` (pre-index).
     fn stp_pre(&mut self, t1: u8, t2: u8, n: u8, imm: i32) {
         self.u32(
-            0xa9800000 | ((((imm / 8) as u32) & 0x7f) << 15) | ((t2 as u32) << 10)
-                | ((n as u32) << 5) | t1 as u32,
+            0xa9800000
+                | ((((imm / 8) as u32) & 0x7f) << 15)
+                | ((t2 as u32) << 10)
+                | ((n as u32) << 5)
+                | t1 as u32,
         );
     }
     /// `stp x{t1}, x{t2}, [x{n}, #imm]` (signed offset).
     fn stp_off(&mut self, t1: u8, t2: u8, n: u8, imm: i32) {
         self.u32(
-            0xa9000000 | ((((imm / 8) as u32) & 0x7f) << 15) | ((t2 as u32) << 10)
-                | ((n as u32) << 5) | t1 as u32,
+            0xa9000000
+                | ((((imm / 8) as u32) & 0x7f) << 15)
+                | ((t2 as u32) << 10)
+                | ((n as u32) << 5)
+                | t1 as u32,
         );
     }
     /// `ldp x{t1}, x{t2}, [x{n}, #imm]` (signed offset).
     fn ldp_off(&mut self, t1: u8, t2: u8, n: u8, imm: i32) {
         self.u32(
-            0xa9400000 | ((((imm / 8) as u32) & 0x7f) << 15) | ((t2 as u32) << 10)
-                | ((n as u32) << 5) | t1 as u32,
+            0xa9400000
+                | ((((imm / 8) as u32) & 0x7f) << 15)
+                | ((t2 as u32) << 10)
+                | ((n as u32) << 5)
+                | t1 as u32,
         );
     }
     /// `ldp x{t1}, x{t2}, [x{n}], #imm` (post-index).
     fn ldp_post(&mut self, t1: u8, t2: u8, n: u8, imm: i32) {
         self.u32(
-            0xa8c00000 | ((((imm / 8) as u32) & 0x7f) << 15) | ((t2 as u32) << 10)
-                | ((n as u32) << 5) | t1 as u32,
+            0xa8c00000
+                | ((((imm / 8) as u32) & 0x7f) << 15)
+                | ((t2 as u32) << 10)
+                | ((n as u32) << 5)
+                | t1 as u32,
         );
     }
 
@@ -256,7 +271,11 @@ impl Asm {
             self.u32(0x91000000 | ((imm as u32) << 10) | ((n as u32) << 5) | d as u32);
         } else {
             self.u32(
-                0x91000000 | (1 << 22) | (((imm >> 12) as u32) << 10) | ((n as u32) << 5) | d as u32,
+                0x91000000
+                    | (1 << 22)
+                    | (((imm >> 12) as u32) << 10)
+                    | ((n as u32) << 5)
+                    | d as u32,
             );
         }
     }
@@ -691,7 +710,7 @@ impl Asm {
                 self.mov_imm(2, *raw as u64);
                 self.call(O_PRIVILEGED);
                 let cont = self.cbz_fwd(0); // 0 = Continue
-                // Divert: exit TailCall(x0 - 1)
+                                            // Divert: exit TailCall(x0 - 1)
                 self.sub_imm(0, 0, 1);
                 self.str_(0, 19, O_EXIT_PC);
                 self.mov_imm(0, TAG_TAILCALL as u64);
@@ -899,10 +918,15 @@ pub fn compile(ops: &[StackOp]) -> Result<JitTrace, &'static str> {
     }
     a.epilogue();
     let code = a.buf;
-    let mut region = ExecRegion::new(code.len().max(4096)).map_err(|_| "native-jit: mmap failed")?;
+    let mut region =
+        ExecRegion::new(code.len().max(4096)).map_err(|_| "native-jit: mmap failed")?;
     let base = region.write(&code).ok_or("native-jit: exec region full")?;
     // Safety: the region holds complete, valid machine code; no further writes.
-    unsafe { region.finalize().map_err(|_| "native-jit: mprotect failed")? };
+    unsafe {
+        region
+            .finalize()
+            .map_err(|_| "native-jit: mprotect failed")?
+    };
     // Safety: `base` is the executable entry point of the finalized region.
     let f: NativeTraceFn = unsafe { core::mem::transmute(base) };
     Ok(JitTrace { code: f, region })
@@ -911,4 +935,3 @@ pub fn compile(ops: &[StackOp]) -> Result<JitTrace, &'static str> {
 // Fix a typo: the FloatLt arm used a stale helper name.
 #[allow(dead_code)]
 fn _unused() {}
-

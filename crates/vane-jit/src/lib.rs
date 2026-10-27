@@ -32,8 +32,7 @@ pub const TAG_BAIL: u8 = 3;
 /// machine-state context block; `ops`/`ops_len` are the trace's `StackOp`s
 /// (alive for the call; the codegen bakes the `Log`/`Trap`/state-slot payloads
 /// as immediates pointing into them). Returns the exit tag.
-pub type NativeTraceFn =
-    unsafe extern "C" fn(*mut ctx::TraceCtx, *const StackOp, usize) -> u8;
+pub type NativeTraceFn = unsafe extern "C" fn(*mut ctx::TraceCtx, *const StackOp, usize) -> u8;
 
 /// A compiled native trace: the executable entry point plus the `ExecRegion`
 /// (kept alive — dropping it would unmap the code).
@@ -62,7 +61,10 @@ pub fn compile_native(ops: &[StackOp]) -> Result<JitTrace, &'static str> {
 /// `Exit` (including the `Bail` register-undo handoff to the dispatch loop).
 ///
 /// This is the reference integration the differential tests drive.
-pub fn native_adapter<R: LocalReactor>(host: &mut LocalStackHost<R>, ct: &CompiledTrace<R>) -> Exit {
+pub fn native_adapter<R: LocalReactor>(
+    host: &mut LocalStackHost<R>,
+    ct: &CompiledTrace<R>,
+) -> Exit {
     let native = ct
         .native
         .as_ref()
@@ -106,8 +108,7 @@ pub fn compiled_trace<R: LocalReactor>(
     ops: vane_arch::Shared<Vec<StackOp>>,
 ) -> Option<CompiledTrace<R>> {
     let jt = compile_native(&ops).ok()?;
-    let owner: vane_arch::Shared<dyn core::any::Any + Send + Sync> =
-        std::sync::Arc::new(jt.region);
+    let owner: vane_arch::Shared<dyn core::any::Any + Send + Sync> = std::sync::Arc::new(jt.region);
     Some(CompiledTrace {
         f: native_adapter::<R>,
         ops,

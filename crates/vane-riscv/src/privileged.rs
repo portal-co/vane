@@ -153,8 +153,7 @@ pub fn execute_privileged(
                     let mut r = PrivExec::cont();
                     r.clear_traces = is_satp;
                     if is_satp {
-                        vane_arch::FLUSH_SATP
-                            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        vane_arch::FLUSH_SATP.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     }
                     return r;
                 }
@@ -228,7 +227,7 @@ pub fn execute_privileged(
             vane_arch::FLUSH_SFENCE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             let mut r = PrivExec::cont();
             r.clear_traces = true;
-            r.clear_page = (sva != 0).then(|| sva >> 12);
+            r.clear_page = (sva != 0).then_some(sva >> 12);
             r
         }
         Inst::Ebreak => PrivExec::divert(hart.raise(Trap::exception(CAUSE_BREAKPOINT, pc), pc)),

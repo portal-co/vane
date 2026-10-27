@@ -17,6 +17,9 @@ js = ["vane/js-host"]
 # WASIX supports real threads; the same code also runs on native. There is no
 # WASIX-specific API here — threads + channels suffice (PLAN §8 / M7).
 wasix = []
+# `native-jit` compiles hot StackOp traces to aarch64/x86_64/riscv64 machine
+# code (PLAN_NATIVE_JIT Phase 2) — host-only (std), off by default.
+native-jit = ["vane/native-jit"]
 
 [dependencies]
 vane = { path = "../vane", default-features = false }

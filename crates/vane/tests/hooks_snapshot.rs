@@ -38,12 +38,7 @@ struct Drive {
     exited: bool,
 }
 
-fn drive(
-    r: &Reactor,
-    start_pc: u64,
-    stop_after_writes: Option<usize>,
-    max_traces: u64,
-) -> Drive {
+fn drive(r: &Reactor, start_pc: u64, stop_after_writes: Option<usize>, max_traces: u64) -> Drive {
     let out = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let exited = std::rc::Rc::new(std::cell::Cell::new(false));
     let mut pc = start_pc;
@@ -55,7 +50,9 @@ fn drive(
                 // write(fd, buf, len)
                 let (buf, len) = (h.regs[11], h.regs[12]);
                 for i in 0..len {
-                    let b = AsyncStackHost::load_mem(h, buf + i, vane::vane_riscv::MemWidth::B1, false).await;
+                    let b =
+                        AsyncStackHost::load_mem(h, buf + i, vane::vane_riscv::MemWidth::B1, false)
+                            .await;
                     out2.borrow_mut().push(b as u8);
                 }
                 h.regs[10] = len;
@@ -87,10 +84,10 @@ fn drive(
 fn two_write_words() -> Vec<u32> {
     let mut words = vec![
         0x0010_0513u32, // addi a0, x0, 1   (fd = 1)
-        0x0000_25b7, // lui a1, 2           (a1 = 0x2000)
-        0x0010_0613, // addi a2, x0, 1      (len = 1)
-        0x0400_0893, // addi a7, x0, 64     (write)
-        0x0000_0073, // ecall
+        0x0000_25b7,    // lui a1, 2           (a1 = 0x2000)
+        0x0010_0613,    // addi a2, x0, 1      (len = 1)
+        0x0400_0893,    // addi a7, x0, 64     (write)
+        0x0000_0073,    // ecall
     ];
     words.extend(std::iter::repeat_n(0x0000_0013u32, 40)); // nops
     words.extend_from_slice(&[
@@ -114,7 +111,7 @@ fn two_write_words() -> Vec<u32> {
 fn hook_fires_at_fallthrough_symbol() {
     let words = [
         0x0070_0513u32, // 0x1000: addi a0, x0, 7
-        0x0010_0593, // 0x1004: addi a1, x0, 1
+        0x0010_0593,    // 0x1004: addi a1, x0, 1
         // 0x1008: hooked "function entry" (fallthrough target):
         0x05d0_0893, // 0x1008: addi a7, x0, 93 (exit)
         0x0000_0073, // 0x100c: ecall
@@ -192,7 +189,10 @@ fn snapshot_fork_bit_parity_and_divergence() {
     let child_snap = fork.snapshot(Some(&snap), d_fork.pc);
     assert_eq!(child_snap.parent, Some(snap.id));
     let fork2_snap = fork2.snapshot(Some(&snap), d_fork2.pc);
-    assert_ne!(fork2_snap.id, child_snap.id, "diverged state hashes differently");
+    assert_ne!(
+        fork2_snap.id, child_snap.id,
+        "diverged state hashes differently"
+    );
 }
 
 /// Pause-on-hook: the trace loop stops exactly at the hooked function's
@@ -202,8 +202,8 @@ fn snapshot_fork_bit_parity_and_divergence() {
 fn pause_on_hook_stops_before_the_hooked_function() {
     let words = [
         0x0070_0513u32, // 0x1000: addi a0, x0, 7
-        0x05d0_0893, // 0x1004: addi a7, x0, 93   <-- hooked "entry"
-        0x0000_0073, // 0x1008: ecall (exit)
+        0x05d0_0893,    // 0x1004: addi a7, x0, 93   <-- hooked "entry"
+        0x0000_0073,    // 0x1008: ecall (exit)
     ];
     let r = Reactor::new();
     load_words(&r, 0x1000, &words);
@@ -218,13 +218,21 @@ fn pause_on_hook_stops_before_the_hooked_function() {
     assert_eq!(pc, 0x1004, "paused at the hooked entry");
     assert_eq!(r.hook_pause_pending(), Some(0x1004));
     assert_eq!(r.read_reg(17), 0, "the hooked function has not run yet");
-    assert_eq!(r.take_hook_events().len(), 1, "the event is recorded at pause time");
+    assert_eq!(
+        r.take_hook_events().len(),
+        1,
+        "the event is recorded at pause time"
+    );
 
     // Resume: the hooked trace runs exactly once (a7 set, ecall stops).
     let pc = block_on(r.trace_run_fueled(pc, &mut on_ecall, Some(100))).expect("resume");
     assert_eq!(pc, 0x100c, "the hooked trace ran to the ecall boundary");
     assert_eq!(r.read_reg(17), 93);
-    assert_eq!(r.hook_pause_pending(), None, "the one-shot skip is consumed");
+    assert_eq!(
+        r.hook_pause_pending(),
+        None,
+        "the one-shot skip is consumed"
+    );
 
     // Snapshot at the fork point would capture pre-function state: verified
     // by construction above (regs pre-entry). Fork from it:
@@ -257,6 +265,9 @@ fn snapshot_round_trips_device_state() {
         .with_machine(|m| m.load(vane::vane_riscv::machine::UART_BASE, 1, false))
         .expect("machine attached")
         .expect("RBR read");
-    assert_eq!(rbr, b'h' as u64, "UART RX state survived the snapshot round-trip");
+    assert_eq!(
+        rbr, b'h' as u64,
+        "UART RX state survived the snapshot round-trip"
+    );
     assert!(fork.with_hart(|h| h.enabled));
 }

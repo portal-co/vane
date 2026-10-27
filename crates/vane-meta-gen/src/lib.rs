@@ -141,6 +141,12 @@ macro_rules! vane_meta {
                     $crate::vane_arch::interp::CompiledTrace<$t>,
                 >,
             >,
+            /// Trace heat: how many times a trace has run interpreted. The
+            /// native-JIT heat policy promotes a hot trace to native code
+            /// (`Reactor::maybe_compile_native`).
+            heat: $crate::core::cell::RefCell<
+                $crate::alloc::collections::BTreeMap<u64, u32>,
+            >,
             /// Which execution engine `run` dispatches to.
             engine: $crate::vane_arch::ExecEngine,
             /// Current guest pc: the register file lives in JS (`r`) under
@@ -631,6 +637,11 @@ macro_rules! vane_meta {
                         let exit = if let Some(ct) = compiled {
                             (ct.f)(&mut host, &ct)
                         } else {
+                            // The native-JIT heat policy: a trace run
+                            // interpreted gets hotter; past the threshold,
+                            // promote it to native code (a no-op without the
+                            // `native-jit` feature).
+                            self.maybe_compile_native(pc);
                             // Per-trace op budget: bounds how long a trace
                             // runs before yielding to the dispatch loop
                             // (interrupt delivery, ecall handling, fuel).

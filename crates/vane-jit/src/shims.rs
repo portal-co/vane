@@ -65,7 +65,9 @@ pub unsafe extern "C" fn shim_mem_load<R: LocalReactor>(
     width: u8,
     signed: u8,
 ) -> u64 {
-    host::<R>(ctx).reactor.lr_load_mem(addr, mw(width), signed != 0)
+    host::<R>(ctx)
+        .reactor
+        .lr_load_mem(addr, mw(width), signed != 0)
 }
 pub unsafe extern "C" fn shim_mem_store<R: LocalReactor>(
     ctx: *mut TraceCtx,

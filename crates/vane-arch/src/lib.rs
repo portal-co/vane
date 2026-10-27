@@ -540,7 +540,8 @@ pub static TRACE_COMPILE: core::sync::atomic::AtomicU64 = core::sync::atomic::At
 /// (satp write / sfence.vma / fence.i), `TRACE_FLUSH_DROPPED` sums the number
 /// of cached traces dropped across those clears (the recompile debt).
 pub static TRACE_FLUSH: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-pub static TRACE_FLUSH_DROPPED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static TRACE_FLUSH_DROPPED: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
 /// Per-source flush counters (which privileged op triggered the clear).
 pub static FLUSH_SATP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub static FLUSH_SFENCE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);

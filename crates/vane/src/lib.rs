@@ -176,6 +176,7 @@ impl Reactor {
                 trace_pages: std::cell::RefCell::new(std::collections::BTreeMap::new()),
                 page_index: std::cell::RefCell::new(std::collections::BTreeMap::new()),
                 compiled: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+                heat: std::cell::RefCell::new(std::collections::BTreeMap::new()),
                 engine: vane_arch::ExecEngine::Interp,
                 pc: 0,
                 code_dirty: false,
@@ -314,6 +315,34 @@ impl Reactor {
     /// This is the hook a heat policy calls to promote hot traces; a
     /// Weval/JIT backend would instead call `register_compiled_trace` with a
     /// natively-compiled artifact.
+    /// The native-JIT heat policy: increment the trace's heat; past the
+    /// threshold, compile it to native code and register it (PLAN_NATIVE_JIT).
+    /// The dispatch loop calls this on every interpreted (cache-hit) dispatch.
+    /// A no-op without the `native-jit` feature.
+    fn maybe_compile_native(&self, pc: u64) {
+        #[cfg(feature = "native-jit")]
+        {
+            const HEAT_THRESHOLD: u32 = 100;
+            let heat = {
+                let core = self.core.lock();
+                let mut heat = core.heat.borrow_mut();
+                let h = heat.entry(pc).or_insert(0);
+                *h += 1;
+                *h
+            };
+            if heat >= HEAT_THRESHOLD && !self.has_compiled_trace(pc) {
+                let ops = self.core.lock().trace_cache.borrow().get(&pc).cloned();
+                if let Some(ops) = ops {
+                    if let Some(ct) = vane_jit::compiled_trace::<Self>(ops) {
+                        self.register_compiled_trace(pc, ct);
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "native-jit"))]
+        let _ = pc;
+    }
+
     /// Compile the trace rooted at `pc` with the default producer (the dense
     /// interpreter as a raw fn pointer) and register it, so subsequent
     /// dispatches call it as a function pointer instead of interpreting.
@@ -1472,6 +1501,9 @@ impl Reactor {
                         .fetch_add(pcs.len() as u64, core::sync::atomic::Ordering::Relaxed);
                     for pc in pcs {
                         if core.trace_cache.borrow_mut().remove(&pc).is_some() {
+                            // The compiled (native/Weval) artifact for this
+                            // trace is now stale too — drop it in sync.
+                            core.compiled.borrow_mut().remove(&pc);
                             if let Some(pages) = core.trace_pages.borrow_mut().remove(&pc) {
                                 for p in pages.iter() {
                                     if let Some(v) = core.page_index.borrow_mut().get_mut(p) {
@@ -1491,6 +1523,7 @@ impl Reactor {
                     core.trace_cache.borrow_mut().clear();
                     core.trace_pages.borrow_mut().clear();
                     core.page_index.borrow_mut().clear();
+                    core.compiled.borrow_mut().clear();
                 }
             }
         }
