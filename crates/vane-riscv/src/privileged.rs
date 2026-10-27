@@ -23,6 +23,10 @@ pub struct PrivExec {
     /// A satp write or sfence.vma changed the translation: flush the
     /// VA-keyed trace cache.
     pub clear_traces: bool,
+    /// sfence.vma with a specific vaddr: invalidate only the traces that span
+    /// that virtual page (a fine-grained clear), not the whole cache. `None`
+    /// means a full clear (satp write, or sfence.vma with vaddr==0).
+    pub clear_page: Option<u64>,
     /// fence.i: the code cache is dirty (self-modifying code).
     pub code_dirty: bool,
 }
@@ -32,6 +36,7 @@ impl PrivExec {
         PrivExec {
             outcome: PrivOutcome::Continue,
             clear_traces: false,
+            clear_page: None,
             code_dirty: false,
         }
     }
@@ -39,6 +44,7 @@ impl PrivExec {
         PrivExec {
             outcome: PrivOutcome::Divert(pc),
             clear_traces: false,
+            clear_page: None,
             code_dirty: false,
         }
     }
@@ -217,10 +223,12 @@ pub fn execute_privileged(
                 vane_arch::SFENCE_SPECIFIC.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             }
             hart.sfence_vma(sva, regs[(asid.0 % 32) as usize]);
-            // Mappings changed: the VA-keyed trace cache is stale.
+            // Mappings changed: invalidate the traces spanning the flushed
+            // virtual page (a fine-grained clear; full only for vaddr==0).
             vane_arch::FLUSH_SFENCE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             let mut r = PrivExec::cont();
             r.clear_traces = true;
+            r.clear_page = (sva != 0).then(|| sva >> 12);
             r
         }
         Inst::Ebreak => PrivExec::divert(hart.raise(Trap::exception(CAUSE_BREAKPOINT, pc), pc)),

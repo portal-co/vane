@@ -174,6 +174,8 @@ impl Reactor {
                 host_api: OnceCell::new(),
                 test_mode: false,
                 trace_cache: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+                trace_pages: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+                page_index: std::cell::RefCell::new(std::collections::BTreeMap::new()),
                 compiled: std::cell::RefCell::new(std::collections::BTreeMap::new()),
                 engine: vane_arch::ExecEngine::Interp,
                 pc: 0,
@@ -1447,11 +1449,41 @@ impl Reactor {
             regs,
         );
         if r.clear_traces {
-            let mut tc = core.trace_cache.borrow_mut();
-            vane_arch::TRACE_FLUSH.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            vane_arch::TRACE_FLUSH_DROPPED
-                .fetch_add(tc.len() as u64, core::sync::atomic::Ordering::Relaxed);
-            tc.clear();
+            match r.clear_page {
+                // Fine-grained: a specific sfence.vma invalidates only the
+                // traces whose code spans the flushed virtual page.
+                Some(page) => {
+                    let pcs: std::vec::Vec<u64> = core
+                        .page_index
+                        .borrow_mut()
+                        .remove(&page)
+                        .unwrap_or_default();
+                    vane_arch::TRACE_FLUSH.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    vane_arch::TRACE_FLUSH_DROPPED
+                        .fetch_add(pcs.len() as u64, core::sync::atomic::Ordering::Relaxed);
+                    for pc in pcs {
+                        if core.trace_cache.borrow_mut().remove(&pc).is_some() {
+                            if let Some(pages) = core.trace_pages.borrow_mut().remove(&pc) {
+                                for p in pages.iter() {
+                                    if let Some(v) = core.page_index.borrow_mut().get_mut(p) {
+                                        v.retain(|&x| x != pc);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Full clear (satp write / full sfence.vma): drop everything.
+                None => {
+                    let dropped = core.trace_cache.borrow().len() as u64;
+                    vane_arch::TRACE_FLUSH.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    vane_arch::TRACE_FLUSH_DROPPED
+                        .fetch_add(dropped, core::sync::atomic::Ordering::Relaxed);
+                    core.trace_cache.borrow_mut().clear();
+                    core.trace_pages.borrow_mut().clear();
+                    core.page_index.borrow_mut().clear();
+                }
+            }
         }
         if r.code_dirty {
             core.code_dirty = true;

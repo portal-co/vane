@@ -111,6 +111,25 @@ macro_rules! vane_meta {
                     $crate::vane_arch::Shared<$crate::alloc::vec::Vec<$crate::vane_arch::StackOp>>,
                 >,
             >,
+            /// Fine-grained trace invalidation for `sfence.vma`: which 4KiB
+            /// virtual pages each cached trace's code spans (derived from the
+            /// trace's `CheckCode` addrs at insert), and the reverse index
+            /// (page -> the root pcs of traces spanning it). A specific
+            /// `sfence.vma` (vaddr != 0) invalidates only the spanning
+            /// traces; a full flush / satp write / fence.i clears all three
+            /// maps together.
+            trace_pages: $crate::core::cell::RefCell<
+                $crate::alloc::collections::BTreeMap<
+                    u64,
+                    $crate::alloc::boxed::Box<[u64]>,
+                >,
+            >,
+            page_index: $crate::core::cell::RefCell<
+                $crate::alloc::collections::BTreeMap<
+                    u64,
+                    $crate::alloc::vec::Vec<u64>,
+                >,
+            >,
             /// Compiled-trace registry (Weval/JIT/binary-patcher artifacts,
             /// or the default dense interpreter via `compile_trace`). Keyed by
             /// the trace's root guest pc. The dispatch loop consults this
@@ -419,6 +438,8 @@ macro_rules! vane_meta {
                                     $crate::vane_arch::TRACE_FLUSH_DROPPED
                                         .fetch_add(dropped, core::sync::atomic::Ordering::Relaxed);
                                     lock.trace_cache.borrow_mut().clear();
+                                    lock.trace_pages.borrow_mut().clear();
+                                    lock.page_index.borrow_mut().clear();
                                     lock.compiled.borrow_mut().clear();
                                     lock.code_dirty = false;
                                 }
@@ -532,11 +553,34 @@ macro_rules! vane_meta {
                             }
                             $crate::vane_arch::TRACE_COMPILE
                                 .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                            self.core
-                                .lock()
-                                .trace_cache
-                                .borrow_mut()
-                                .insert(pc, ops.clone());
+                            {
+                                let lock = self.core.lock();
+                                // Derive the trace's code-page set from the
+                                // CheckCode addrs (the inlined instructions'
+                                // virtual pcs), for fine-grained sfence.vma
+                                // invalidation.
+                                let mut pages: $crate::alloc::vec::Vec<u64> =
+                                    $crate::alloc::vec::Vec::new();
+                                for op in ops.iter() {
+                                    if let $crate::vane_arch::StackOp::CheckCode { addr, .. } = op
+                                    {
+                                        pages.push(*addr >> 12);
+                                    }
+                                }
+                                pages.sort_unstable();
+                                pages.dedup();
+                                for &page in &pages {
+                                    lock.page_index
+                                        .borrow_mut()
+                                        .entry(page)
+                                        .or_default()
+                                        .push(pc);
+                                }
+                                lock.trace_pages
+                                    .borrow_mut()
+                                    .insert(pc, pages.into_boxed_slice());
+                                lock.trace_cache.borrow_mut().insert(pc, ops.clone());
+                            }
                             ops
 
                         };
@@ -681,6 +725,8 @@ macro_rules! vane_meta {
                     let mut lock = self.core.lock();
                     lock.hooks = $crate::vane_arch::shared_new(hooks);
                     lock.trace_cache.borrow_mut().clear();
+                    lock.trace_pages.borrow_mut().clear();
+                    lock.page_index.borrow_mut().clear();
                     lock.compiled.borrow_mut().clear();
                     lock.code_dirty = false;
                 }
