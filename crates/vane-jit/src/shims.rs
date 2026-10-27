@@ -10,7 +10,7 @@
 //! native call, and the generated code is paused (in the `blr`) while a shim
 //! runs — no concurrent access.
 
-use crate::ctx::{TraceCtx, UndoEntry, STACK_CAP, UNDO_CAP};
+use crate::ctx::TraceCtx;
 use vane_arch::interp::{
     float_binary, float_convert, float_eq, float_lt, float_to_int, float_unary, float_unordered,
     int_to_float, LocalReactor, LocalStackHost, PrivOutcome,
@@ -165,36 +165,45 @@ pub unsafe extern "C" fn shim_fp_convert(from: u8, to: u8, val: u64) -> u64 {
 }
 
 /// Build the `TraceCtx` for a native trace run against `host`: the shim table,
-/// the register-cache pointer (`host.regs`), and a zeroed value stack / undo
-/// buffer / fuel.
+/// the register-cache pointer (`host.regs`), and a zeroed depth/undo/fuel.
+///
+/// The value stack and undo buffer are left UNINITIALIZED: the generated code
+/// writes a slot before ever reading it (the value stack reads only what was
+/// pushed; the undo buffer is read only up to `undo_len`, which counts written
+/// entries), and zeroing 12KB on every native call is measurable overhead
+/// across millions of runs. `u64`/`UndoEntry` have no invalid bit patterns, so
+/// this is sound.
 pub fn build_ctx<R: LocalReactor>(host: &mut LocalStackHost<R>) -> TraceCtx {
-    TraceCtx {
-        stack: [0; STACK_CAP],
-        undo_buf: [UndoEntry { reg: 0, old: 0 }; UNDO_CAP],
-        regs: host.regs.as_mut_ptr(),
-        host: host as *mut _ as *mut core::ffi::c_void,
-        depth: 0,
-        undo_len: 0,
-        undo_mark: 0,
-        fuel: 4096,
-        cur_inst_pc: 0,
-        exit_pc: 0,
-        mem_load: shim_mem_load::<R>,
-        mem_store: shim_mem_store::<R>,
-        privileged: shim_privileged::<R>,
-        take_trap: shim_take_trap::<R>,
-        take_irq: shim_take_irq::<R>,
-        read_byte: shim_read_byte::<R>,
-        want_integrity: shim_want_integrity::<R>,
-        state_load: shim_state_load::<R>,
-        state_store: shim_state_store::<R>,
-        ecall: shim_ecall::<R>,
-        log: shim_log::<R>,
-        fp_unary: shim_fp_unary,
-        fp_binary: shim_fp_binary,
-        fp_cmp: shim_fp_cmp,
-        int_to_fp: shim_int_to_fp,
-        fp_to_int: shim_fp_to_int,
-        fp_convert: shim_fp_convert,
+    let mut u = core::mem::MaybeUninit::<TraceCtx>::uninit();
+    let p = u.as_mut_ptr();
+    // Safety: every scalar/pointer/shim field is written below; the two array
+    // fields are left uninit per the doc comment. No field has a `Drop` impl.
+    unsafe {
+        core::ptr::addr_of_mut!((*p).regs).write(host.regs.as_mut_ptr());
+        core::ptr::addr_of_mut!((*p).host).write(host as *mut _ as *mut core::ffi::c_void);
+        core::ptr::addr_of_mut!((*p).depth).write(0);
+        core::ptr::addr_of_mut!((*p).undo_len).write(0);
+        core::ptr::addr_of_mut!((*p).undo_mark).write(0);
+        core::ptr::addr_of_mut!((*p).fuel).write(4096);
+        core::ptr::addr_of_mut!((*p).cur_inst_pc).write(0);
+        core::ptr::addr_of_mut!((*p).exit_pc).write(0);
+        core::ptr::addr_of_mut!((*p).mem_load).write(shim_mem_load::<R>);
+        core::ptr::addr_of_mut!((*p).mem_store).write(shim_mem_store::<R>);
+        core::ptr::addr_of_mut!((*p).privileged).write(shim_privileged::<R>);
+        core::ptr::addr_of_mut!((*p).take_trap).write(shim_take_trap::<R>);
+        core::ptr::addr_of_mut!((*p).take_irq).write(shim_take_irq::<R>);
+        core::ptr::addr_of_mut!((*p).read_byte).write(shim_read_byte::<R>);
+        core::ptr::addr_of_mut!((*p).want_integrity).write(shim_want_integrity::<R>);
+        core::ptr::addr_of_mut!((*p).state_load).write(shim_state_load::<R>);
+        core::ptr::addr_of_mut!((*p).state_store).write(shim_state_store::<R>);
+        core::ptr::addr_of_mut!((*p).ecall).write(shim_ecall::<R>);
+        core::ptr::addr_of_mut!((*p).log).write(shim_log::<R>);
+        core::ptr::addr_of_mut!((*p).fp_unary).write(shim_fp_unary);
+        core::ptr::addr_of_mut!((*p).fp_binary).write(shim_fp_binary);
+        core::ptr::addr_of_mut!((*p).fp_cmp).write(shim_fp_cmp);
+        core::ptr::addr_of_mut!((*p).int_to_fp).write(shim_int_to_fp);
+        core::ptr::addr_of_mut!((*p).fp_to_int).write(shim_fp_to_int);
+        core::ptr::addr_of_mut!((*p).fp_convert).write(shim_fp_convert);
+        u.assume_init()
     }
 }

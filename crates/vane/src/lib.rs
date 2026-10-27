@@ -322,7 +322,19 @@ impl Reactor {
     fn maybe_compile_native(&self, pc: u64) {
         #[cfg(feature = "native-jit")]
         {
-            const HEAT_THRESHOLD: u32 = 100;
+            // The heat threshold: a trace must run interpreted this many times
+            // before it's promoted to native. Tunable (VANE_JIT_HEAT) for
+            // benchmarking the promote-vs-thrash trade-off; default 100.
+            fn heat_threshold() -> u32 {
+                static T: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+                *T.get_or_init(|| {
+                    std::env::var("VANE_JIT_HEAT")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(100)
+                })
+            }
+            let threshold = heat_threshold();
             let heat = {
                 let core = self.core.lock();
                 let mut heat = core.heat.borrow_mut();
@@ -330,7 +342,7 @@ impl Reactor {
                 *h += 1;
                 *h
             };
-            if heat >= HEAT_THRESHOLD && !self.has_compiled_trace(pc) {
+            if heat >= threshold && !self.has_compiled_trace(pc) {
                 let ops = self.core.lock().trace_cache.borrow().get(&pc).cloned();
                 if let Some(ops) = ops {
                     if let Some(ct) = vane_jit::compiled_trace::<Self>(ops) {

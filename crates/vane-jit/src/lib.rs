@@ -79,7 +79,7 @@ pub fn native_adapter<R: LocalReactor>(
         let c = COUNT.fetch_add(1, Ordering::Relaxed);
         let pc = host.pc;
         let prev = LASTPC.swap(pc, Ordering::Relaxed);
-        if prev != pc || c % 1_000_000 == 0 {
+        if prev != pc || c.is_multiple_of(1_000_000) {
             eprintln!("[jit] #{c} pc={pc:#x}");
         }
     }
@@ -125,7 +125,25 @@ pub fn native_adapter<R: LocalReactor>(
 pub fn compiled_trace<R: LocalReactor>(
     ops: vane_arch::Shared<Vec<StackOp>>,
 ) -> Option<CompiledTrace<R>> {
-    let jt = compile_native(&ops).ok()?;
+    // Debug (VANE_JIT_CC): count native compile ATTEMPTS vs SUCCESSES (a
+    // trace that fails codegen is retried on every dispatch — counting both
+    // reveals a failed-retry storm).
+    let jt = compile_native(&ops);
+    if std::env::var_os("VANE_JIT_CC").is_some() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+        static SUCC: AtomicU64 = AtomicU64::new(0);
+        let a = ATTEMPTS.fetch_add(1, Ordering::Relaxed) + 1;
+        let s = if jt.is_ok() {
+            SUCC.fetch_add(1, Ordering::Relaxed) + 1
+        } else {
+            SUCC.load(Ordering::Relaxed)
+        };
+        if a.is_multiple_of(256) {
+            eprintln!("[jit] compiles attempts={a} success={s}");
+        }
+    }
+    let jt = jt.ok()?;
     let owner: vane_arch::Shared<dyn core::any::Any + Send + Sync> = std::sync::Arc::new(jt.region);
     Some(CompiledTrace {
         f: native_adapter::<R>,

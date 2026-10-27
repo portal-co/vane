@@ -256,3 +256,80 @@ fn state_slots_match() {
         StackOp::TailCall,
     ]);
 }
+
+/// A hot-loop microbenchmark: run ONE stable trace many times (no
+/// invalidation), comparing the interpreter vs the native JIT. This is the
+/// workload the JIT is for — unlike the cold-code-dominated, sfence-thrashed
+/// Linux boot. Run: `cargo test -p vane-jit --release --test differential --
+/// --nocapture hot_loop_microbench`.
+#[test]
+fn hot_loop_microbench() {
+    // r1 = N; while r1 != 0 { r1--; r2 = r2*3 + 5 }. A realistic trace: a
+    // CheckCode per loop iteration (as rv_emit emits one per instruction), so
+    // the undo buffer resets each iteration (a CheckCode-less loop would
+    // overflow it — see the compile-time undo bound).
+    let n = 1000u64;
+    let make_ops = || {
+        let cc = || StackOp::CheckCode {
+            addr: 0x1000,
+            expected: Vec::new().into_boxed_slice(),
+            miss_label: String::new(),
+        };
+        vec![
+            StackOp::PushImm(n),
+            StackOp::StoreReg(1),
+            StackOp::LoopBegin { label: 0x1000 },
+            cc(),
+            StackOp::LoadReg(1),
+            StackOp::IfBegin,
+            StackOp::LoadReg(1),
+            StackOp::PushImm(-1i64 as u64),
+            StackOp::Add64,
+            StackOp::StoreReg(1),
+            StackOp::LoadReg(2),
+            StackOp::PushImm(3),
+            StackOp::Mul64,
+            StackOp::PushImm(5),
+            StackOp::Add64,
+            StackOp::StoreReg(2),
+            StackOp::Br {
+                relative_depth: 1,
+                label: 0x1000,
+            },
+            StackOp::IfElse,
+            StackOp::IfEnd,
+            StackOp::LoopEnd,
+            StackOp::PushImm(0),
+            StackOp::TailCall,
+        ]
+    };
+    // Correctness first — this also gives the differential suite loop (Br)
+    // coverage: the interpreter and the native JIT must produce identical
+    // r1/r2, memory, and exit.
+    check(make_ops());
+    // Benchmark: run one stable trace back-to-back (no invalidation thrash).
+    let shared = vane_arch::shared_new(make_ops());
+    let ct_interp = compile_trace_ptr::<MockReactor>(shared.clone());
+    let ct_native = compiled_trace::<MockReactor>(shared.clone()).expect("compiles");
+    const RUNS: usize = 5000;
+    let t0 = std::time::Instant::now();
+    for _ in 0..RUNS {
+        let mut host = make_host();
+        (ct_interp.f)(&mut host, &ct_interp);
+    }
+    let interp = t0.elapsed();
+    let t0 = std::time::Instant::now();
+    for _ in 0..RUNS {
+        let mut host = make_host();
+        (ct_native.f)(&mut host, &ct_native);
+    }
+    let native = t0.elapsed();
+    eprintln!(
+        "hot loop: {} runs x {} iters — interp {:?}, native {:?} ({:.2}x)",
+        RUNS,
+        n,
+        interp,
+        native,
+        interp.as_secs_f64() / native.as_secs_f64()
+    );
+}

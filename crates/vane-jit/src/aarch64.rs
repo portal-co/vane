@@ -919,9 +919,27 @@ pub fn compile(ops: &[StackOp]) -> Result<JitTrace, &'static str> {
     if max_depth > crate::ctx::STACK_CAP {
         return Err("native-jit: value-stack depth exceeds the ctx capacity");
     }
-    // (No static undo-buffer cap: the CheckCode boundary resets the buffer to
-    // its base, so it only ever holds ONE instruction's register writes — a
-    // handful — regardless of how many times a loop re-executes.)
+    // The undo buffer is reset at each CheckCode (instruction boundary), so it
+    // only holds ONE instruction's register writes. Guard against a malformed
+    // trace whose per-instruction StoreReg count would overflow it (real
+    // rv_emit traces emit a CheckCode per instruction, so this never fires; a
+    // hand-written trace with a CheckCode-less loop would otherwise overflow
+    // the buffer into the adjacent ctx fields).
+    let mut run = 0usize;
+    let mut max_run = 0usize;
+    for op in ops {
+        match op {
+            StackOp::StoreReg(r) if *r != 0 => {
+                run += 1;
+                max_run = max_run.max(run);
+            }
+            StackOp::CheckCode { .. } => run = 0,
+            _ => {}
+        }
+    }
+    if max_run > crate::ctx::UNDO_CAP {
+        return Err("native-jit: undo-buffer overflow between instruction boundaries");
+    }
     let mut a = Asm::new();
     a.prologue();
     // Codegen must never panic (a panic would abort the whole emulator). Any
