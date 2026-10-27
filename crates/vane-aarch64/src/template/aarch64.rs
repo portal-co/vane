@@ -1197,10 +1197,9 @@ pub fn a64_emit(this: &TemplateJit<'_>) -> Vec<StackOp> {
     let mut ops = Vec::new();
     match this.labels.lookup(this.pc) {
         None => {
-            let labels = this.labels.insert(
-                this.pc,
-                vane_arch::template::Label { index: this.depth },
-            );
+            let labels = this
+                .labels
+                .insert(this.pc, vane_arch::template::Label { index: this.depth });
             ops.push(StackOp::LoopBegin { label: this.pc });
             ops.extend(a64_body(this, labels, this.depth + 1));
             ops.push(StackOp::LoopEnd);

@@ -72,12 +72,19 @@ fn tail_via_load_reg() -> Vec<StackOp> {
 fn build_and_instantiate(functions: Vec<(&str, Function)>) -> (wasmi::Store<()>, wasmi::Instance) {
     let mut types = TypeSection::new();
     types.ty().function(regfn_params(), regfn_results()); // type 0: regfn
-    types.ty().function([ValType::I64; NUM_REGS as usize], [ValType::I64; NUM_REGS as usize]); // type 1: ecall
+    types.ty().function(
+        [ValType::I64; NUM_REGS as usize],
+        [ValType::I64; NUM_REGS as usize],
+    ); // type 1: ecall
     types.ty().function([ValType::I64], []); // type 2: jit_invalidate
 
     let mut imports = ImportSection::new();
     imports.import("env", "ecall", wasm_encoder::EntityType::Function(1)); // func 0
-    imports.import("env", "jit_invalidate", wasm_encoder::EntityType::Function(2)); // func 1
+    imports.import(
+        "env",
+        "jit_invalidate",
+        wasm_encoder::EntityType::Function(2),
+    ); // func 1
 
     let mut func_section = FunctionSection::new();
     for _ in &functions {
@@ -85,7 +92,13 @@ fn build_and_instantiate(functions: Vec<(&str, Function)>) -> (wasmi::Store<()>,
     }
 
     let mut memories = MemorySection::new();
-    memories.memory(MemoryType { minimum: 1, maximum: None, memory64: false, shared: false, page_size_log2: None });
+    memories.memory(MemoryType {
+        minimum: 1,
+        maximum: None,
+        memory64: false,
+        shared: false,
+        page_size_log2: None,
+    });
 
     let mut exports = ExportSection::new();
     for (i, (name, _)) in functions.iter().enumerate() {
@@ -118,12 +131,23 @@ fn build_and_instantiate(functions: Vec<(&str, Function)>) -> (wasmi::Store<()>,
         vec![wasmi::ValType::I64; NUM_REGS as usize],
     );
     linker
-        .func_new("env", "ecall", ecall_ty, |_caller: wasmi::Caller<'_, ()>, params: &[wasmi::Val], results: &mut [wasmi::Val]| {
-            results.clone_from_slice(params);
-            Ok(())
-        })
+        .func_new(
+            "env",
+            "ecall",
+            ecall_ty,
+            |_caller: wasmi::Caller<'_, ()>, params: &[wasmi::Val], results: &mut [wasmi::Val]| {
+                results.clone_from_slice(params);
+                Ok(())
+            },
+        )
         .unwrap();
-    linker.func_wrap("env", "jit_invalidate", |_caller: wasmi::Caller<'_, ()>, _pc: i64| {}).unwrap();
+    linker
+        .func_wrap(
+            "env",
+            "jit_invalidate",
+            |_caller: wasmi::Caller<'_, ()>, _pc: i64| {},
+        )
+        .unwrap();
     let wasmi_module = wasmi::Module::new(&engine, &wasm[..]).expect("module should validate");
     let instance = linker
         .instantiate_and_start(&mut store, &wasmi_module)
@@ -131,8 +155,14 @@ fn build_and_instantiate(functions: Vec<(&str, Function)>) -> (wasmi::Store<()>,
     (store, instance)
 }
 
-fn call(store: &mut wasmi::Store<()>, instance: &wasmi::Instance, name: &str) -> Result<Vec<i64>, wasmi::Error> {
-    let func = instance.get_func(&mut *store, name).expect("export should exist");
+fn call(
+    store: &mut wasmi::Store<()>,
+    instance: &wasmi::Instance,
+    name: &str,
+) -> Result<Vec<i64>, wasmi::Error> {
+    let func = instance
+        .get_func(&mut *store, name)
+        .expect("export should exist");
     let params = vec![wasmi::Val::I64(0); (TARGET_PC_LOCAL + 1) as usize];
     let mut results = vec![wasmi::Val::I64(0); NUM_REGS as usize];
     func.call(&mut *store, &params, &mut results)?;
@@ -156,14 +186,20 @@ fn index_of(name: &str) -> u32 {
 #[test]
 fn store_state_gpr_aliases_the_same_local_as_indexed_load_reg() {
     let idx = index_of("a64:x5");
-    let mut ops = vec![StackOp::PushImm(0x1234), StackOp::StoreState(crate::state::x(5))];
+    let mut ops = vec![
+        StackOp::PushImm(0x1234),
+        StackOp::StoreState(crate::state::x(5)),
+    ];
     ops.extend(tail_via_load_reg());
     let f = render(ops);
     let (mut store, instance) = build_and_instantiate(vec![("f", f)]);
     let results = call(&mut store, &instance, "f").expect("call should not trap");
     for (i, r) in results.iter().enumerate() {
         if i as u32 == idx {
-            assert_eq!(*r, 0x1234, "StoreState(a64:x5) must land in the same local LoadReg(5) reads");
+            assert_eq!(
+                *r, 0x1234,
+                "StoreState(a64:x5) must land in the same local LoadReg(5) reads"
+            );
         } else {
             assert_eq!(*r, 0, "no other local should be touched");
         }
@@ -183,7 +219,10 @@ fn nzcv_flag_round_trips_through_load_state_and_store_state() {
     let f = render(ops);
     let (mut store, instance) = build_and_instantiate(vec![("f", f)]);
     let results = call(&mut store, &instance, "f").expect("call should not trap");
-    assert_eq!(results[idx as usize], 1, "nzcv:z must round-trip through StoreState/LoadState");
+    assert_eq!(
+        results[idx as usize], 1,
+        "nzcv:z must round-trip through StoreState/LoadState"
+    );
 }
 
 #[test]
@@ -204,10 +243,15 @@ fn v_register_round_trips_through_load_state_and_store_state() {
 
 #[test]
 fn unmapped_state_slot_name_traps_on_unreachable() {
-    let mut ops = vec![StackOp::LoadState(vane_target_core::StateSlot::new("a64:not-a-real-slot"))];
+    let mut ops = vec![StackOp::LoadState(vane_target_core::StateSlot::new(
+        "a64:not-a-real-slot",
+    ))];
     ops.extend(tail_via_load_reg());
     let f = render(ops);
     let (mut store, instance) = build_and_instantiate(vec![("f", f)]);
     let result = call(&mut store, &instance, "f");
-    assert!(result.is_err(), "an unmapped state-slot name must still trap, not silently zero");
+    assert!(
+        result.is_err(),
+        "an unmapped state-slot name must still trap, not silently zero"
+    );
 }

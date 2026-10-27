@@ -2843,23 +2843,23 @@ mod async_tests {
         fn make_trace() -> Vec<StackOp> {
             vec![
                 StackOp::LoopBegin { label: 0 }, // 0
-                StackOp::LoadReg(1),                      // 1
-                StackOp::IfBegin,                         // 2
-                StackOp::LoadReg(1),                      // 3
-                StackOp::PushImm(-1i64 as u64),           // 4
-                StackOp::Add64,                           // 5
-                StackOp::StoreReg(1),                     // 6
+                StackOp::LoadReg(1),             // 1
+                StackOp::IfBegin,                // 2
+                StackOp::LoadReg(1),             // 3
+                StackOp::PushImm(-1i64 as u64),  // 4
+                StackOp::Add64,                  // 5
+                StackOp::StoreReg(1),            // 6
                 StackOp::Br {
                     relative_depth: 1,
-                    label: "L".into(),
+                    label: 0,
                 }, // 7
-                StackOp::IfElse,                          // 8
-                StackOp::PushImm(99),                     // 9
-                StackOp::StoreReg(3),                     // 10
-                StackOp::IfEnd,                           // 11
-                StackOp::LoopEnd,                         // 12
-                StackOp::PushImm(42),                     // 13
-                StackOp::TailCall,                        // 14
+                StackOp::IfElse,                 // 8
+                StackOp::PushImm(99),            // 9
+                StackOp::StoreReg(3),            // 10
+                StackOp::IfEnd,                  // 11
+                StackOp::LoopEnd,                // 12
+                StackOp::PushImm(42),            // 13
+                StackOp::TailCall,               // 14
             ]
         }
         // Eager interpreter on the materialized trace.
