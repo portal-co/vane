@@ -61,7 +61,13 @@ const O_FP_CONVERT: usize = offset_of!(TraceCtx, fp_convert);
 /// jumps to the shared epilogue).
 struct Asm {
     buf: Vec<u8>,
-    /// `LoopBegin` native offsets (the loop-start byte offset).
+    /// `LoopBegin` native offsets (the loop-start byte offset), as a stack
+    /// mirroring the op stream's loop nesting. `Br` resolves its target by
+    /// `relative_depth` into this stack. Unlike the interpreter we do NOT
+    /// truncate on `Br`: the truncate is a runtime artifact of re-executing
+    /// loop bodies, whereas codegen visits each op once, so the stack must
+    /// keep reflecting the static nesting (which is what `relative_depth`
+    /// indexes into).
     loop_stack: Vec<usize>,
     /// Per-`If` fixup offset to patch at the next `IfElse`/`IfEnd`.
     if_stack: Vec<usize>,
@@ -755,7 +761,14 @@ impl Asm {
                 self.patch_to_here(skip);
                 // 5. mark the instruction boundary.
                 self.mov_imm(24, addr); // cur_inst_pc = addr
-                self.mov_reg(23, 22); // undo_mark = undo_len
+                                        // Commit the boundary by RESETTING the undo buffer to its base.
+                                        // Committed entries are never rolled back (only the current
+                                        // instruction's are, on Bail), and a loop RE-EXECUTES its
+                                        // StoreRegs, so without the reset the fixed-size undo buffer
+                                        // overflows across iterations and clobbers the ctx fields that
+                                        // follow it (regs, host, ...) — the cause of a prior segfault.
+                self.add_imm(22, 19, O_UNDO_BUF); // x22 = undo ptr = base
+                self.mov_reg(23, 22); // x23 = mark = base
             }
             // ── control flow ─────────────────────────────────────────────
             StackOp::LoopBegin { .. } => {
@@ -765,9 +778,11 @@ impl Asm {
                 self.loop_stack.pop();
             }
             StackOp::Br { relative_depth, .. } => {
+                // Back-edge to the loop `relative_depth` levels up the static
+                // nesting. No truncate (see `loop_stack`): the stack keeps the
+                // full nesting so later `Br`s resolve correctly.
                 let idx = self.loop_stack.len() - *relative_depth as usize;
                 let target = self.loop_stack[idx];
-                self.loop_stack.truncate(idx + 1);
                 self.b_to(target);
             }
             StackOp::IfBegin => {
@@ -904,17 +919,21 @@ pub fn compile(ops: &[StackOp]) -> Result<JitTrace, &'static str> {
     if max_depth > crate::ctx::STACK_CAP {
         return Err("native-jit: value-stack depth exceeds the ctx capacity");
     }
-    let undo_count = ops
-        .iter()
-        .filter(|op| matches!(op, StackOp::StoreReg(r) if *r != 0))
-        .count();
-    if undo_count > crate::ctx::UNDO_CAP {
-        return Err("native-jit: undo-buffer overflow");
-    }
+    // (No static undo-buffer cap: the CheckCode boundary resets the buffer to
+    // its base, so it only ever holds ONE instruction's register writes — a
+    // handful — regardless of how many times a loop re-executes.)
     let mut a = Asm::new();
     a.prologue();
-    for (i, op) in ops.iter().enumerate() {
-        a.lower(op, i);
+    // Codegen must never panic (a panic would abort the whole emulator). Any
+    // bug in the lowering is caught and reported so the caller falls back to
+    // the interpreter for this trace.
+    let lowered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for (i, op) in ops.iter().enumerate() {
+            a.lower(op, i);
+        }
+    }));
+    if lowered.is_err() {
+        return Err("native-jit: codegen panicked (falling back to the interpreter)");
     }
     a.epilogue();
     let code = a.buf;

@@ -65,6 +65,24 @@ pub fn native_adapter<R: LocalReactor>(
     host: &mut LocalStackHost<R>,
     ct: &CompiledTrace<R>,
 ) -> Exit {
+    // Debug (VANE_JIT_TRACE): log the trace pc on change (and every 1M runs),
+    // so a hang reveals the looping/diverging trace. The env check is cached so
+    // the disabled path is ~free.
+    fn trace_enabled() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("VANE_JIT_TRACE").is_some())
+    }
+    if trace_enabled() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNT: AtomicU64 = AtomicU64::new(0);
+        static LASTPC: AtomicU64 = AtomicU64::new(u64::MAX);
+        let c = COUNT.fetch_add(1, Ordering::Relaxed);
+        let pc = host.pc;
+        let prev = LASTPC.swap(pc, Ordering::Relaxed);
+        if prev != pc || c % 1_000_000 == 0 {
+            eprintln!("[jit] #{c} pc={pc:#x}");
+        }
+    }
     let native = ct
         .native
         .as_ref()
