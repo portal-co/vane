@@ -388,19 +388,20 @@ falls back to the interpreter) and an env-gated `VANE_JIT_TRACE` run-log.
 powers down cleanly — all M4 milestones pass, including the sha256sum match
 (bit-correct guest computation).
 
-**Benchmark (honest):** workload-dependent. On a **stable hot loop** the native
-JIT is **8.4× the interpreter** (5000 runs of a 1000-iteration loop: 174ms vs
-21ms) — the workload it's for. On the **Linux boot** it's roughly
-*performance-neutral* — interpreter full boot ≈ 187s, JIT ≈ 202s. Root cause:
-the sfence.vma demand-paging invalidation drops ~590K traces per 40s (`fs
-sf=61K` flushes), so each compiled trace runs only ~2× before being dropped and
-re-compiled — the ~4µs/compile (mmap + mprotect + icache flush) never amortizes.
-The boot is also cold-code-dominated (the heat threshold leaves run-once code
-interpreted). Making the JIT win on the boot needs the (risky, deferred)
-satp-keyed trace cache / less conservative invalidation, not the per-run path —
-the per-run path is already 8.4× once a trace stays compiled. The old "~30 min"
-interpreter estimate in `run-linux-boot-gate.sh` was stale. `native-jit` stays
-off by default.
+**Benchmark (2026-10-27, retain+revalidate landed):** the native JIT is now
+**1.6× the interpreter** on the full Linux boot (JIT 120.5s vs interp 194s).
+The key was the invalidation strategy: a full invalidation (satp / full
+sfence.vma / fence.i) now bumps a code-generation counter and RETAINS the trace
+cache, lazily re-validating a stale trace on its next dispatch by re-reading its
+code bytes and comparing to the baked `CheckCode` bytes. Most invalidations
+don't change the code (a sfence.vma is a TLB flush; a satp write doesn't touch
+the shared kernel text), so most traces survive. This collapsed the recompile
+thrash (native compiles fell ~550×: 706K → 1.3K per 40s of boot). Earlier
+finding: on a stable hot loop the JIT is 8.4× the interpreter; the boot was
+previously neutral because the drop+recompile thrash never let a trace stay
+compiled. The interpreter regressed slightly (187s→194s) from the per-dispatch
+generation lookup — a follow-up is to store the generation in the trace-cache
+entry instead of a side map.
 
 ## 8. Risks + validation
 
