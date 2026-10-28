@@ -99,6 +99,61 @@ pub extern "C" fn vane_regs_offset() -> i32 {
     core::mem::offset_of!(vane_arch::interp::LocalStackHost<Reactor>, regs) as i32
 }
 
+// ── WASM-integration shims (PLAN_ASYNC_JIT Phase B) ──────────────────────────
+// The vane-native pack fns call these (imported) shims to touch the host. The
+// WASM ABI has no host parameter, so the trampoline first writes the `host_ptr`
+// into `VANE_CURRENT_HOST` (its linear-memory address is baked in by the
+// patcher); the shims read it back. This is the WASM analog of the native
+// fiber's `ctx.host`.
+
+/// The current host (the dispatch loop's `LocalStackHost`), set by the
+/// trampoline before it calls the pack fn. A raw pointer as a `usize` (WASM
+/// linear-memory address).
+#[no_mangle]
+pub static VANE_CURRENT_HOST: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// Recover the current host. SAFETY: the trampoline set VANE_CURRENT_HOST to a
+/// valid `&mut LocalStackHost<Reactor>` for the duration of the pack-fn call.
+#[cfg(target_arch = "wasm32")]
+unsafe fn current_host() -> &'static mut vane_arch::interp::LocalStackHost<Reactor> {
+    &mut *(VANE_CURRENT_HOST.load(core::sync::atomic::Ordering::Relaxed)
+        as *mut vane_arch::interp::LocalStackHost<Reactor>)
+}
+
+/// `mem_load(addr, width, signed) -> value` — the host's `lr_load_mem`.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn vane_mem_load(addr: i64, width: i32, signed: i32) -> i64 {
+    use vane_arch::interp::LocalReactor;
+    let host = unsafe { current_host() };
+    host.reactor
+        .lr_load_mem(addr as u64, mw(width), signed != 0) as i64
+}
+
+/// `mem_store(addr, width, value)` — the host's `lr_store_mem`.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn vane_mem_store(addr: i64, width: i32, value: i64) {
+    use vane_arch::interp::LocalReactor;
+    let host = unsafe { current_host() };
+    host.reactor
+        .lr_store_mem(addr as u64, mw(width), value as u64);
+}
+
+/// Decode the MemWidth discriminant the renderer bakes in (B1=0, B2=1, B4=2,
+/// B8=3).
+#[cfg(target_arch = "wasm32")]
+fn mw(disc: i32) -> vane_arch::MemWidth {
+    use vane_arch::MemWidth;
+    match disc {
+        0 => MemWidth::B1,
+        1 => MemWidth::B2,
+        2 => MemWidth::B4,
+        _ => MemWidth::B8,
+    }
+}
+
 /// wasm-bindgen calls this once when the module is instantiated.
 /// Installs `console_error_panic_hook` so Rust panics surface as readable
 /// `console.error` messages (with the panic location/message) instead of an
