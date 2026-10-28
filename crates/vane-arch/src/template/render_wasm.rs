@@ -7,8 +7,20 @@
 //! consumers (spday-exec) can build vane-arch with `target-wasm` off.
 
 use vane_target_core::{MemWidth, StackOp};
-use vane_target_wasm::{JitOpcode, WasmAbiConfig};
+use vane_target_wasm::{JitOpcode, RenderAbi, VaneAbiConfig, WasmAbiConfig};
 use wasmparser::Operator;
+
+/// The `MemWidth` discriminant baked into the vane-native shim calls
+/// (matches the shim's `B1=0, B2=1, B4=2, B8=3` decode).
+#[cfg(feature = "target-wasm")]
+fn mw_disc(w: MemWidth) -> i32 {
+    match w {
+        MemWidth::B1 => 0,
+        MemWidth::B2 => 1,
+        MemWidth::B4 => 2,
+        MemWidth::B8 => 3,
+    }
+}
 
 /// Render a `StackOp` stream to a sequence of WASM opcodes.
 ///
@@ -31,8 +43,35 @@ pub fn render_stack_to_wasm<'a>(
     ops: impl Iterator<Item = StackOp> + 'a,
     abi: WasmAbiConfig,
 ) -> impl Iterator<Item = JitOpcode<'a>> + 'a {
+    render_with_abi(ops, RenderAbi::Speet(abi))
+}
+
+/// Render a `StackOp` stream to WASM for the **vane-native ABI**
+/// ([`VaneAbiConfig`]) — the vane interpreter's own WASM build, no speet
+/// runtime. The trace returns an exit to the dispatch loop; see
+/// [`VaneAbiConfig`]'s doc comment.
+#[cfg(feature = "target-wasm")]
+pub fn render_stack_to_wasm_vane<'a>(
+    ops: impl Iterator<Item = StackOp> + 'a,
+    abi: VaneAbiConfig,
+) -> impl Iterator<Item = JitOpcode<'a>> + 'a {
+    render_with_abi(ops, RenderAbi::Vane(abi))
+}
+
+#[cfg(feature = "target-wasm")]
+fn render_with_abi<'a>(
+    ops: impl Iterator<Item = StackOp> + 'a,
+    abi: RenderAbi,
+) -> impl Iterator<Item = JitOpcode<'a>> + 'a {
     gen move {
         let mut if_depth = 0u32;
+        // The ABI-independent shared locals (both ABIs provide these): the
+        // scratch i64 locals and the WASM memory index. Computed once so the
+        // macros below stay ABI-agnostic.
+        let (scratch_a, scratch_b, mem_idx) = match abi {
+            RenderAbi::Speet(s) => (s.scratch_a, s.scratch_b, s.mem_idx),
+            RenderAbi::Vane(v) => (v.scratch_a, v.scratch_b, v.mem_idx),
+        };
         // ── Local helpers for multi-instruction patterns ────────────────
         macro_rules! op {
             ($o:expr) => {
@@ -45,7 +84,7 @@ pub fn render_stack_to_wasm<'a>(
                     align: 0,
                     max_align: $max_align,
                     offset: 0,
-                    memory: abi.mem_idx,
+                    memory: mem_idx,
                 }
             };
         }
@@ -61,13 +100,13 @@ pub fn render_stack_to_wasm<'a>(
             // divisor result (I64Const -1 for div; LocalGet a for rem).
             ($wasm_op:expr, $zero_branch:expr) => {{
                 op!(Operator::LocalSet {
-                    local_index: abi.scratch_b
+                    local_index: scratch_b
                 }); // pop b
                 op!(Operator::LocalSet {
-                    local_index: abi.scratch_a
+                    local_index: scratch_a
                 }); // pop a
                 op!(Operator::LocalGet {
-                    local_index: abi.scratch_b
+                    local_index: scratch_b
                 });
                 op!(Operator::I64Eqz);
                 op!(Operator::If {
@@ -76,10 +115,10 @@ pub fn render_stack_to_wasm<'a>(
                 $zero_branch;
                 op!(Operator::Else);
                 op!(Operator::LocalGet {
-                    local_index: abi.scratch_a
+                    local_index: scratch_a
                 });
                 op!(Operator::LocalGet {
-                    local_index: abi.scratch_b
+                    local_index: scratch_b
                 });
                 op!($wasm_op);
                 op!(Operator::End);
@@ -91,13 +130,13 @@ pub fn render_stack_to_wasm<'a>(
         macro_rules! yield_div_rem_32 {
             ($wasm_op:expr, $zero_branch:expr) => {{
                 op!(Operator::LocalSet {
-                    local_index: abi.scratch_b
+                    local_index: scratch_b
                 }); // pop b:i64
                 op!(Operator::LocalSet {
-                    local_index: abi.scratch_a
+                    local_index: scratch_a
                 }); // pop a:i64
                 op!(Operator::LocalGet {
-                    local_index: abi.scratch_b
+                    local_index: scratch_b
                 });
                 op!(Operator::I32WrapI64);
                 op!(Operator::I32Eqz);
@@ -107,11 +146,11 @@ pub fn render_stack_to_wasm<'a>(
                 $zero_branch;
                 op!(Operator::Else);
                 op!(Operator::LocalGet {
-                    local_index: abi.scratch_a
+                    local_index: scratch_a
                 });
                 op!(Operator::I32WrapI64);
                 op!(Operator::LocalGet {
-                    local_index: abi.scratch_b
+                    local_index: scratch_b
                 });
                 op!(Operator::I32WrapI64);
                 op!($wasm_op);
@@ -127,11 +166,11 @@ pub fn render_stack_to_wasm<'a>(
         macro_rules! yield_binop32 {
             ($wasm_op:expr) => {{
                 op!(Operator::LocalSet {
-                    local_index: abi.scratch_b
+                    local_index: scratch_b
                 }); // pop b:i64
                 op!(Operator::I32WrapI64); // wrap a -> i32
                 op!(Operator::LocalGet {
-                    local_index: abi.scratch_b
+                    local_index: scratch_b
                 });
                 op!(Operator::I32WrapI64); // wrap b -> i32
                 op!($wasm_op);
@@ -200,18 +239,58 @@ pub fn render_stack_to_wasm<'a>(
                     if r == 0 {
                         op!(Operator::I64Const { value: 0 });
                     } else {
-                        op!(Operator::LocalGet {
-                            local_index: abi.reg_base + r as u32
-                        });
+                        match abi {
+                            RenderAbi::Speet(s) => op!(Operator::LocalGet {
+                                local_index: s.reg_base + r as u32
+                            }),
+                            RenderAbi::Vane(v) => {
+                                // vane-native: the regs live in linear memory
+                                // at `regs_base + r*8`.
+                                op!(Operator::LocalGet {
+                                    local_index: v.regs_base_local
+                                });
+                                op!(Operator::I64Load {
+                                    memarg: wasmparser::MemArg {
+                                        align: 0,
+                                        max_align: 3,
+                                        offset: (r as u64) * 8,
+                                        memory: mem_idx,
+                                    }
+                                });
+                            }
+                        }
                     }
                 }
                 StackOp::StoreReg(r) => {
                     if r == 0 {
                         op!(Operator::Drop);
                     } else {
-                        op!(Operator::LocalSet {
-                            local_index: abi.reg_base + r as u32
-                        });
+                        match abi {
+                            RenderAbi::Speet(s) => op!(Operator::LocalSet {
+                                local_index: s.reg_base + r as u32
+                            }),
+                            RenderAbi::Vane(v) => {
+                                // Stack: [value]; store to `regs_base + r*8`.
+                                // Reorder to [regs_base, value] via scratch_a.
+                                op!(Operator::LocalSet {
+                                    local_index: scratch_a
+                                });
+                                op!(Operator::LocalGet {
+                                    local_index: v.regs_base_local
+                                });
+                                op!(Operator::LocalGet {
+                                    local_index: scratch_a
+                                });
+                                op!(Operator::I64Store {
+                                    memarg: wasmparser::MemArg {
+                                        align: 0,
+                                        max_align: 3,
+                                        offset: (r as u64) * 8,
+                                        memory: mem_idx,
+                                    }
+                                });
+                            }
+                        }
                     }
                 }
                 StackOp::Drop => {
@@ -229,19 +308,24 @@ pub fn render_stack_to_wasm<'a>(
                 // not something to silently zero, so this preserves the
                 // original safety property for anything not yet mapped.
                 StackOp::LoadState(slot) => {
-                    match abi
-                        .state_slots
-                        .iter()
-                        .find(|(name, _)| *name == slot.as_str())
-                    {
-                        Some((_, local)) => op!(Operator::LocalGet {
-                            local_index: *local
-                        }),
-                        None => op!(Operator::Unreachable),
+                    match abi {
+                        RenderAbi::Speet(s) => match s
+                            .state_slots
+                            .iter()
+                            .find(|(name, _)| *name == slot.as_str())
+                        {
+                            Some((_, local)) => op!(Operator::LocalGet {
+                                local_index: *local
+                            }),
+                            None => op!(Operator::Unreachable),
+                        },
+                        // The vane-native ABI is RISC-V-only for now (no named
+                        // state slots — RISC-V uses LoadReg/StoreReg).
+                        RenderAbi::Vane(_) => op!(Operator::Unreachable),
                     }
                 }
-                StackOp::StoreState(slot) => {
-                    match abi
+                StackOp::StoreState(slot) => match abi {
+                    RenderAbi::Speet(s) => match s
                         .state_slots
                         .iter()
                         .find(|(name, _)| *name == slot.as_str())
@@ -250,8 +334,9 @@ pub fn render_stack_to_wasm<'a>(
                             local_index: *local
                         }),
                         None => op!(Operator::Unreachable),
-                    }
-                }
+                    },
+                    RenderAbi::Vane(_) => op!(Operator::Unreachable),
+                },
 
                 // ── 64-bit arithmetic ─────────────────────────────────────
                 StackOp::Add64 => {
@@ -285,7 +370,7 @@ pub fn render_stack_to_wasm<'a>(
                     yield_div_rem_64!(
                         Operator::I64RemU,
                         op!(Operator::LocalGet {
-                            local_index: abi.scratch_a
+                            local_index: scratch_a
                         })
                     );
                 }
@@ -293,7 +378,7 @@ pub fn render_stack_to_wasm<'a>(
                     yield_div_rem_64!(
                         Operator::I64RemS,
                         op!(Operator::LocalGet {
-                            local_index: abi.scratch_a
+                            local_index: scratch_a
                         })
                     );
                 }
@@ -422,7 +507,7 @@ pub fn render_stack_to_wasm<'a>(
                     yield_div_rem_32!(
                         Operator::I32RemU,
                         op!(Operator::LocalGet {
-                            local_index: abi.scratch_a
+                            local_index: scratch_a
                         })
                     );
                 }
@@ -430,80 +515,136 @@ pub fn render_stack_to_wasm<'a>(
                     yield_div_rem_32!(
                         Operator::I32RemS,
                         op!(Operator::LocalGet {
-                            local_index: abi.scratch_a
+                            local_index: scratch_a
                         })
                     );
                 }
 
                 // ── Memory ──────────────────────────────────────────────────
                 StackOp::LoadMem { width, signed } => {
-                    op!(Operator::I32WrapI64); // addr: i64 -> i32 (flat memory model)
-                    match (width, signed) {
-                        (MemWidth::B1, true) => op!(Operator::I64Load8S {
-                            memarg: mem_arg!(0)
-                        }),
-                        (MemWidth::B1, false) => op!(Operator::I64Load8U {
-                            memarg: mem_arg!(0)
-                        }),
-                        (MemWidth::B2, true) => op!(Operator::I64Load16S {
-                            memarg: mem_arg!(1)
-                        }),
-                        (MemWidth::B2, false) => op!(Operator::I64Load16U {
-                            memarg: mem_arg!(1)
-                        }),
-                        (MemWidth::B4, true) => op!(Operator::I64Load32S {
-                            memarg: mem_arg!(2)
-                        }),
-                        (MemWidth::B4, false) => op!(Operator::I64Load32U {
-                            memarg: mem_arg!(2)
-                        }),
-                        (MemWidth::B8, _) => op!(Operator::I64Load {
-                            memarg: mem_arg!(3)
-                        }),
+                    match abi {
+                        RenderAbi::Speet(_) => {
+                            op!(Operator::I32WrapI64); // addr: i64 -> i32 (flat memory model)
+                            match (width, signed) {
+                                (MemWidth::B1, true) => op!(Operator::I64Load8S {
+                                    memarg: mem_arg!(0)
+                                }),
+                                (MemWidth::B1, false) => op!(Operator::I64Load8U {
+                                    memarg: mem_arg!(0)
+                                }),
+                                (MemWidth::B2, true) => op!(Operator::I64Load16S {
+                                    memarg: mem_arg!(1)
+                                }),
+                                (MemWidth::B2, false) => op!(Operator::I64Load16U {
+                                    memarg: mem_arg!(1)
+                                }),
+                                (MemWidth::B4, true) => op!(Operator::I64Load32S {
+                                    memarg: mem_arg!(2)
+                                }),
+                                (MemWidth::B4, false) => op!(Operator::I64Load32U {
+                                    memarg: mem_arg!(2)
+                                }),
+                                (MemWidth::B8, _) => op!(Operator::I64Load {
+                                    memarg: mem_arg!(3)
+                                }),
+                            }
+                        }
+                        RenderAbi::Vane(v) => {
+                            // Stack: [addr: i64]; call mem_load(addr, width,
+                            // signed) -> value. The host shim does the real
+                            // (translated) access — not a flat memory model.
+                            let w = mw_disc(width);
+                            op!(Operator::I32Const { value: w });
+                            op!(Operator::I32Const {
+                                value: signed as i32
+                            });
+                            op!(Operator::Call {
+                                function_index: v.mem_load_func
+                            });
+                        }
                     }
                 }
                 StackOp::StoreMem { width } => {
-                    // Stack: [addr: i64, value: i64] (addr below, value on
-                    // top) — matches WASM store's own [addr, value] operand
-                    // order, so only `addr` (now buried below `value`) needs
-                    // reordering through a scratch local to wrap it to i32.
-                    op!(Operator::LocalSet {
-                        local_index: abi.scratch_a
-                    }); // pop value
-                    op!(Operator::I32WrapI64); // wrap addr -> i32
-                    op!(Operator::LocalGet {
-                        local_index: abi.scratch_a
-                    }); // push value back
-                    match width {
-                        MemWidth::B1 => op!(Operator::I64Store8 {
-                            memarg: mem_arg!(0)
-                        }),
-                        MemWidth::B2 => op!(Operator::I64Store16 {
-                            memarg: mem_arg!(1)
-                        }),
-                        MemWidth::B4 => op!(Operator::I64Store32 {
-                            memarg: mem_arg!(2)
-                        }),
-                        MemWidth::B8 => op!(Operator::I64Store {
-                            memarg: mem_arg!(3)
-                        }),
+                    match abi {
+                        RenderAbi::Speet(_) => {
+                            // Stack: [addr: i64, value: i64] (addr below, value on
+                            // top) — matches WASM store's own [addr, value] operand
+                            // order, so only `addr` (now buried below `value`) needs
+                            // reordering through a scratch local to wrap it to i32.
+                            op!(Operator::LocalSet {
+                                local_index: scratch_a
+                            }); // pop value
+                            op!(Operator::I32WrapI64); // wrap addr -> i32
+                            op!(Operator::LocalGet {
+                                local_index: scratch_a
+                            }); // push value back
+                            match width {
+                                MemWidth::B1 => op!(Operator::I64Store8 {
+                                    memarg: mem_arg!(0)
+                                }),
+                                MemWidth::B2 => op!(Operator::I64Store16 {
+                                    memarg: mem_arg!(1)
+                                }),
+                                MemWidth::B4 => op!(Operator::I64Store32 {
+                                    memarg: mem_arg!(2)
+                                }),
+                                MemWidth::B8 => op!(Operator::I64Store {
+                                    memarg: mem_arg!(3)
+                                }),
+                            }
+                        }
+                        RenderAbi::Vane(v) => {
+                            // Stack: [addr, value]; call mem_store(addr, width, value).
+                            let w = mw_disc(width);
+                            op!(Operator::LocalSet {
+                                local_index: scratch_a
+                            }); // pop value
+                            op!(Operator::I32Const { value: w }); // push width
+                            op!(Operator::LocalGet {
+                                local_index: scratch_a
+                            }); // push value
+                            op!(Operator::Call {
+                                function_index: v.mem_store_func
+                            });
+                        }
                     }
                 }
 
                 // ── Side effects ────────────────────────────────────────────
                 StackOp::Ecall => {
-                    for r in 0..abi.num_regs {
-                        op!(Operator::LocalGet {
-                            local_index: abi.reg_base + r
-                        });
-                    }
-                    op!(Operator::Call {
-                        function_index: abi.ecall_func_idx
-                    });
-                    for r in (0..abi.num_regs).rev() {
-                        op!(Operator::LocalSet {
-                            local_index: abi.reg_base + r
-                        });
+                    match abi {
+                        RenderAbi::Speet(s) => {
+                            for r in 0..s.num_regs {
+                                op!(Operator::LocalGet {
+                                    local_index: s.reg_base + r
+                                });
+                            }
+                            op!(Operator::Call {
+                                function_index: s.ecall_func_idx
+                            });
+                            for r in (0..s.num_regs).rev() {
+                                op!(Operator::LocalSet {
+                                    local_index: s.reg_base + r
+                                });
+                            }
+                        }
+                        RenderAbi::Vane(v) => {
+                            // call ecall(regs_base) -> cont; cont==0 -> exit Ecall.
+                            op!(Operator::LocalGet {
+                                local_index: v.regs_base_local
+                            });
+                            op!(Operator::Call {
+                                function_index: v.ecall_func
+                            });
+                            op!(Operator::I32Eqz);
+                            op!(Operator::If {
+                                blockty: wasmparser::BlockType::Empty
+                            });
+                            op!(Operator::I32Const { value: 2 }); // TAG_ECALL
+                            op!(Operator::I64Const { value: 0 });
+                            op!(Operator::Return);
+                            op!(Operator::End);
+                        }
                     }
                 }
                 StackOp::Trap(_msg) => {
@@ -517,24 +658,40 @@ pub fn render_stack_to_wasm<'a>(
                     op!(Operator::Unreachable);
                 }
                 StackOp::TailCall => {
-                    // Stack: [addr: i64] — save it before pushing registers
-                    // (which must precede it as `target_pc`, the last
-                    // argument, per the shared calling convention), then
-                    // push it back.
-                    op!(Operator::LocalSet {
-                        local_index: abi.scratch_a
-                    });
-                    for r in 0..abi.num_regs {
-                        op!(Operator::LocalGet {
-                            local_index: abi.reg_base + r
-                        });
+                    match abi {
+                        RenderAbi::Speet(s) => {
+                            // Stack: [addr: i64] — save it before pushing registers
+                            // (which must precede it as `target_pc`, the last
+                            // argument, per the shared calling convention), then
+                            // push it back.
+                            op!(Operator::LocalSet {
+                                local_index: scratch_a
+                            });
+                            for r in 0..s.num_regs {
+                                op!(Operator::LocalGet {
+                                    local_index: s.reg_base + r
+                                });
+                            }
+                            op!(Operator::LocalGet {
+                                local_index: scratch_a
+                            });
+                            op!(Operator::ReturnCall {
+                                function_index: s.lookup_stub_func_idx
+                            });
+                        }
+                        RenderAbi::Vane(_) => {
+                            // Stack: [addr: i64]; return (TAILCALL, addr) to the
+                            // dispatch loop (which looks up the next trace).
+                            op!(Operator::LocalSet {
+                                local_index: scratch_a
+                            }); // pop target
+                            op!(Operator::I32Const { value: 0 }); // TAG_TAILCALL
+                            op!(Operator::LocalGet {
+                                local_index: scratch_a
+                            }); // push target
+                            op!(Operator::Return);
+                        }
                     }
-                    op!(Operator::LocalGet {
-                        local_index: abi.scratch_a
-                    });
-                    op!(Operator::ReturnCall {
-                        function_index: abi.lookup_stub_func_idx
-                    });
                 }
                 StackOp::Log(_) => {} // diagnostic hint — no WASM equivalent
 
@@ -555,51 +712,88 @@ pub fn render_stack_to_wasm<'a>(
                     addr,
                     expected,
                     miss_label: _,
-                } => {
-                    let cmp = match expected.len() {
-                        4 => Some((
-                            u32::from_le_bytes([expected[0], expected[1], expected[2], expected[3]])
-                                as i32,
-                            Operator::I32Load {
-                                memarg: mem_arg!(2),
-                            },
-                        )),
-                        2 => Some((
-                            u16::from_le_bytes([expected[0], expected[1]]) as i32,
-                            Operator::I32Load16U {
-                                memarg: mem_arg!(1),
-                            },
-                        )),
-                        _ => None, // unknown width — skip check, matching the JS renderer
-                    };
-                    if let Some((expected_i32, load_op)) = cmp {
-                        op!(Operator::I32Const {
-                            value: (addr as u32) as i32
-                        }); // flat memory model
-                        op!(load_op);
-                        op!(Operator::I32Const {
-                            value: expected_i32
+                } => match abi {
+                    RenderAbi::Speet(s) => {
+                        let cmp = match expected.len() {
+                            4 => Some((
+                                u32::from_le_bytes([
+                                    expected[0],
+                                    expected[1],
+                                    expected[2],
+                                    expected[3],
+                                ]) as i32,
+                                Operator::I32Load {
+                                    memarg: mem_arg!(2),
+                                },
+                            )),
+                            2 => Some((
+                                u16::from_le_bytes([expected[0], expected[1]]) as i32,
+                                Operator::I32Load16U {
+                                    memarg: mem_arg!(1),
+                                },
+                            )),
+                            _ => None, // unknown width — skip check, matching the JS renderer
+                        };
+                        if let Some((expected_i32, load_op)) = cmp {
+                            op!(Operator::I32Const {
+                                value: (addr as u32) as i32
+                            }); // flat memory model
+                            op!(load_op);
+                            op!(Operator::I32Const {
+                                value: expected_i32
+                            });
+                            op!(Operator::I32Ne);
+                            op!(Operator::If {
+                                blockty: wasmparser::BlockType::Empty
+                            });
+                            op!(Operator::I64Const { value: addr as i64 });
+                            op!(Operator::Call {
+                                function_index: s.jit_invalidate_func_idx
+                            });
+                            for r in 0..s.num_regs {
+                                op!(Operator::LocalGet {
+                                    local_index: s.reg_base + r
+                                });
+                            }
+                            op!(Operator::I64Const { value: addr as i64 });
+                            op!(Operator::ReturnCall {
+                                function_index: s.lookup_stub_func_idx
+                            });
+                            op!(Operator::End);
+                        }
+                    }
+                    RenderAbi::Vane(v) => {
+                        // The trap/irq/fuel check via the `check_code` shim. The
+                        // code-integrity re-validation is the dispatch loop's
+                        // retain+revalidate job (it re-reads the code bytes before
+                        // running a stale trace), so the trace doesn't re-read here.
+                        // check_code(addr) -> (exit_tag, exit_pc); CONTINUE
+                        // (u32::MAX) means keep going, else return the exit.
+                        op!(Operator::I64Const { value: addr as i64 });
+                        op!(Operator::Call {
+                            function_index: v.check_code_func
                         });
+                        op!(Operator::LocalSet {
+                            local_index: scratch_b
+                        }); // pop exit_pc
+                        op!(Operator::LocalTee {
+                            local_index: scratch_a
+                        }); // status: keep on stack + store
+                        op!(Operator::I32Const { value: -1 }); // CONTINUE
                         op!(Operator::I32Ne);
                         op!(Operator::If {
                             blockty: wasmparser::BlockType::Empty
                         });
-                        op!(Operator::I64Const { value: addr as i64 });
-                        op!(Operator::Call {
-                            function_index: abi.jit_invalidate_func_idx
-                        });
-                        for r in 0..abi.num_regs {
-                            op!(Operator::LocalGet {
-                                local_index: abi.reg_base + r
-                            });
-                        }
-                        op!(Operator::I64Const { value: addr as i64 });
-                        op!(Operator::ReturnCall {
-                            function_index: abi.lookup_stub_func_idx
-                        });
+                        op!(Operator::LocalGet {
+                            local_index: scratch_a
+                        }); // exit_tag
+                        op!(Operator::LocalGet {
+                            local_index: scratch_b
+                        }); // exit_pc
+                        op!(Operator::Return);
                         op!(Operator::End);
                     }
-                }
+                },
             }
         }
     }

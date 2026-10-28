@@ -110,3 +110,62 @@ pub struct WasmAbiConfig {
     /// not something to silently zero.
     pub state_slots: &'static [(&'static str, u32)],
 }
+
+// ── The vane-native WASM ABI ────────────────────────────────────────────────
+//
+// The `WasmAbiConfig` above renders for speet's regfn calling convention
+// (registers as WASM params, `return_call`/`return_call_indirect` dispatch
+// into a speet-provided `lookup_stub`). That is load-bearing for speet and is
+// kept intact. The **vane-native ABI** below is the alternative the vane
+// interpreter's own WASM build uses directly — no speet runtime required. The
+// core divergence: a vane-native trace RETURNS an exit to vane's dispatch
+// loop (which then handles TailCall/Trap/Bail/Ecall — exactly the interpreter's
+// `match exit`), instead of `return_call`-chaining into a lookup stub.
+
+/// The vane-native WASM trace ABI.
+///
+/// A compiled trace is a WASM function
+/// `(regs_base: i32) -> (exit_tag: i32, exit_pc: i64)`:
+/// - `regs_base` is the byte offset of the host's `[u64; 32]` register cache in
+///   the shared WASM linear memory (`mem_idx`). `LoadReg`/`StoreReg` are
+///   `i64.load`/`i64.store` at `regs_base + r*8` — the host's register cache is
+///   the source of truth, matching the interpreter (no params marshal).
+/// - The `StackOp` value stack is the WASM operand stack (unchanged).
+/// - Guest memory ops are NOT flat: they call the host's `mem_load`/`mem_store`
+///   shims (which do the real address translation), matching the interpreter.
+/// - `CheckCode` calls the `check_code` shim (the trap/irq/fuel check); the
+///   code-integrity re-validation is the dispatch loop's retain+revalidate job,
+///   not the trace's (so no inline integrity read here).
+/// - The trace returns `(exit_tag, exit_pc)` to the dispatch loop: tag 0 =
+///   TailCall(exit_pc), 1 = Trap (exit_pc = op index), 2 = Ecall, 3 =
+///   Bail(exit_pc) — the same tags as the native JIT (`vane-jit`).
+#[derive(Clone, Copy, Debug)]
+pub struct VaneAbiConfig {
+    /// WASM memory index holding the register cache + guest state.
+    pub mem_idx: u32,
+    /// Local index of the `regs_base: i32` parameter (usually 0).
+    pub regs_base_local: u32,
+    /// Scratch i64 locals (must not alias `regs_base_local`).
+    pub scratch_a: u32,
+    pub scratch_b: u32,
+    /// Host shim: `(addr: i64, width: i32, signed: i32) -> (value: i64)`.
+    pub mem_load_func: u32,
+    /// Host shim: `(addr: i64, width: i32, value: i64) -> ()`.
+    pub mem_store_func: u32,
+    /// Host shim: `(addr: i64) -> (exit_tag: i32, exit_pc: i64)`. Returns
+    /// `exit_tag == u32::MAX` to CONTINUE the trace (the common case); any
+    /// other tag is a real exit the trace returns verbatim.
+    pub check_code_func: u32,
+    /// Host shim: `(regs_base: i32) -> (cont: i32)`. `cont != 0` continues the
+    /// trace; `cont == 0` makes the trace return `Ecall`.
+    pub ecall_func: u32,
+}
+
+/// Which WASM ABI a trace is rendered for.
+#[derive(Clone, Copy, Debug)]
+pub enum RenderAbi {
+    /// The speet regfn calling convention (kept intact for speet-dynamic-jit).
+    Speet(WasmAbiConfig),
+    /// The vane-native ABI (the vane interpreter's own WASM build).
+    Vane(VaneAbiConfig),
+}
