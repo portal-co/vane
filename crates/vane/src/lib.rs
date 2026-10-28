@@ -65,6 +65,40 @@ const _: () = {
     assert_send_sync::<Reactor>();
 };
 
+// ── WASM-integration exports (PLAN_ASYNC_JIT Phase B) ────────────────────────
+// The patcher-generated trampolines (vane_patch::compile_trampoline) call
+// these. `vane_make_exit` constructs the `Exit` — which WASM can't build
+// itself, since the `Trap(String)` case needs the Rust allocator — and writes
+// it to the sret `ret_ptr`. `vane_regs_offset` reports the `LocalStackHost`'s
+// `regs` field offset, which the patcher bakes into the trampoline. Harmless
+// (unused) on the native build.
+
+/// Construct an `Exit` from a vane-native trace's `(tag, pc)` and write it to
+/// the sret `ret_ptr`. Tags match vane-jit: 0=TailCall, 1=Trap, 2=Ecall,
+/// 3=Bail. (TODO: the Trap case should take the `ct_ptr` to look up the exact
+/// op message, and the Bail case should hand the trace's undo entries to the
+/// host — the vane-native trace doesn't record undo yet.)
+#[no_mangle]
+pub extern "C" fn vane_make_exit(tag: i32, pc: i64, ret_ptr: *mut vane_arch::interp::Exit) {
+    use vane_arch::interp::Exit;
+    let exit = match tag {
+        0 => Exit::TailCall(pc as u64),
+        1 => Exit::Trap(format!("wasm trace trap (op/pc {pc:#x})")),
+        2 => Exit::Ecall,
+        3 => Exit::Bail(pc as u64),
+        _ => Exit::Trap(format!("wasm trace: bad exit tag {tag}")),
+    };
+    // SAFETY: `ret_ptr` is the caller's sret out-pointer (valid for `Exit`).
+    unsafe { core::ptr::write(ret_ptr, exit) };
+}
+
+/// The `LocalStackHost<Reactor>` `regs` field offset, for the trampoline's
+/// `regs_base = host_ptr + regs_offset`.
+#[no_mangle]
+pub extern "C" fn vane_regs_offset() -> i32 {
+    core::mem::offset_of!(vane_arch::interp::LocalStackHost<Reactor>, regs) as i32
+}
+
 /// wasm-bindgen calls this once when the module is instantiated.
 /// Installs `console_error_panic_hook` so Rust panics surface as readable
 /// `console.error` messages (with the panic location/message) instead of an
