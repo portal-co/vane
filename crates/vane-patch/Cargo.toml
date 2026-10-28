@@ -20,3 +20,6 @@ wasmparser = { workspace = true }
 [dev-dependencies]
 wat = "1"
 wasmprinter = "0.224"
+# Execute baked modules end-to-end in the bake tests (the working-AOT'd-binary
+# gate).
+wasmi = "1"

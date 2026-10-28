@@ -461,3 +461,372 @@ fn vane_native_trampoline_validates() {
     let bytes = module.finish();
     walrus::Module::from_buffer(&bytes).expect("the vane-native trampoline module is valid WASM");
 }
+
+// ── AOT bake (PLAN_ASYNC_JIT Phase C) ────────────────────────────────────────
+//
+// `bake_aot` is exercised against a synthetic "Wizened interpreter" module
+// carrying the exact integration surface the real build exports (verified in
+// the vane crate's own wasm32 build): the six `vane_*` functions,
+// `VANE_CURRENT_HOST`/`VANE_AOT_TRACE` as immutable globals holding their
+// linear-memory addresses (the form wasm-ld emits for `#[no_mangle]` statics),
+// one linear memory, one funcref table. The stubs do the real memory
+// mechanics (linear-memory reg cache, shims over linear memory), so the wasmi
+// execution test below is a true end-to-end run of the baked trampoline.
+
+/// `VANE_CURRENT_HOST`'s baked linear-memory address.
+const HOST_ADDR: u32 = 65536;
+/// `VANE_AOT_TRACE`'s baked address (its sentinel lives in a real data
+/// segment so the patcher has bytes to rewrite).
+const AOT_ADDR: u32 = 65792;
+/// The `vane_regs_offset` stub's value (the synthetic `LocalStackHost`'s regs
+/// offset within the "host").
+const REGS_OFF: u32 = 64;
+/// A seeded u64 the test trace loads through the `mem_load` shim.
+const SEED_ADDR: u32 = 0x2000;
+
+fn interp_module() -> Vec<u8> {
+    use wasm_encoder::{
+        CodeSection, ConstExpr, DataSection, ExportKind, ExportSection, FunctionSection,
+        GlobalSection, GlobalType, Instruction, MemArg, MemorySection, MemoryType, Module,
+        RefType, TableSection, TableType, TypeSection, ValType,
+    };
+    let mut types = TypeSection::new();
+    types.ty().function([], [ValType::I32]); // 0: vane_regs_offset
+    types.ty().function(
+        [ValType::I32, ValType::I64, ValType::I32],
+        [],
+    ); // 1: vane_make_exit
+    types.ty().function(
+        [ValType::I64, ValType::I32, ValType::I32],
+        [ValType::I64],
+    ); // 2: vane_mem_load
+    types.ty().function(
+        [ValType::I64, ValType::I32, ValType::I64],
+        [],
+    ); // 3: vane_mem_store
+    types.ty().function([ValType::I32, ValType::I64], []); // 4: vane_check_code_impl
+    types.ty().function([ValType::I32], [ValType::I32]); // 5: vane_ecall
+
+    let mut funcs = FunctionSection::new();
+    for ty in 0..6u32 {
+        funcs.function(ty);
+    }
+
+    let mut tables = TableSection::new();
+    tables.table(TableType {
+        element_type: RefType::FUNCREF,
+        table64: false,
+        minimum: 1,
+        maximum: Some(1),
+        shared: false,
+    });
+
+    let mut memories = MemorySection::new();
+    memories.memory(MemoryType {
+        minimum: 2,
+        maximum: None,
+        memory64: false,
+        shared: false,
+        page_size_log2: None,
+    });
+
+    // The exported statics: immutable globals whose init IS their linear-
+    // memory address (wasm-ld's form for #[no_mangle] statics).
+    let mut globals = GlobalSection::new();
+    globals.global(
+        GlobalType {
+            val_type: ValType::I32,
+            mutable: false,
+            shared: false,
+        },
+        &ConstExpr::i32_const(HOST_ADDR as i32),
+    );
+    globals.global(
+        GlobalType {
+            val_type: ValType::I32,
+            mutable: false,
+            shared: false,
+        },
+        &ConstExpr::i32_const(AOT_ADDR as i32),
+    );
+
+    let mut exports = ExportSection::new();
+    exports.export("memory", ExportKind::Memory, 0);
+    for (i, name) in [
+        "vane_regs_offset",
+        "vane_make_exit",
+        "vane_mem_load",
+        "vane_mem_store",
+        "vane_check_code_impl",
+        "vane_ecall",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        exports.export(name, ExportKind::Func, i as u32);
+    }
+    exports.export("VANE_CURRENT_HOST", ExportKind::Global, 0);
+    exports.export("VANE_AOT_TRACE", ExportKind::Global, 1);
+
+    let mut code = CodeSection::new();
+    // 0: vane_regs_offset() -> REGS_OFF
+    let mut f = wasm_encoder::Function::new([]);
+    f.instruction(&Instruction::I32Const(REGS_OFF as i32));
+    f.instruction(&Instruction::End);
+    code.function(&f);
+    // 1: vane_make_exit(tag, pc, ret_ptr): *(i32*)ret = tag; *(i64*)(ret+8) = pc
+    let mut f = wasm_encoder::Function::new([]);
+    f.instruction(&Instruction::LocalGet(2));
+    f.instruction(&Instruction::LocalGet(0));
+    f.instruction(&Instruction::I32Store(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::LocalGet(2));
+    f.instruction(&Instruction::LocalGet(1));
+    f.instruction(&Instruction::I64Store(MemArg {
+        offset: 8,
+        align: 3,
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::End);
+    code.function(&f);
+    // 2: vane_mem_load(addr, width, signed) -> i64 (stub: the B8-unsigned path
+    // only — wrap the address and load).
+    let mut f = wasm_encoder::Function::new([]);
+    f.instruction(&Instruction::LocalGet(0));
+    f.instruction(&Instruction::I32WrapI64);
+    f.instruction(&Instruction::I64Load(MemArg {
+        offset: 0,
+        align: 3,
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::End);
+    code.function(&f);
+    // 3: vane_mem_store(addr, width, value)
+    let mut f = wasm_encoder::Function::new([]);
+    f.instruction(&Instruction::LocalGet(0));
+    f.instruction(&Instruction::I32WrapI64);
+    f.instruction(&Instruction::LocalGet(2));
+    f.instruction(&Instruction::I64Store(MemArg {
+        offset: 0,
+        align: 3,
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::End);
+    code.function(&f);
+    // 4: vane_check_code_impl(ret_ptr, addr): *(ret_ptr) = (u32::MAX, 0) —
+    // always Continue.
+    let mut f = wasm_encoder::Function::new([]);
+    f.instruction(&Instruction::LocalGet(0));
+    f.instruction(&Instruction::I32Const(-1)); // CONTINUE
+    f.instruction(&Instruction::I32Store(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::LocalGet(0));
+    f.instruction(&Instruction::I64Const(0));
+    f.instruction(&Instruction::I64Store(MemArg {
+        offset: 8,
+        align: 3,
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::End);
+    code.function(&f);
+    // 5: vane_ecall(_) -> 0 (cont == 0 -> the trace returns Ecall)
+    let mut f = wasm_encoder::Function::new([]);
+    f.instruction(&Instruction::I32Const(0));
+    f.instruction(&Instruction::End);
+    code.function(&f);
+
+    let mut data = DataSection::new();
+    // The seed the test trace loads through the mem_load shim.
+    data.active(
+        0,
+        &ConstExpr::i32_const(SEED_ADDR as i32),
+        0x1234u64.to_le_bytes(),
+    );
+    // The VANE_AOT_TRACE sentinel: usize::MAX on wasm32 = "not baked".
+    data.active(
+        0,
+        &ConstExpr::i32_const(AOT_ADDR as i32),
+        [0xffu8, 0xff, 0xff, 0xff],
+    );
+
+    let mut module = Module::new();
+    module
+        .section(&types)
+        .section(&funcs)
+        .section(&tables)
+        .section(&memories)
+        .section(&globals)
+        .section(&exports)
+        .section(&code)
+        .section(&data);
+    module.finish()
+}
+
+#[test]
+fn bake_aot_validates_and_stays_additive() {
+    let target = interp_module();
+    let traces: Vec<(u64, Vec<StackOp>)> = vec![
+        (0x1000, simple_trace(0xdead)),
+        (0x2000, simple_trace(0xbeef)),
+    ];
+    let with_traces = write_traces_section(&target, &traces).expect("write traces");
+    let back = read_traces_section(&with_traces).expect("read traces");
+    assert_eq!(back.len(), 2);
+    assert_eq!(back[0].0, 0x1000);
+    assert_eq!(back[1].0, 0x2000);
+
+    let baked = vane_patch::bake_aot(&with_traces, back).expect("bake");
+    // The baked module is valid WASM (walrus parse; wasmi validates in the
+    // execution test below) and preserves the target's structure.
+    walrus::Module::from_buffer(&baked.wasm).expect("baked module validates");
+    let audit = audit_no_stripping(&target, &baked.wasm).expect("additive bake");
+    assert!(audit.is_clean(), "bake must be additive: {audit:?}");
+
+    // One funcref-table slot per trace, starting past the original table
+    // (which had exactly one entry).
+    assert_eq!(baked.entries, vec![(0x1000, 1), (0x2000, 2)]);
+    let text = wasmprinter::print_bytes(&baked.wasm).expect("printable");
+    for name in ["vane_pack_1000", "vane_tramp_1000", "vane_pack_2000", "vane_tramp_2000"] {
+        assert!(text.contains(name), "missing export {name}: {text}");
+    }
+    // The self-describing marker section survived emit.
+    assert!(text.contains("vane.aot"));
+}
+
+/// The working-AOT'd-binary gate: instantiate the baked module in wasmi and
+/// run a trace end-to-end through the trampoline — pack fn shims, the sret
+/// Exit construction, and the baked trace table all in one WASM execution.
+#[test]
+fn bake_aot_runs_traces_in_wasmi() {
+    let target = interp_module();
+    // ALU + CheckCode (the shim continues) + a register round-trip + a load
+    // through the mem_load shim + a TailCall exit.
+    let trace = vec![
+        StackOp::CheckCode {
+            addr: 0x100,
+            expected: vec![].into(),
+            miss_label: String::new(),
+        },
+        StackOp::PushImm(0xdead),
+        StackOp::StoreReg(1),
+        StackOp::LoadReg(1),
+        StackOp::PushImm(SEED_ADDR as u64),
+        StackOp::LoadMem {
+            width: MemWidth::B8,
+            signed: false,
+        },
+        StackOp::StoreReg(2),
+        StackOp::PushImm(0x8000),
+        StackOp::TailCall,
+    ];
+    let baked = vane_patch::bake_aot(&target, vec![(0x1000, trace)]).expect("bake");
+
+    let mut config = wasmi::Config::default();
+    config.wasm_multi_memory(false);
+    let engine = wasmi::Engine::new(&config);
+    let module =
+        wasmi::Module::new(&engine, &baked.wasm[..]).expect("baked module validates in wasmi");
+    let mut store = wasmi::Store::new(&engine, ());
+    let linker = wasmi::Linker::<()>::new(&engine);
+    let instance = linker
+        .instantiate_and_start(&mut store, &module)
+        .expect("instantiate");
+
+    // The dispatch loop's view: host (LocalStackHost) at 2048, sret buffer at
+    // 4096, ct_ptr unused by the trampoline.
+    let host_ptr: u32 = 2048;
+    let ret_ptr: u32 = 4096;
+    let tramp = instance
+        .get_typed_func::<(i32, i32, i32), ()>(&store, "vane_tramp_1000")
+        .expect("trampoline export");
+    tramp
+        .call(&mut store, (ret_ptr as i32, host_ptr as i32, 0))
+        .expect("the trampoline should run without trapping");
+
+    let mem = instance.get_memory(&store, "memory").expect("memory export");
+    let read = |addr: u32, len: usize| -> Vec<u8> {
+        let mut buf = vec![0u8; len];
+        mem.read(&store, addr as usize, &mut buf)
+            .expect("read in-bounds");
+        buf
+    };
+
+    // Exit = TailCall(0x8000): tag 0 at ret_ptr, pc at ret_ptr+8 (the Exit
+    // layout rustc lowers: discriminant i32 at 0, payload at 8).
+    let out = read(ret_ptr, 16);
+    assert_eq!(
+        i32::from_le_bytes(out[0..4].try_into().unwrap()),
+        0,
+        "exit tag = TailCall"
+    );
+    assert_eq!(
+        i64::from_le_bytes(out[8..16].try_into().unwrap()),
+        0x8000,
+        "exit pc"
+    );
+
+    // The register cache at host_ptr + regs_offset: reg r lives at
+    // regs_base + r*8 — r1 = 0xdead (store), r2 = 0x1234 (loaded through the
+    // mem_load shim from the seeded memory), r3 untouched.
+    let regs = read(host_ptr + REGS_OFF, 32);
+    assert_eq!(
+        u64::from_le_bytes(regs[8..16].try_into().unwrap()),
+        0xdead,
+        "r1 stored"
+    );
+    assert_eq!(
+        u64::from_le_bytes(regs[16..24].try_into().unwrap()),
+        0x1234,
+        "r2 loaded through the mem_load shim"
+    );
+    assert_eq!(u64::from_le_bytes(regs[24..32].try_into().unwrap()), 0);
+
+    // The host-context handoff: the trampoline wrote host_ptr into
+    // VANE_CURRENT_HOST (which the shims read back).
+    let host_cell = read(HOST_ADDR, 4);
+    assert_eq!(u32::from_le_bytes(host_cell.try_into().unwrap()), host_ptr);
+
+    // The trace table: VANE_AOT_TRACE points at the baked blob, which holds
+    // the (pc, trampoline_table_idx) entry register_aot_traces will read.
+    let aot = read(AOT_ADDR, 4);
+    assert_eq!(
+        u32::from_le_bytes(aot.try_into().unwrap()),
+        baked.trace_table_addr,
+        "VANE_AOT_TRACE patched to the baked table"
+    );
+    let table = read(baked.trace_table_addr, 8 + 16);
+    assert_eq!(
+        u32::from_le_bytes(table[0..4].try_into().unwrap()),
+        1,
+        "trace count"
+    );
+    assert_eq!(
+        u64::from_le_bytes(table[8..16].try_into().unwrap()),
+        0x1000,
+        "entry pc"
+    );
+    assert_eq!(
+        u32::from_le_bytes(table[16..20].try_into().unwrap()),
+        baked.entries[0].1,
+        "entry trampoline table idx"
+    );
+}
+
+#[test]
+fn bake_aot_with_no_traces_is_a_noop() {
+    let target = interp_module();
+    let baked = vane_patch::bake_aot(&target, Vec::new()).expect("bake");
+    assert!(baked.entries.is_empty());
+    assert_eq!(baked.trace_table_addr, 0);
+    // The module still validates (and nothing was added).
+    walrus::Module::from_buffer(&baked.wasm).expect("validates");
+    let audit = audit_no_stripping(&target, &baked.wasm).expect("audit");
+    assert!(audit.is_clean());
+}
+

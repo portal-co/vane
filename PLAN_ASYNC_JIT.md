@@ -1,7 +1,21 @@
 # PLAN_ASYNC_JIT — async hosts + WASM AOT + snapshot/resume
 
-Status: **planned**. Builds on `PLAN_NATIVE_JIT.md` (the native JIT, now 1.6×
-the interpreter on the Linux boot after retain+revalidate).
+Status: **in progress**. Phase A (native coroutines) is done (`542b32b`). The
+**vane-native WASM ABI** — the renderer `render_stack_to_wasm_vane` +
+vane-patch's `compile_trace_vane` — is done (`ea1c5f2`, `4872149`); the speet
+path (`WasmAbiConfig`/`render_stack_to_wasm`) is untouched. The **sync trampoline
+seam is complete end-to-end** (`bed68e2`, `a9a5b21`, `eaa1a50`, `1a4897d`,
+`d03f8e2`, `4eeefac`, and `bake_aot` — see Phase C): a baked WASM module
+executes AOT'd traces through the funcref table, proven by the wasmi execution
+test in `crates/vane-patch/tests/patch.rs`. Binaryen asyncify (the async layer)
+and Phase D remain.
+
+**Design decision (user, 2026-10-27): the WASM integration routes through the
+fiber mechanism** — the WASM build uses the same unified async model as the
+native JIT, with Binaryen **asyncify** as the WASM-level counterpart of the
+native fiber (asyncify unwinds/rewinds the WASM stack on suspend/resume, exactly
+as the native fiber switches stacks). A WASM trace suspends for an async host
+the same way a native trace does.
 
 ## Goal
 
@@ -38,12 +52,24 @@ may need to suspend. Design:
   suspends once, then returns) proves the JIT can suspend + resume and stay
   bit-exact with the interpreter.
 
-## Phase B — WASM asyncify
+## Phase B — WASM integration (through the fiber/asyncify mechanism)
 
-For the WASM build, traces are compiled to WASM (vane-patch). Apply Binaryen
-`asyncify` to the compiled trace functions so a WASM trace can unwind on a
-suspend and rewind on resume. The `TraceCtx` equivalent lives in linear
-memory; asyncify's unwind/rewind handles the WASM operand stack + call frames.
+For the WASM build, traces are AOT-compiled to WASM (vane-patch, the vane-native
+ABI). The integration keeps the unified async model:
+
+- The AOT'd traces live in a WASM **funcref table**. The vane interpreter's
+  compiled registry holds a trace's table index; the dispatch loop calls it via
+  a **thunk** (a Rust fn, compiled to WASM, with the `CompiledTraceFn` ABI) that
+  `call_indirect`s the pack's function (the vane-native ABI) and converts the
+  returned `(exit_tag, exit_pc)` into an `Exit`.
+- The interpreter + the thunk + the traces are **asyncified** (Binaryen). A host
+  shim that needs to await (non-local memory etc.) calls
+  `asyncify_start_unwind`, unwinding the WASM stack through the thunk back to
+  the dispatch loop; the loop drives the async op, then `asyncify_start_rewind`
+  + re-calls to resume the trace — the WASM-level fiber switch, matching the
+  native `Fiber`/`AsyncTraceRun` protocol (`step` / `resume_with`).
+- Gate: a WASM trace suspends + resumes bit-exact with the interpreter, exactly
+  as the native Phase A test does.
 
 ## Phase C — WASM patcher AOT
 
@@ -51,6 +77,22 @@ Extend vane-patch: a Wizened binary (machine state snapshotted into the WASM
 data section / a custom section) exposes a hook — the patcher enumerates the
 hot traces recorded in the snapshot and AOT-compiles each into the binary's
 dispatch table, so the next run starts with all traces pre-compiled.
+
+**Done (`bake_aot`)**: the patcher builds each pack fn (vane-native ABI) and
+trampoline (`CompiledTraceFn` ABI) DIRECTLY in the target module via walrus
+`FunctionBuilder` (walrus's ID-remapping machinery is `pub(crate)`, so an
+encode/parse round-trip cannot work), appends trampolines to the funcref table
+(a WASM fn pointer IS its table index), bakes the `[count][pad][entries...]`
+trace table, and patches the interpreter's exported `VANE_AOT_TRACE` static to
+it (`Reactor::register_aot_traces` reads it on the next run). Design notes:
+the pack fns call the interpreter's own exports directly (no imports), the
+`check_code` shim is a generated multi-value wrapper over the sret
+`vane_check_code_impl`, and the trampoline reads `vane_regs_offset()` at
+runtime rather than baking it. Verified by `bake_aot_runs_traces_in_wasmi`
+(an executed baked trace, bit-exact side effects + Exit) plus the
+additivity audit. (Why a patched exported static rather than `extern` statics:
+wasm-ld rejects undefined data symbols on wasm32-wasip1 — there are no data
+imports to satisfy — so the patcher satisfies the contract by patching bytes.)
 
 ## Phase D — larger userspace test
 

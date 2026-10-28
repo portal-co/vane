@@ -176,6 +176,17 @@ pub extern "C" fn vane_ecall(_regs_base: i32) -> i32 {
     0 // cont == 0 -> the trace returns Ecall
 }
 
+/// The patcher-baked AOT trace table address (PLAN_ASYNC_JIT Phase B). The
+/// sentinel `usize::MAX` means "not baked"; `vane_patch::bake_aot` bakes the
+/// table blob into linear memory and patches these four bytes (the static's
+/// baked initial value keeps it in a real data segment, which the patcher
+/// finds and rewrites) to the blob's address. See
+/// `Reactor::register_aot_traces`.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub static VANE_AOT_TRACE: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(usize::MAX);
+
 /// Decode the MemWidth discriminant the renderer bakes in (B1=0, B2=1, B4=2,
 /// B8=3).
 #[cfg(target_arch = "wasm32")]
@@ -411,36 +422,45 @@ impl Reactor {
     }
 
     /// Register the AOT-compiled WASM traces the patcher baked into this binary
-    /// (PLAN_ASYNC_JIT Phase B). The patcher writes a trace table — a count +
-    /// `{ pc, trampoline_table_idx }` entries — and satisfies these extern
-    /// statics (converting the imports into baked globals); this reads the
-    /// table and populates the compiled registry so the dispatch loop calls
-    /// each trace's trampoline (its `CompiledTraceFn`) directly.
+    /// (PLAN_ASYNC_JIT Phase B). The patcher (`vane_patch::bake_aot`) bakes a
+    /// trace table — a `[count u32][pad u32][{ pc, trampoline_table_idx }...]`
+    /// blob — into linear memory and patches [`VANE_AOT_TRACE`] (see below) to
+    /// its address; this reads the table and populates the compiled registry so
+    /// the dispatch loop calls each trace's trampoline (its `CompiledTraceFn`)
+    /// directly.
     ///
     /// Verified against rustc's WASM lowering: a fn pointer IS the funcref
     /// table index (entry 0 is reserved), so `transmute(table_idx)` recovers
     /// the trampoline's `CompiledTraceFn`. The trace's ops come from the trace
     /// cache (restored by the snapshot / re-emitted on a miss).
+    ///
+    /// (Why an exported patched static instead of `extern` statics: wasm-ld
+    /// rejects undefined data symbols outright on wasm32-wasip1 — there are no
+    /// data imports to satisfy — so the patcher satisfies the contract by
+    /// patching this static's baked bytes in the module image instead.)
     #[cfg(target_arch = "wasm32")]
     pub fn register_aot_traces(&self) {
         use vane_arch::interp::{CompiledTrace, CompiledTraceFn, TraceBackend};
+        #[repr(C)]
+        struct AotTraceHeader {
+            count: u32,
+            _pad: u32,
+        }
         #[repr(C)]
         struct AotTraceEntry {
             pc: u64,
             trampoline_table_idx: u32,
             _pad: u32,
         }
-        extern "C" {
-            static VANE_AOT_TRACE_COUNT: u32;
-            static VANE_AOT_TRACE_TABLE: AotTraceEntry; // the base of the array
+        let table_addr = VANE_AOT_TRACE.load(core::sync::atomic::Ordering::Relaxed);
+        if table_addr == usize::MAX {
+            return; // sentinel: nothing baked (the un-patched interpreter build)
         }
-        // SAFETY: the patcher bakes VANE_AOT_TRACE_TABLE as an array of
-        // VANE_AOT_TRACE_COUNT entries; reading within that count is in-bounds.
+        // SAFETY: the patcher baked a `[header][count x entry]` blob at
+        // `table_addr` and patched VANE_AOT_TRACE to point at it.
         let (count, base) = unsafe {
-            (
-                VANE_AOT_TRACE_COUNT as usize,
-                &VANE_AOT_TRACE_TABLE as *const AotTraceEntry,
-            )
+            let hdr = table_addr as *const AotTraceHeader;
+            ((*hdr).count as usize, hdr.add(1) as *const AotTraceEntry)
         };
         for i in 0..count {
             let entry = unsafe { &*base.add(i) };
