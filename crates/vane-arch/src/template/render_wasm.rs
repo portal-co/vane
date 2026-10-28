@@ -777,15 +777,15 @@ fn render_with_abi<'a>(
                             local_index: scratch_b
                         }); // pop exit_pc
                         op!(Operator::LocalTee {
-                            local_index: scratch_a
-                        }); // status: keep on stack + store
+                            local_index: v.scratch32
+                        }); // status (i32): keep on stack + store
                         op!(Operator::I32Const { value: -1 }); // CONTINUE
                         op!(Operator::I32Ne);
                         op!(Operator::If {
                             blockty: wasmparser::BlockType::Empty
                         });
                         op!(Operator::LocalGet {
-                            local_index: scratch_a
+                            local_index: v.scratch32
                         }); // exit_tag
                         op!(Operator::LocalGet {
                             local_index: scratch_b

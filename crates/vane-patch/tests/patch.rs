@@ -4,7 +4,7 @@ use vane_patch::{
     audit_no_stripping, compile_trace, compile_trace_pack, multi_pass, weval_specialize,
 };
 use vane_target_core::StackOp;
-use vane_target_wasm::WasmAbiConfig;
+use vane_target_wasm::{VaneAbiConfig, WasmAbiConfig};
 
 /// The abi for the pack: imports ecall=0, jit_invalidate=1, lookup_stub=2,
 /// memory=0; 3 arch regs, then target_pc, scratch_a, scratch_b.
@@ -192,12 +192,10 @@ fn stackop_trace_cache_roundtrip() {
                 StackOp::LoadReg(1),
                 StackOp::Add64,
                 StackOp::StoreReg(2),
-                StackOp::LoopBegin {
-                    label: "x8000".into(),
-                },
+                StackOp::LoopBegin { label: 0x8000 },
                 StackOp::Br {
                     relative_depth: 1,
-                    label: "x8000".into(),
+                    label: 0x8000,
                 },
                 StackOp::LoopEnd,
                 StackOp::LoadMem {
@@ -269,4 +267,99 @@ fn pack_has_a_start_function_registering_slots() {
     );
     // The slot table is exported.
     assert!(text.contains("trace_table"), "slot table exported");
+}
+
+/// The vane-native ABI renders a valid WASM trace: build a module importing the
+/// host shims + the linear memory, with a vane-native trace fn, and validate
+/// it. This exercises the vane-native lowering (regs in linear memory, memory
+/// via shims, TailCall -> return) end-to-end.
+#[test]
+fn vane_native_trace_validates() {
+    use wasm_encoder::{
+        CodeSection, EntityType, ExportKind, ExportSection, FunctionSection, ImportSection,
+        MemoryType, Module, TypeSection, ValType,
+    };
+    let vane_abi = VaneAbiConfig {
+        mem_idx: 0,
+        regs_base_local: 0,
+        scratch_a: 1,
+        scratch_b: 2,
+        scratch32: 3,
+        mem_load_func: 0,
+        mem_store_func: 1,
+        check_code_func: 2,
+        ecall_func: 3,
+    };
+    // A trace exercising regs (linear memory), a memory op (shim), a CheckCode
+    // (shim), and the TailCall (return to the dispatch loop).
+    let trace = vec![
+        StackOp::CheckCode {
+            addr: 0x100,
+            expected: vec![].into(),
+            miss_label: String::new(),
+        },
+        StackOp::PushImm(0xdead),
+        StackOp::StoreReg(1),
+        StackOp::LoadReg(1),
+        StackOp::PushImm(0x2000),
+        StackOp::LoadMem {
+            width: MemWidth::B8,
+            signed: false,
+        },
+        StackOp::StoreReg(2),
+        StackOp::PushImm(0x8000),
+        StackOp::TailCall,
+    ];
+    let func = vane_patch::compile_trace_vane(trace, &vane_abi);
+
+    // Types: mem_load (i64,i32,i32)->i64; mem_store (i64,i32,i64)->();
+    // check_code (i64)->(i32,i64); ecall (i32)->i32; trace (i32)->(i32,i64).
+    let mut types = TypeSection::new();
+    types
+        .ty()
+        .function([ValType::I64, ValType::I32, ValType::I32], [ValType::I64]);
+    types
+        .ty()
+        .function([ValType::I64, ValType::I32, ValType::I64], []);
+    types
+        .ty()
+        .function([ValType::I64], [ValType::I32, ValType::I64]);
+    types.ty().function([ValType::I32], [ValType::I32]);
+    types
+        .ty()
+        .function([ValType::I32], [ValType::I32, ValType::I64]);
+    let mut imports = ImportSection::new();
+    imports.import("env", "mem_load", EntityType::Function(0));
+    imports.import("env", "mem_store", EntityType::Function(1));
+    imports.import("env", "check_code", EntityType::Function(2));
+    imports.import("env", "ecall", EntityType::Function(3));
+    imports.import(
+        "env",
+        "memory",
+        EntityType::Memory(MemoryType {
+            minimum: 1,
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        }),
+    );
+    let mut funcs = FunctionSection::new();
+    funcs.function(4); // the trace fn has type 4
+    let mut code = CodeSection::new();
+    code.function(&func);
+    let mut exports = ExportSection::new();
+    exports.export("trace", ExportKind::Func, 4);
+    let mut module = Module::new();
+    module
+        .section(&types)
+        .section(&imports)
+        .section(&funcs)
+        .section(&exports)
+        .section(&code);
+    let bytes = module.finish();
+
+    // Validate (walrus's from_buffer parses + validates; wasmparser's
+    // `validate` is feature-gated off in this workspace).
+    walrus::Module::from_buffer(&bytes).expect("the vane-native trace is valid WASM");
 }

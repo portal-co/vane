@@ -148,6 +148,8 @@ pub struct VaneAbiConfig {
     /// Scratch i64 locals (must not alias `regs_base_local`).
     pub scratch_a: u32,
     pub scratch_b: u32,
+    /// A scratch i32 local (for the `check_code` status, which is i32).
+    pub scratch32: u32,
     /// Host shim: `(addr: i64, width: i32, signed: i32) -> (value: i64)`.
     pub mem_load_func: u32,
     /// Host shim: `(addr: i64, width: i32, value: i64) -> ()`.

@@ -18,9 +18,9 @@
 //!   structural data Weval's reachability analysis stripped, so the
 //!   specialized module is still a complete, runnable machine.
 
-use vane_target_core::StackOp;
-use vane_target_wasm::WasmAbiConfig;
 pub use vane_riscv::stackop_ser::{deserialize_trace_cache, serialize_trace_cache};
+use vane_target_core::StackOp;
+use vane_target_wasm::{VaneAbiConfig, WasmAbiConfig};
 
 use walrus::Module;
 use walrus::RawCustomSection;
@@ -67,6 +67,33 @@ pub fn compile_trace(ops: Vec<StackOp>, abi: &WasmAbiConfig) -> Function {
     // so the function needs a trailing, unnested `unreachable` to satisfy its
     // implicit final return (see the RISC-V target's own renderer).
     for jit_op in vane_arch::template::render_stack_to_wasm(ops.into_iter(), *abi).chain(
+        core::iter::once(vane_target_wasm::JitOpcode::Operator {
+            op: wasmparser::Operator::Unreachable,
+        }),
+    ) {
+        let vane_target_wasm::JitOpcode::Operator { op } = jit_op;
+        let instr = instruction(&mut reencoder, op).expect("reencode should not fail");
+        f.instruction(&instr);
+    }
+    f.instruction(&Instruction::End);
+    f
+}
+
+/// Recompile one `StackOp` trace to a WASM function body for the **vane-native
+/// ABI** ([`VaneAbiConfig`]) — the vane interpreter's own WASM build, no speet
+/// runtime. The function's signature is `(regs_base: i32) -> (exit_tag: i32,
+/// exit_pc: i64)`: it reads/writes the host register cache in linear memory and
+/// returns an exit to the dispatch loop (see [`VaneAbiConfig`]'s doc comment).
+/// The two i64 locals are the renderer's `scratch_a`/`scratch_b`.
+pub fn compile_trace_vane(ops: Vec<StackOp>, abi: &VaneAbiConfig) -> Function {
+    // locals: scratch_a, scratch_b (i64), scratch32 (i32) — after the
+    // regs_base (i32) param.
+    let mut f = Function::new([(2, ValType::I64), (1, ValType::I32)]);
+    let mut reencoder = RoundtripReencoder;
+    // As with the speet renderer, a finite trace terminates in a nested
+    // TailCall (a `return`) inside the outer loop; the trailing unnested
+    // `unreachable` satisfies WASM validation's implicit final return.
+    for jit_op in vane_arch::template::render_stack_to_wasm_vane(ops.into_iter(), *abi).chain(
         core::iter::once(vane_target_wasm::JitOpcode::Operator {
             op: wasmparser::Operator::Unreachable,
         }),

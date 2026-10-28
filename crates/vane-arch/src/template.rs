@@ -877,7 +877,7 @@ pub fn render_stack_to_js(
 #[cfg(feature = "target-wasm")]
 mod render_wasm;
 #[cfg(feature = "target-wasm")]
-pub use render_wasm::render_stack_to_wasm;
+pub use render_wasm::{render_stack_to_wasm, render_stack_to_wasm_vane};
 
 /// Core JavaScript code generator with paging support.
 ///
