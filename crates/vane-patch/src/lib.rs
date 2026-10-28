@@ -124,8 +124,25 @@ pub fn compile_trace_vane(ops: Vec<StackOp>, abi: &VaneAbiConfig) -> Function {
 ///
 /// The dispatch loop is untouched: an AOT'd trace's `CompiledTrace.f` points at
 /// this trampoline.
-pub fn compile_trampoline(pack_fn_idx: u32, regs_offset: u32, make_exit_idx: u32) -> Function {
+/// The dispatch loop is untouched: an AOT'd trace's `CompiledTrace.f` points at
+/// this trampoline. `current_host_addr` is the linear-memory address of the
+/// interpreter's `VANE_CURRENT_HOST` global (baked in by the patcher), which
+/// the trampoline sets so the pack fn's shims recover the host.
+pub fn compile_trampoline(
+    pack_fn_idx: u32,
+    regs_offset: u32,
+    make_exit_idx: u32,
+    current_host_addr: u32,
+) -> Function {
     let mut f = Function::new([]); // no extra locals
+    // VANE_CURRENT_HOST = host_ptr (so the pack fn's shims recover the host)
+    f.instruction(&Instruction::I32Const(current_host_addr as i32));
+    f.instruction(&Instruction::LocalGet(1)); // host_ptr
+    f.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
     // regs_base = host_ptr + regs_offset
     f.instruction(&Instruction::LocalGet(1)); // host_ptr
     f.instruction(&Instruction::I32Const(regs_offset as i32));

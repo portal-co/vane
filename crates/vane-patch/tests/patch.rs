@@ -404,7 +404,7 @@ fn vane_native_trampoline_validates() {
     // The trampoline: pack fn at func index 5, vane_make_exit at import index
     // 4, regs_offset 0x40 (a placeholder — the real offset is the interpreter's
     // exported value).
-    let trampoline = vane_patch::compile_trampoline(5, 0x40, 4);
+    let trampoline = vane_patch::compile_trampoline(5, 0x40, 4, 0x100);
 
     let mut module = Module::new();
     let mut types = TypeSection::new();
