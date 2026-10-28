@@ -161,6 +161,26 @@ pub struct VaneAbiConfig {
     /// Host shim: `(regs_base: i32) -> (cont: i32)`. `cont != 0` continues the
     /// trace; `cont == 0` makes the trace return `Ecall`.
     pub ecall_func: u32,
+    /// Trap-atomicity undo shims (the vane-native ABI's linear-memory analog
+    /// of `LocalStackHost`'s undo log): `StoreReg` records the register's old
+    /// value through [`UndoShims::record_undo_func`] before overwriting the
+    /// cache, and `CheckCode` commits the current instruction's entries via
+    /// [`UndoShims::set_undo_base_func`] when the boundary check passes; on a
+    /// trap the host rolls back exactly the current instruction's writes.
+    pub undo_shims: Option<UndoShims>,
+}
+
+/// The undo (trap-atomicity) shim function indices, resolved by the patcher
+/// from the interpreter's exports.
+#[derive(Clone, Copy, Debug)]
+pub struct UndoShims {
+    /// `(reg_base: i32, reg: i32, value: i64) -> ()` — append `(reg, old
+    /// value)` to the host's undo log (called BEFORE the store lands).
+    pub record_undo_func: u32,
+    /// `(reg_base: i32) -> (cont: i32)` — commit the current instruction's
+    /// undo entries at an instruction boundary. `cont != 0` continues the
+    /// trace.
+    pub set_undo_base_func: u32,
 }
 
 /// Which WASM ABI a trace is rendered for.

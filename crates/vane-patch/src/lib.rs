@@ -20,7 +20,7 @@
 
 pub use vane_riscv::stackop_ser::{deserialize_trace_cache, serialize_trace_cache};
 use vane_target_core::StackOp;
-use vane_target_wasm::{VaneAbiConfig, WasmAbiConfig};
+use vane_target_wasm::{UndoShims, VaneAbiConfig, WasmAbiConfig};
 
 use walrus::ir::{
     BinaryOp, Binop, Block, Br, Call, Const, Drop, IfElse, InstrSeqType, Load, LoadKind, LocalGet,
@@ -683,6 +683,8 @@ const BAKE_MEM_LOAD: usize = 0;
 const BAKE_MEM_STORE: usize = 1;
 const BAKE_CHECK_CODE: usize = 2;
 const BAKE_ECALL: usize = 3;
+const BAKE_RECORD_UNDO: usize = 4;
+const BAKE_SET_UNDO_BASE: usize = 5;
 
 /// The result of a successful [`bake_aot`].
 #[derive(Debug, Clone)]
@@ -768,6 +770,8 @@ pub fn bake_aot(
     let mem_store = exported_func(&module, "vane_mem_store")?;
     let check_code_impl = exported_func(&module, "vane_check_code_impl")?;
     let ecall = exported_func(&module, "vane_ecall")?;
+    let record_undo = exported_func(&module, "vane_record_undo")?;
+    let set_undo_base = exported_func(&module, "vane_set_undo_base")?;
     let current_host_addr = exported_global_addr(&module, "VANE_CURRENT_HOST")?;
     let aot_trace_addr = exported_global_addr(&module, "VANE_AOT_TRACE")?;
 
@@ -792,8 +796,19 @@ pub fn bake_aot(
         mem_store_func: BAKE_MEM_STORE as u32,
         check_code_func: BAKE_CHECK_CODE as u32,
         ecall_func: BAKE_ECALL as u32,
+        undo_shims: Some(UndoShims {
+            record_undo_func: BAKE_RECORD_UNDO as u32,
+            set_undo_base_func: BAKE_SET_UNDO_BASE as u32,
+        }),
     };
-    let shims = [mem_load, mem_store, check_code, ecall];
+    let shims = [
+        mem_load,
+        mem_store,
+        check_code,
+        ecall,
+        record_undo,
+        set_undo_base,
+    ];
     let old_table_size = module.tables.get(table).initial;
     let mut entries = Vec::with_capacity(traces.len());
     let mut tramp_ids = Vec::with_capacity(traces.len());
@@ -1139,7 +1154,7 @@ fn build_pack_fn(
     ops: Vec<StackOp>,
     abi: VaneAbiConfig,
     memory: MemoryId,
-    shims: &[walrus::FunctionId; 4],
+    shims: &[walrus::FunctionId; 6],
 ) -> Result<walrus::FunctionId, PatchError> {
     let mut fb = FunctionBuilder::new(
         &mut module.types,
@@ -1198,7 +1213,7 @@ fn local_at(locals: &[LocalId], index: u32) -> Result<LocalId, PatchError> {
         .ok_or_else(|| PatchError::Parse(format!("renderer references unknown local {index}")))
 }
 
-fn shim_at(shims: &[walrus::FunctionId; 4], index: u32) -> Result<walrus::FunctionId, PatchError> {
+fn shim_at(shims: &[walrus::FunctionId; 6], index: u32) -> Result<walrus::FunctionId, PatchError> {
     shims
         .get(index as usize)
         .copied()
@@ -1258,7 +1273,7 @@ fn lower_op(
     entry: walrus::ir::InstrSeqId,
     op: wasmparser::Operator<'_>,
     locals: &[LocalId],
-    shims: &[walrus::FunctionId; 4],
+    shims: &[walrus::FunctionId; 6],
     memory: MemoryId,
     types: &mut ModuleTypes,
 ) -> Result<(), PatchError> {

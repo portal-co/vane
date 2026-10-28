@@ -275,6 +275,31 @@ fn render_with_abi<'a>(
                                 op!(Operator::LocalSet {
                                     local_index: scratch_a
                                 });
+                                // Trap atomicity: record the register's old
+                                // value BEFORE the store lands (the host
+                                // rolls back exactly these entries on a
+                                // trap) — the linear-memory analog of
+                                // `LocalStackHost::store_reg`'s undo push.
+                                if let Some(undo) = v.undo_shims {
+                                    op!(Operator::I32Const { value: 0 }); // reg_base
+                                    op!(Operator::I32Const { value: r as i32 });
+                                    // The OLD value: load it from the cache
+                                    // BEFORE the store below overwrites it.
+                                    op!(Operator::LocalGet {
+                                        local_index: v.regs_base_local
+                                    });
+                                    op!(Operator::I64Load {
+                                        memarg: wasmparser::MemArg {
+                                            align: 0,
+                                            max_align: 3,
+                                            offset: (r as u64) * 8,
+                                            memory: mem_idx,
+                                        }
+                                    });
+                                    op!(Operator::Call {
+                                        function_index: undo.record_undo_func
+                                    });
+                                }
                                 op!(Operator::LocalGet {
                                     local_index: v.regs_base_local
                                 });
@@ -792,6 +817,16 @@ fn render_with_abi<'a>(
                         }); // exit_pc
                         op!(Operator::Return);
                         op!(Operator::End);
+                        // Boundary passed: the current instruction's undo
+                        // entries are committed (the linear-memory analog of
+                        // `note_inst_boundary`).
+                        if let Some(undo) = v.undo_shims {
+                            op!(Operator::I32Const { value: 0 }); // reg_base
+                            op!(Operator::Call {
+                                function_index: undo.set_undo_base_func
+                            });
+                            op!(Operator::Drop);
+                        }
                     }
                 },
             }

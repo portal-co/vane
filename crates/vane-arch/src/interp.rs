@@ -737,6 +737,14 @@ pub trait AsyncStackHost {
     }
 }
 
+/// The WASM trace undo log's capacity bound (see
+/// [`LocalStackHost::undo_log_push`]): the maximum pending (uncommitted)
+/// entries. Real traces cross an instruction boundary every few ops, so this
+/// is far above anything a guest instruction produces — it is a fail-safe,
+/// not a working-set size.
+#[cfg(feature = "async-host")]
+pub const UNDO_CAP: usize = 64;
+
 /// A local [`AsyncStackHost`] over a reactor-like type: register file +
 /// guest memory come straight from the host's own locks. This is the host
 /// used by `Reactor::trace_run` (M1, PLAN_LINUX_WASM.md §4.2) — the
@@ -1011,6 +1019,34 @@ impl<R: LocalReactor> LocalStackHost<R> {
             self.regs_dirty = true;
         }
         self.undo_log.clear();
+    }
+
+    /// Append an undo entry for a pending register write. The WASM trace's
+    /// `StoreReg` lowering calls the `record_undo` shim before its store
+    /// lands (the register cache lives in guest-visible linear memory there,
+    /// so the generated code can't push to this Vec itself) — the linear-
+    /// memory analog of [`LocalStackHost::store_reg`]'s undo push.
+    ///
+    /// Capacity-bounded like the native JIT's undo buffer: real traces cross
+    /// an instruction boundary every few ops, so pending entries stay in the
+    /// single digits; on overflow the log saturates (at most the last
+    /// [`UNDO_CAP`] entries roll back).
+    pub fn undo_log_push(&mut self, reg: u8, old: u64) {
+        if self.undo_log.len() >= self.undo_mark + UNDO_CAP {
+            self.undo_log = self.undo_log.split_off(self.undo_mark);
+        }
+        self.undo_log.push((reg, old));
+    }
+
+    /// Commit the current instruction's undo entries at an instruction
+    /// boundary (the WASM trace's `CheckCode` lowering calls the
+    /// `set_undo_base` shim on the continue path — the analog of
+    /// [`LocalStackHost::note_inst_boundary`]). `base` is the caller's undo
+    /// base (always 0 today: the dispatch loop builds a fresh host per run,
+    /// so nothing persists across traces).
+    pub fn set_undo_base(&mut self, base: usize) {
+        self.undo_log.truncate(base);
+        self.undo_mark = base;
     }
 }
 

@@ -289,6 +289,7 @@ fn vane_native_trace_validates() {
         mem_store_func: 1,
         check_code_func: 2,
         ecall_func: 3,
+        undo_shims: None,
     };
     // A trace exercising regs (linear memory), a memory op (shim), a CheckCode
     // (shim), and the TailCall (return to the dispatch loop).
@@ -384,6 +385,7 @@ fn vane_native_trampoline_validates() {
         mem_store_func: 1,
         check_code_func: 2,
         ecall_func: 3,
+        undo_shims: None,
     };
     let trace = vec![
         StackOp::CheckCode {
@@ -483,6 +485,19 @@ const AOT_ADDR: u32 = 65792;
 const REGS_OFF: u32 = 64;
 /// A seeded u64 the test trace loads through the `mem_load` shim.
 const SEED_ADDR: u32 = 0x2000;
+// ── The synthetic host's undo-log cells (bss addresses; the interpreter's
+// real `LocalStackHost` keeps the log in Rust, the stub models it in linear
+// memory so the exact protocol is exercised end-to-end).
+/// Undo-log length (u32 count of pending+committed entries).
+const UNDO_LOGLEN: u32 = 100_000;
+/// Committed base (what `set_undo_base` writes).
+const UNDO_MARK: u32 = 100_004;
+/// Undo entries `(reg: u32, _pad: u32, old: u64)` — 64 x 16 bytes.
+const UNDO_LOG: u32 = 100_008;
+/// The stub's pending-trap flag (set by a magic `mem_load` address).
+const TRAPFLAG: u32 = 101_100;
+/// The `mem_load` address that trips the stub's trap (set TRAPFLAG).
+const TRAP_ADDR: u32 = 0xE000_0000;
 
 fn interp_module() -> Vec<u8> {
     use wasm_encoder::{
@@ -503,9 +518,13 @@ fn interp_module() -> Vec<u8> {
         .function([ValType::I64, ValType::I32, ValType::I64], []); // 3: vane_mem_store
     types.ty().function([ValType::I32, ValType::I64], []); // 4: vane_check_code_impl
     types.ty().function([ValType::I32], [ValType::I32]); // 5: vane_ecall
+    types
+        .ty()
+        .function([ValType::I32, ValType::I32, ValType::I64], []); // 6: vane_record_undo
+    types.ty().function([ValType::I32], [ValType::I32]); // 7: vane_set_undo_base
 
     let mut funcs = FunctionSection::new();
-    for ty in 0..6u32 {
+    for ty in 0..8u32 {
         funcs.function(ty);
     }
 
@@ -556,6 +575,8 @@ fn interp_module() -> Vec<u8> {
         "vane_mem_store",
         "vane_check_code_impl",
         "vane_ecall",
+        "vane_record_undo",
+        "vane_set_undo_base",
     ]
     .into_iter()
     .enumerate()
@@ -590,8 +611,24 @@ fn interp_module() -> Vec<u8> {
     f.instruction(&Instruction::End);
     code.function(&f);
     // 2: vane_mem_load(addr, width, signed) -> i64 (stub: the B8-unsigned path
-    // only — wrap the address and load).
+    // only — wrap the address and load; the TRAP_ADDR magic sets the stub's
+    // pending-trap flag and returns 0, modeling a trapping load).
     let mut f = wasm_encoder::Function::new([]);
+    f.instruction(&Instruction::LocalGet(0));
+    f.instruction(&Instruction::I32WrapI64);
+    f.instruction(&Instruction::I32Const(TRAP_ADDR as i32));
+    f.instruction(&Instruction::I32Eq);
+    f.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+    f.instruction(&Instruction::I32Const(TRAPFLAG as i32));
+    f.instruction(&Instruction::I32Const(1));
+    f.instruction(&Instruction::I32Store(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::I64Const(0));
+    f.instruction(&Instruction::Return);
+    f.instruction(&Instruction::End);
     f.instruction(&Instruction::LocalGet(0));
     f.instruction(&Instruction::I32WrapI64);
     f.instruction(&Instruction::I64Load(MemArg {
@@ -613,11 +650,122 @@ fn interp_module() -> Vec<u8> {
     }));
     f.instruction(&Instruction::End);
     code.function(&f);
-    // 4: vane_check_code_impl(ret_ptr, addr): *(ret_ptr) = (u32::MAX, 0) —
-    // always Continue.
-    let mut f = wasm_encoder::Function::new([]);
+    // 4: vane_check_code_impl(ret_ptr, addr): mirrors the interpreter's shim —
+    // Continue (u32::MAX) unless the pending-trap flag is set, in which case
+    // roll the undo log back into the register cache (reverse, like
+    // `LocalStackHost::undo_pending_inst`), truncate to the base, and write
+    // (TAG_BAIL, 0). locals 2/3 = i32 temps.
+    let mut f = wasm_encoder::Function::new([(2, ValType::I32)]);
+    // Continue path: no pending trap.
+    f.instruction(&Instruction::I32Const(TRAPFLAG as i32));
+    f.instruction(&Instruction::I32Load(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::I32Eqz);
+    f.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
     f.instruction(&Instruction::LocalGet(0));
     f.instruction(&Instruction::I32Const(-1)); // CONTINUE
+    f.instruction(&Instruction::I32Store(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::LocalGet(0));
+    f.instruction(&Instruction::I64Const(0));
+    f.instruction(&Instruction::I64Store(MemArg {
+        offset: 8,
+        align: 3,
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::Return);
+    f.instruction(&Instruction::End);
+    // Trap path: consume the flag.
+    f.instruction(&Instruction::I32Const(TRAPFLAG as i32));
+    f.instruction(&Instruction::I32Const(0));
+    f.instruction(&Instruction::I32Store(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    // Rollback: for (i = LEN; i > MARK; ) { i--; e = LOG + i*16;
+    //   regs[HOST + 64 + e.reg*8] = e.old }
+    f.instruction(&Instruction::I32Const(UNDO_LOGLEN as i32));
+    f.instruction(&Instruction::I32Load(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::LocalSet(2)); // i = LEN
+    f.instruction(&Instruction::Block(wasm_encoder::BlockType::Empty));
+    f.instruction(&Instruction::Loop(wasm_encoder::BlockType::Empty));
+    f.instruction(&Instruction::LocalGet(2));
+    f.instruction(&Instruction::I32Const(UNDO_MARK as i32));
+    f.instruction(&Instruction::I32Load(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::I32LeU);
+    f.instruction(&Instruction::BrIf(1)); // i <= MARK -> done
+    f.instruction(&Instruction::LocalGet(2));
+    f.instruction(&Instruction::I32Const(1));
+    f.instruction(&Instruction::I32Sub);
+    f.instruction(&Instruction::LocalTee(2)); // i--
+    f.instruction(&Instruction::I32Const(16));
+    f.instruction(&Instruction::I32Mul);
+    f.instruction(&Instruction::I32Const(UNDO_LOG as i32));
+    f.instruction(&Instruction::I32Add);
+    f.instruction(&Instruction::LocalSet(3)); // e = LOG + i*16
+    // regs base = mem[VANE_CURRENT_HOST] + REGS_OFF
+    f.instruction(&Instruction::I32Const(HOST_ADDR as i32));
+    f.instruction(&Instruction::I32Load(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::I32Const(REGS_OFF as i32));
+    f.instruction(&Instruction::I32Add);
+    f.instruction(&Instruction::LocalGet(3));
+    f.instruction(&Instruction::I32Load(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    })); // e.reg
+    f.instruction(&Instruction::I32Const(8));
+    f.instruction(&Instruction::I32Mul);
+    f.instruction(&Instruction::I32Add); // &regs[e.reg]
+    f.instruction(&Instruction::LocalGet(3));
+    f.instruction(&Instruction::I64Load(MemArg {
+        offset: 8,
+        align: 3,
+        memory_index: 0,
+    })); // e.old
+    f.instruction(&Instruction::I64Store(MemArg {
+        offset: 0,
+        align: 3,
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::Br(0));
+    f.instruction(&Instruction::End); // loop
+    f.instruction(&Instruction::End); // block
+    // Truncate: LEN = MARK.
+    f.instruction(&Instruction::I32Const(UNDO_LOGLEN as i32));
+    f.instruction(&Instruction::I32Const(UNDO_MARK as i32));
+    f.instruction(&Instruction::I32Load(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::I32Store(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    // *(ret_ptr) = (TAG_BAIL, 0).
+    f.instruction(&Instruction::LocalGet(0));
+    f.instruction(&Instruction::I32Const(3));
     f.instruction(&Instruction::I32Store(MemArg {
         offset: 0,
         align: 2,
@@ -635,6 +783,99 @@ fn interp_module() -> Vec<u8> {
     // 5: vane_ecall(_) -> 0 (cont == 0 -> the trace returns Ecall)
     let mut f = wasm_encoder::Function::new([]);
     f.instruction(&Instruction::I32Const(0));
+    f.instruction(&Instruction::End);
+    code.function(&f);
+    // 6: vane_record_undo(reg_base, reg, old): entries[len] = (reg, old);
+    // len += 1 — saturating at reg_base + 64 (drops the oldest pending
+    // entries, mirroring LocalStackHost::undo_log_push). local 2 = i32 idx.
+    let mut f = wasm_encoder::Function::new([(1, ValType::I32)]);
+    f.instruction(&Instruction::I32Const(UNDO_LOGLEN as i32));
+    f.instruction(&Instruction::I32Load(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::LocalGet(0));
+    f.instruction(&Instruction::I32Const(64));
+    f.instruction(&Instruction::I32Add);
+    f.instruction(&Instruction::I32GeU);
+    f.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+    f.instruction(&Instruction::I32Const(UNDO_LOGLEN as i32));
+    f.instruction(&Instruction::LocalGet(0));
+    f.instruction(&Instruction::I32Store(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::I32Const(UNDO_MARK as i32));
+    f.instruction(&Instruction::LocalGet(0));
+    f.instruction(&Instruction::I32Store(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::End);
+    // idx = LEN; LEN = idx + 1. (local 3 = the i32 idx: params 0,1,2 fill
+    // 0-2, and index 2 is the i64 `value` param.)
+    f.instruction(&Instruction::I32Const(UNDO_LOGLEN as i32));
+    f.instruction(&Instruction::I32Load(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::LocalSet(3));
+    f.instruction(&Instruction::I32Const(UNDO_LOGLEN as i32));
+    f.instruction(&Instruction::LocalGet(3));
+    f.instruction(&Instruction::I32Const(1));
+    f.instruction(&Instruction::I32Add);
+    f.instruction(&Instruction::I32Store(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    // entries[idx].reg = reg (offset 0)...
+    f.instruction(&Instruction::I32Const(UNDO_LOG as i32));
+    f.instruction(&Instruction::LocalGet(3));
+    f.instruction(&Instruction::I32Const(16));
+    f.instruction(&Instruction::I32Mul);
+    f.instruction(&Instruction::I32Add);
+    f.instruction(&Instruction::LocalGet(1));
+    f.instruction(&Instruction::I32Store(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    // ...entries[idx].old = value (offset 8).
+    f.instruction(&Instruction::I32Const(UNDO_LOG as i32));
+    f.instruction(&Instruction::LocalGet(3));
+    f.instruction(&Instruction::I32Const(16));
+    f.instruction(&Instruction::I32Mul);
+    f.instruction(&Instruction::I32Add);
+    f.instruction(&Instruction::LocalGet(2));
+    f.instruction(&Instruction::I64Store(MemArg {
+        offset: 8,
+        align: 3,
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::End);
+    code.function(&f);
+    // 7: vane_set_undo_base(reg_base) -> 1: commit (LEN = MARK = reg_base).
+    let mut f = wasm_encoder::Function::new([]);
+    f.instruction(&Instruction::I32Const(UNDO_LOGLEN as i32));
+    f.instruction(&Instruction::LocalGet(0));
+    f.instruction(&Instruction::I32Store(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::I32Const(UNDO_MARK as i32));
+    f.instruction(&Instruction::LocalGet(0));
+    f.instruction(&Instruction::I32Store(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::I32Const(1)); // cont != 0 -> continue
     f.instruction(&Instruction::End);
     code.function(&f);
 
@@ -832,4 +1073,164 @@ fn bake_aot_with_no_traces_is_a_noop() {
     walrus::Module::from_buffer(&baked.wasm).expect("validates");
     let audit = audit_no_stripping(&target, &baked.wasm).expect("audit");
     assert!(audit.is_clean());
+}
+
+/// Trap atomicity (the undo-record system's gate): a trapping load followed
+/// by a register store leaves the store pending in the undo log; the next
+/// CheckCode sees the trap and Bails, rolling the register back to its
+/// PRE-instruction value — not the partially-written one.
+#[test]
+fn bake_aot_undoes_partial_writes_on_bail() {
+    let target = interp_module();
+    // One instruction's worth of trace: a trapping load (the stub's magic
+    // address), a store over r5, then the next boundary — which sees the
+    // pending trap and Bails.
+    let trace = vec![
+        StackOp::CheckCode {
+            addr: 0x100,
+            expected: vec![].into(),
+            miss_label: String::new(),
+        },
+        StackOp::PushImm(TRAP_ADDR as u64),
+        StackOp::LoadMem {
+            width: MemWidth::B8,
+            signed: false,
+        },
+        StackOp::Drop,
+        StackOp::PushImm(0xBEEF),
+        StackOp::StoreReg(5),
+        StackOp::CheckCode {
+            addr: 0x104,
+            expected: vec![].into(),
+            miss_label: String::new(),
+        },
+        StackOp::PushImm(0x8000),
+        StackOp::TailCall,
+    ];
+    let baked = vane_patch::bake_aot(&target, vec![(0x1000, trace)]).expect("bake");
+
+    let engine = wasmi::Engine::default();
+    let module =
+        wasmi::Module::new(&engine, &baked.wasm[..]).expect("baked module validates in wasmi");
+    let mut store = wasmi::Store::new(&engine, ());
+    let linker = wasmi::Linker::<()>::new(&engine);
+    let instance = linker
+        .instantiate_and_start(&mut store, &module)
+        .expect("instantiate");
+
+    let host_ptr: u32 = 2048;
+    let ret_ptr: u32 = 4096;
+    let tramp = instance
+        .get_typed_func::<(i32, i32, i32), ()>(&store, "vane_tramp_1000")
+        .expect("trampoline export");
+
+    // r5's PRE-instruction value: 7 (written straight into the register
+    // cache, which lives in linear memory at host_ptr + regs_offset).
+    let regs_base = host_ptr + REGS_OFF;
+    let mem = instance.get_memory(&store, "memory").expect("memory export");
+    mem.write(&mut store, (regs_base + 5 * 8) as usize, &7u64.to_le_bytes())
+        .expect("preset r5");
+
+    tramp
+        .call(&mut store, (ret_ptr as i32, host_ptr as i32, 0))
+        .expect("the trampoline should run without trapping");
+
+    let read = |addr: u32, len: usize| -> Vec<u8> {
+        let mut buf = vec![0u8; len];
+        mem.read(&store, addr as usize, &mut buf)
+            .expect("read in-bounds");
+        buf
+    };
+
+    // Exit = Bail: the boundary check saw the pending trap.
+    let out = read(ret_ptr, 16);
+    assert_eq!(
+        i32::from_le_bytes(out[0..4].try_into().unwrap()),
+        3,
+        "exit tag = Bail"
+    );
+    // r5 was ROLLED BACK to its pre-instruction value (a plain buggy lowering
+    // leaves 0xBEEF here; no undo at all leaves it half-written).
+    let r5 = read(regs_base + 5 * 8, 8);
+    assert_eq!(
+        u64::from_le_bytes(r5.try_into().unwrap()),
+        7,
+        "r5 rolled back to its pre-instruction value"
+    );
+    // The undo log truncated back to the base (nothing pending survives).
+    let lenb = read(UNDO_LOGLEN, 4);
+    assert_eq!(u32::from_le_bytes(lenb.try_into().unwrap()), 0, "undo log empty");
+    let markb = read(UNDO_MARK, 4);
+    assert_eq!(u32::from_le_bytes(markb.try_into().unwrap()), 0, "base is 0");
+}
+
+/// The benign control: the same shape without the trapping address — the
+/// boundary commits (the undo entry is recorded, then dropped at the next
+/// CheckCode), the store sticks, and the trace completes with TailCall.
+#[test]
+fn bake_aot_commits_undo_at_boundaries() {
+    let target = interp_module();
+    let trace = vec![
+        StackOp::CheckCode {
+            addr: 0x100,
+            expected: vec![].into(),
+            miss_label: String::new(),
+        },
+        StackOp::PushImm(SEED_ADDR as u64),
+        StackOp::LoadMem {
+            width: MemWidth::B8,
+            signed: false,
+        },
+        StackOp::StoreReg(5), // 0x1234 from the seeded memory
+        StackOp::CheckCode {
+            addr: 0x104,
+            expected: vec![].into(),
+            miss_label: String::new(),
+        },
+        StackOp::PushImm(0x8000),
+        StackOp::TailCall,
+    ];
+    let baked = vane_patch::bake_aot(&target, vec![(0x2000, trace)]).expect("bake");
+
+    let engine = wasmi::Engine::default();
+    let module =
+        wasmi::Module::new(&engine, &baked.wasm[..]).expect("baked module validates in wasmi");
+    let mut store = wasmi::Store::new(&engine, ());
+    let linker = wasmi::Linker::<()>::new(&engine);
+    let instance = linker
+        .instantiate_and_start(&mut store, &module)
+        .expect("instantiate");
+
+    let host_ptr: u32 = 2048;
+    let ret_ptr: u32 = 4096;
+    let tramp = instance
+        .get_typed_func::<(i32, i32, i32), ()>(&store, "vane_tramp_2000")
+        .expect("trampoline export");
+    tramp
+        .call(&mut store, (ret_ptr as i32, host_ptr as i32, 0))
+        .expect("the trampoline should run without trapping");
+
+    let mem = instance.get_memory(&store, "memory").expect("memory export");
+    let read = |addr: u32, len: usize| -> Vec<u8> {
+        let mut buf = vec![0u8; len];
+        mem.read(&store, addr as usize, &mut buf)
+            .expect("read in-bounds");
+        buf
+    };
+
+    // Exit = TailCall(0x8000): the boundary committed, no trap.
+    let out = read(ret_ptr, 16);
+    assert_eq!(i32::from_le_bytes(out[0..4].try_into().unwrap()), 0);
+    assert_eq!(i64::from_le_bytes(out[8..16].try_into().unwrap()), 0x8000);
+    // The store stuck (loaded through the mem_load shim from the seed).
+    let regs_base = host_ptr + REGS_OFF;
+    let r5 = read(regs_base + 5 * 8, 8);
+    assert_eq!(
+        u64::from_le_bytes(r5.try_into().unwrap()),
+        0x1234,
+        "r5 kept its committed value"
+    );
+    // The boundary committed the undo entry (log truncated back to base 0).
+    let lenb = read(UNDO_LOGLEN, 4);
+    assert_eq!(u32::from_le_bytes(lenb.try_into().unwrap()), 0, "undo log committed");
 }

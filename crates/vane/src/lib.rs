@@ -117,8 +117,12 @@ pub static VANE_CURRENT_HOST: core::sync::atomic::AtomicUsize =
 /// valid `&mut LocalStackHost<Reactor>` for the duration of the pack-fn call.
 #[cfg(target_arch = "wasm32")]
 unsafe fn current_host() -> &'static mut vane_arch::interp::LocalStackHost<Reactor> {
-    &mut *(VANE_CURRENT_HOST.load(core::sync::atomic::Ordering::Relaxed)
-        as *mut vane_arch::interp::LocalStackHost<Reactor>)
+    // SAFETY: see above — the single-threaded dispatch loop guarantees the
+    // pointer is valid for the duration of the pack-fn call.
+    unsafe {
+        &mut *(VANE_CURRENT_HOST.load(core::sync::atomic::Ordering::Relaxed)
+            as *mut vane_arch::interp::LocalStackHost<Reactor>)
+    }
 }
 
 /// `mem_load(addr, width, signed) -> value` — the host's `lr_load_mem`.
@@ -154,6 +158,10 @@ pub extern "C" fn vane_check_code_impl(ret_ptr: i32, addr: i64) {
     use vane_arch::interp::AsyncStackHost;
     let host = unsafe { current_host() };
     let (tag, pc): (i32, i64) = if host.take_pending_trap() {
+        // Bail: revert the current instruction's partial register writes (the
+        // undo log holds them — the baked StoreReg lowering recorded them via
+        // the record_undo shim), then re-dispatch at the faulting boundary.
+        host.undo_pending_inst();
         (3, host.pc as i64) // TAG_BAIL, the current instruction's pc
     } else if host.take_irq_check() {
         (0, addr) // TAG_TAILCALL, re-dispatch to the boundary address
@@ -162,6 +170,28 @@ pub extern "C" fn vane_check_code_impl(ret_ptr: i32, addr: i64) {
     };
     // SAFETY: `ret_ptr` is the caller's sret out-pointer for `(i32, i64)`.
     unsafe { core::ptr::write(ret_ptr as *mut (i32, i64), (tag, pc)) };
+}
+
+/// `record_undo(reg_base, reg, value)` — append `(reg, old value)` to the
+/// host's undo log for trap atomicity. The baked `StoreReg` lowering calls
+/// this BEFORE the store lands, so the entry carries the pre-instruction
+/// value (mirrors `LocalStackHost::store_reg`'s undo push).
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn vane_record_undo(_reg_base: i32, reg: i32, value: i64) {
+    let host = unsafe { current_host() };
+    host.undo_log_push(reg as u8, value as u64);
+}
+
+/// `set_undo_base(reg_base) -> cont` — commit the current instruction's undo
+/// entries at an instruction boundary (the baked `CheckCode` lowering calls
+/// this on the continue path). Returns 1: `cont != 0` continues the trace.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn vane_set_undo_base(_reg_base: i32) -> i32 {
+    let host = unsafe { current_host() };
+    host.set_undo_base(_reg_base as usize);
+    1 // cont != 0 -> continue
 }
 
 /// `ecall(regs_base) -> cont` — the host's ecall handling. Sets the host's
