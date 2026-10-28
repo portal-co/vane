@@ -230,6 +230,134 @@ fn mw(disc: i32) -> vane_arch::MemWidth {
     }
 }
 
+// ── Asyncify (PLAN_ASYNC_JIT Phase B) ────────────────────────────────────────
+//
+// The WASM counterpart of the native Fiber/AsyncTraceRun protocol: an async
+// build's memory shims stash the pending op in `VANE_ASYNC_OP` and call
+// `asyncify_start_unwind`, unwinding the WASM stack (through the trampoline
+// and the dispatch loop's frame) to the driver; the driver fulfills the op,
+// writes `result`, calls `asyncify_start_rewind`, and re-invokes the SAME
+// export — execution resumes mid-shim and the trace continues, exactly like
+// `AsyncTraceRun::step` / `resume_with`. This only works after the post-build
+// `wasm-opt --asyncify` transform (`vane_patch::asyncify_module`) has made the
+// call sites resumable; on an untransformed module the unwind is a one-way
+// trip.
+
+/// The async build's pending-op descriptor (the `TraceCtx` equivalent for
+/// WASM: the linear-memory slot the suspend/resume protocol round-trips
+/// through). The driver reads the exported global's address after
+/// instantiation (`vane_patch::BakeResult::async_op_addr`) and polls `state`.
+#[cfg(all(target_arch = "wasm32", feature = "asyncify"))]
+#[repr(C)]
+pub struct VaneAsyncOp {
+    /// 0 = idle, 1 = suspended (op stashed, awaiting the driver), 2 = result
+    /// ready (the driver rewound).
+    pub state: core::sync::atomic::AtomicU32,
+    /// 0 = LoadMem, 1 = StoreMem.
+    pub op: u32,
+    pub addr: u64,
+    /// MemWidth discriminant (B1=0, B2=1, B4=2, B8=3 — see `mw`).
+    pub width: u32,
+    pub signed: u32,
+    /// StoreMem payload (driver input).
+    pub value: u64,
+    /// LoadMem result (driver output, read back on resume).
+    pub result: u64,
+}
+
+/// The pending-op area. Zero-init (bss); its linear-memory address is what
+/// the `VANE_ASYNC_OP` global export holds, so the driver needs no patching.
+#[cfg(all(target_arch = "wasm32", feature = "asyncify"))]
+#[no_mangle]
+pub static VANE_ASYNC_OP: VaneAsyncOp = VaneAsyncOp {
+    state: core::sync::atomic::AtomicU32::new(0),
+    op: 0,
+    addr: 0,
+    width: 0,
+    signed: 0,
+    value: 0,
+    result: 0,
+};
+
+/// The asyncify unwind buffer (the `data` argument to
+/// `asyncify_start_unwind`/`asyncify_start_rewind`): Binaryen's default
+/// ASYNCIFY_STACK_SIZE. Zero-init (bss); internal to the asyncify machinery —
+/// only its ADDRESS is consumed here.
+#[cfg(all(target_arch = "wasm32", feature = "asyncify"))]
+#[no_mangle]
+pub static VANE_ASYNCIFY_DATA: [u32; 16384] = [0; 16384];
+
+/// Provided by the asyncify runtime in the transformed module. The build
+/// needs `RUSTFLAGS="-C link-arg=--allow-undefined"` so this links as an
+/// `env` function import the host satisfies (undefined externs otherwise
+/// fail to link on this toolchain). `asyncify_start_rewind` is NOT imported
+/// here: rewinding is the DRIVER's move (it re-invokes the export).
+#[cfg(all(target_arch = "wasm32", feature = "asyncify"))]
+extern "C" {
+    fn asyncify_start_unwind(data: i32);
+}
+
+/// Stash a pending memory op for the driver and mark us suspended.
+#[cfg(all(target_arch = "wasm32", feature = "asyncify"))]
+fn stash_async_op(op: u32, addr: i64, width: i32, signed: i32, value: i64) {
+    use core::sync::atomic::Ordering;
+    // SAFETY: single static write path — the dispatch loop is single-threaded
+    // during a pack-fn call (the same invariant that backs
+    // `VANE_CURRENT_HOST`), and the driver only touches the area after the
+    // unwind. 64-bit atomics are unavailable on this target, so the plain
+    // fields go through a raw pointer; `state` is the AtomicU32 handshake.
+    let a = core::ptr::from_ref(&VANE_ASYNC_OP).cast_mut();
+    unsafe {
+        (*a).addr = addr as u64;
+        (*a).width = width as u32;
+        (*a).signed = signed as u32;
+        (*a).value = value as u64;
+        (*a).result = 0;
+        (*a).op = op;
+    }
+    // SAFETY: same single-writer invariant as above (single-threaded
+    // dispatch; the driver only reads/writes after the unwind).
+    unsafe { (*a).state.store(1, Ordering::Relaxed) }; // suspended
+}
+
+/// Read the driver-fulfilled result back and return to idle.
+#[cfg(all(target_arch = "wasm32", feature = "asyncify"))]
+fn take_async_result() -> i64 {
+    use core::sync::atomic::Ordering;
+    let a = core::ptr::addr_of!(VANE_ASYNC_OP);
+    // SAFETY: see stash_async_op (single-threaded protocol; no 64-bit
+    // atomics on this target).
+    let r = unsafe { (*a).result };
+    // SAFETY: same single-writer invariant as above.
+    unsafe { (*a).state.store(0, Ordering::Relaxed) }; // idle
+    r as i64
+}
+
+/// `mem_load` for the asyncified build: stash the op, unwind to the driver.
+/// The first pass never reaches the return (the stack unwinds); on rewind,
+/// execution resumes AFTER the start_unwind call site and the fulfilled
+/// result is returned — the shim appears to its caller to have blocked.
+#[cfg(all(target_arch = "wasm32", feature = "asyncify"))]
+#[no_mangle]
+pub extern "C" fn vane_mem_load_async(addr: i64, width: i32, signed: i32) -> i64 {
+    stash_async_op(0, addr, width, signed, 0);
+    // SAFETY: `asyncify_start_unwind` is the asyncify runtime's import; the
+    // data pointer is our unwind buffer (alive for the module's lifetime).
+    unsafe { asyncify_start_unwind(core::ptr::addr_of!(VANE_ASYNCIFY_DATA) as i32) };
+    take_async_result()
+}
+
+/// `mem_store` for the asyncified build (no result to round-trip: the driver
+/// performs the store, then rewinds).
+#[cfg(all(target_arch = "wasm32", feature = "asyncify"))]
+#[no_mangle]
+pub extern "C" fn vane_mem_store_async(addr: i64, width: i32, value: i64) {
+    stash_async_op(1, addr, width, 0, value);
+    // SAFETY: see vane_mem_load_async.
+    unsafe { asyncify_start_unwind(core::ptr::addr_of!(VANE_ASYNCIFY_DATA) as i32) };
+    take_async_result();
+}
+
 /// wasm-bindgen calls this once when the module is instantiated.
 /// Installs `console_error_panic_hook` so Rust panics surface as readable
 /// `console.error` messages (with the panic location/message) instead of an

@@ -71,6 +71,23 @@ ABI). The integration keeps the unified async model:
 - Gate: a WASM trace suspends + resumes bit-exact with the interpreter, exactly
   as the native Phase A test does.
 
+**Status (2026-10-28)**: the suspend/resume protocol is implemented and the
+orchestration is in place; the full gate needs the external tool + an
+asyncify-capable host, so it is NOT yet proven end-to-end. Done:
+`vane_mem_load_async`/`vane_mem_store_async` shims (feature `asyncify`,
+wasm32-gated) stash the op in the exported `VANE_ASYNC_OP` area and call
+`env.asyncify_start_unwind` over the baked `VANE_ASYNCIFY_DATA` buffer —
+the driver fulfills the op, writes `result`, rewinds, and re-invokes the
+same export (the `AsyncTraceRun::step`/`resume_with` protocol). The build
+needs `RUSTFLAGS="-C link-arg=--allow-undefined"` (undefined externs do not
+link on this toolchain otherwise — verified); the async module then carries
+the `env.asyncify_start_unwind` import + the `*_async` exports.
+`vane_patch::bake_aot_async` binds pack-fn memory ops to the async shims and
+returns the pending-op address; `vane_patch::asyncify_module` wraps the
+external transform with a structure audit + custom-section re-attach (the
+weval pattern). Remaining: run the real `wasm-opt --asyncify`, and a
+suspend/resume differential test against an asyncify-capable host (Phase D).
+
 ## Phase C — WASM patcher AOT
 
 Extend vane-patch: a Wizened binary (machine state snapshotted into the WASM

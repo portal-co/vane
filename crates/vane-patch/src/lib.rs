@@ -700,6 +700,11 @@ pub struct BakeResult {
     /// blob — the address `VANE_AOT_TRACE` was patched to (also mirrored in
     /// the `vane.aot` custom section: `count: u32, blob_addr: u32`).
     pub trace_table_addr: u32,
+    /// The async build only: the linear-memory address of the interpreter's
+    /// `VANE_ASYNC_OP` pending-op area (exported global, no patching) — the
+    /// driver polls `state` / reads `addr`,`width`,`signed`,`value` and
+    /// writes `result` there across a suspend/resume. `None` for sync bakes.
+    pub async_op_addr: Option<u32>,
 }
 
 /// Bake AOT traces into a Wizened interpreter module (PLAN_ASYNC_JIT Phase C).
@@ -742,12 +747,34 @@ pub fn bake_aot(
     target_wasm: &[u8],
     traces: Vec<(u64, Vec<StackOp>)>,
 ) -> Result<BakeResult, PatchError> {
+    bake_aot_impl(target_wasm, traces, false)
+}
+
+/// The async surface of [`bake_aot`] (PLAN_ASYNC_JIT Phase B): memory ops
+/// bind to the `vane_mem_load_async`/`vane_mem_store_async` shims (which
+/// suspend via Binaryen asyncify once [`asyncify_module`] has transformed the
+/// module), and the module must export `VANE_ASYNC_OP` — its address comes
+/// back in [`BakeResult::async_op_addr`] for the driver. Everything else
+/// (undo records, check_code, ecall, the trace table) is identical.
+pub fn bake_aot_async(
+    target_wasm: &[u8],
+    traces: Vec<(u64, Vec<StackOp>)>,
+) -> Result<BakeResult, PatchError> {
+    bake_aot_impl(target_wasm, traces, true)
+}
+
+fn bake_aot_impl(
+    target_wasm: &[u8],
+    traces: Vec<(u64, Vec<StackOp>)>,
+    async_shims: bool,
+) -> Result<BakeResult, PatchError> {
     let mut module = Module::from_buffer(target_wasm)?;
     if traces.is_empty() {
         return Ok(BakeResult {
             wasm: module.emit_wasm(),
             entries: Vec::new(),
             trace_table_addr: 0,
+            async_op_addr: None,
         });
     }
 
@@ -766,14 +793,33 @@ pub fn bake_aot(
         .ok_or_else(|| PatchError::Parse("target module has no funcref table".into()))?;
     let make_exit = exported_func(&module, "vane_make_exit")?;
     let regs_offset = exported_func(&module, "vane_regs_offset")?;
-    let mem_load = exported_func(&module, "vane_mem_load")?;
-    let mem_store = exported_func(&module, "vane_mem_store")?;
+    let mem_load = exported_func(
+        &module,
+        if async_shims {
+            "vane_mem_load_async"
+        } else {
+            "vane_mem_load"
+        },
+    )?;
+    let mem_store = exported_func(
+        &module,
+        if async_shims {
+            "vane_mem_store_async"
+        } else {
+            "vane_mem_store"
+        },
+    )?;
     let check_code_impl = exported_func(&module, "vane_check_code_impl")?;
     let ecall = exported_func(&module, "vane_ecall")?;
     let record_undo = exported_func(&module, "vane_record_undo")?;
     let set_undo_base = exported_func(&module, "vane_set_undo_base")?;
     let current_host_addr = exported_global_addr(&module, "VANE_CURRENT_HOST")?;
     let aot_trace_addr = exported_global_addr(&module, "VANE_AOT_TRACE")?;
+    let async_op_addr = if async_shims {
+        Some(exported_global_addr(&module, "VANE_ASYNC_OP")?)
+    } else {
+        None
+    };
 
     // Scratch in the static region's padding (see doc): above every active
     // data segment end and every global-init (data-symbol) address.
@@ -888,7 +934,28 @@ pub fn bake_aot(
         wasm: module.emit_wasm(),
         entries,
         trace_table_addr: blob_addr,
+        async_op_addr,
     })
+}
+
+/// Run Binaryen's asyncify transform over a baked async module
+/// (PLAN_ASYNC_JIT Phase B; tool-gated like [`weval_specialize`] — the real
+/// invocation is `wasm-opt -O1 --asyncify in.wasm -o out.wasm`). The
+/// transform makes the async shims' `asyncify_start_unwind` calls resumable:
+/// the unwind carries the WASM stack (through the trampoline) back to the
+/// driver, and the driver's `asyncify_start_rewind(data)` + re-invoking the
+/// SAME export resumes mid-shim — the WASM counterpart of the native
+/// `Fiber`/`AsyncTraceRun` protocol (`step` / `resume_with`). The module's
+/// structure is audited against the input and any stripped custom sections
+/// are re-attached, so the baked metadata (`vane.aot`, `vane.traces`)
+/// survives the transform.
+pub fn asyncify_module(
+    wasm: &[u8],
+    run: impl Fn(&[u8]) -> Result<Vec<u8>, String>,
+) -> Result<Vec<u8>, PatchError> {
+    let out = run(wasm).map_err(PatchError::Weval)?;
+    audit_no_stripping(wasm, &out)?;
+    reattach_stripped_data(wasm, &out)
 }
 
 /// A bump allocator for linear-memory scratch in the static region's padding

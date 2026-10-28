@@ -498,8 +498,20 @@ const UNDO_LOG: u32 = 100_008;
 const TRAPFLAG: u32 = 101_100;
 /// The `mem_load` address that trips the stub's trap (set TRAPFLAG).
 const TRAP_ADDR: u32 = 0xE000_0000;
+/// The synthetic `VANE_ASYNC_OP` pending-op area (bss; exported as a global).
+const ASYNC_OP_ADDR: u32 = 101_200;
 
 fn interp_module() -> Vec<u8> {
+    interp_module_with_async(true)
+}
+
+/// The sync variant: no `*_async` shims and no `VANE_ASYNC_OP` export (the
+/// async bake must fail loudly against it).
+fn interp_module_sync() -> Vec<u8> {
+    interp_module_with_async(false)
+}
+
+fn interp_module_with_async(async_shims: bool) -> Vec<u8> {
     use wasm_encoder::{
         CodeSection, ConstExpr, DataSection, ExportKind, ExportSection, FunctionSection,
         GlobalSection, GlobalType, Instruction, MemArg, MemorySection, MemoryType, Module, RefType,
@@ -526,6 +538,11 @@ fn interp_module() -> Vec<u8> {
     let mut funcs = FunctionSection::new();
     for ty in 0..8u32 {
         funcs.function(ty);
+    }
+    if async_shims {
+        // The async shims reuse the sync shims' signatures (types 2 and 3).
+        funcs.function(2); // 8: vane_mem_load_async
+        funcs.function(3); // 9: vane_mem_store_async
     }
 
     let mut tables = TableSection::new();
@@ -565,6 +582,16 @@ fn interp_module() -> Vec<u8> {
         },
         &ConstExpr::i32_const(AOT_ADDR as i32),
     );
+    if async_shims {
+        globals.global(
+            GlobalType {
+                val_type: ValType::I32,
+                mutable: false,
+                shared: false,
+            },
+            &ConstExpr::i32_const(ASYNC_OP_ADDR as i32),
+        );
+    }
 
     let mut exports = ExportSection::new();
     exports.export("memory", ExportKind::Memory, 0);
@@ -579,12 +606,17 @@ fn interp_module() -> Vec<u8> {
         "vane_set_undo_base",
     ]
     .into_iter()
+    .chain(async_shims.then_some("vane_mem_load_async"))
+    .chain(async_shims.then_some("vane_mem_store_async"))
     .enumerate()
     {
         exports.export(name, ExportKind::Func, i as u32);
     }
     exports.export("VANE_CURRENT_HOST", ExportKind::Global, 0);
     exports.export("VANE_AOT_TRACE", ExportKind::Global, 1);
+    if async_shims {
+        exports.export("VANE_ASYNC_OP", ExportKind::Global, 2);
+    }
 
     let mut code = CodeSection::new();
     // 0: vane_regs_offset() -> REGS_OFF
@@ -878,6 +910,38 @@ fn interp_module() -> Vec<u8> {
     f.instruction(&Instruction::I32Const(1)); // cont != 0 -> continue
     f.instruction(&Instruction::End);
     code.function(&f);
+    // 8: vane_mem_load_async(addr, width, signed) -> i64. The REAL shim
+    // stashes VANE_ASYNC_OP and unwinds via env.asyncify_start_unwind (a
+    // wasmi store has no asyncify runtime to resume it) — this stub does the
+    // load synchronously, which is behaviorally what a FULFILLED resume
+    // produces, and is what the bake binding is verified against.
+    let mut f = wasm_encoder::Function::new([]);
+    f.instruction(&Instruction::LocalGet(0));
+    f.instruction(&Instruction::I32WrapI64);
+    f.instruction(&Instruction::I64Load(MemArg {
+        offset: 0,
+        align: 3,
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::End);
+    if async_shims {
+        code.function(&f);
+    }
+    // 9: vane_mem_store_async(addr, width, value) — synchronous store, same
+    // rationale.
+    let mut f = wasm_encoder::Function::new([]);
+    f.instruction(&Instruction::LocalGet(0));
+    f.instruction(&Instruction::I32WrapI64);
+    f.instruction(&Instruction::LocalGet(2));
+    f.instruction(&Instruction::I64Store(MemArg {
+        offset: 0,
+        align: 3,
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::End);
+    if async_shims {
+        code.function(&f);
+    }
 
     let mut data = DataSection::new();
     // The seed the test trace loads through the mem_load shim.
@@ -1233,4 +1297,120 @@ fn bake_aot_commits_undo_at_boundaries() {
     // The boundary committed the undo entry (log truncated back to base 0).
     let lenb = read(UNDO_LOGLEN, 4);
     assert_eq!(u32::from_le_bytes(lenb.try_into().unwrap()), 0, "undo log committed");
+}
+
+/// The async bake (PLAN_ASYNC_JIT Phase B): memory ops bind to the
+/// `*_async` shims and the pending-op area's address comes back for the
+/// driver. Executed end-to-end in wasmi (the stub shims are
+/// synchronous — behaviorally identical to a FULFILLED resume; wasmi has no
+/// asyncify runtime to drive a real unwind).
+#[test]
+fn bake_aot_async_runs_traces_in_wasmi() {
+    let target = interp_module();
+    let trace = vec![
+        StackOp::CheckCode {
+            addr: 0x100,
+            expected: vec![].into(),
+            miss_label: String::new(),
+        },
+        StackOp::PushImm(SEED_ADDR as u64),
+        StackOp::LoadMem {
+            width: MemWidth::B8,
+            signed: false,
+        },
+        StackOp::StoreReg(2),
+        StackOp::PushImm(0x8000),
+        StackOp::TailCall,
+    ];
+    let baked = vane_patch::bake_aot_async(&target, vec![(0x3000, trace)]).expect("bake");
+    assert_eq!(
+        baked.async_op_addr,
+        Some(ASYNC_OP_ADDR),
+        "the driver needs the pending-op area's address"
+    );
+
+    let engine = wasmi::Engine::default();
+    let module =
+        wasmi::Module::new(&engine, &baked.wasm[..]).expect("baked module validates in wasmi");
+    let mut store = wasmi::Store::new(&engine, ());
+    let linker = wasmi::Linker::<()>::new(&engine);
+    let instance = linker
+        .instantiate_and_start(&mut store, &module)
+        .expect("instantiate");
+
+    let host_ptr: u32 = 2048;
+    let ret_ptr: u32 = 4096;
+    let tramp = instance
+        .get_typed_func::<(i32, i32, i32), ()>(&store, "vane_tramp_3000")
+        .expect("trampoline export");
+    tramp
+        .call(&mut store, (ret_ptr as i32, host_ptr as i32, 0))
+        .expect("the trampoline should run without trapping");
+
+    let mem = instance.get_memory(&store, "memory").expect("memory export");
+    let read = |addr: u32, len: usize| -> Vec<u8> {
+        let mut buf = vec![0u8; len];
+        mem.read(&store, addr as usize, &mut buf)
+            .expect("read in-bounds");
+        buf
+    };
+    let out = read(ret_ptr, 16);
+    assert_eq!(i32::from_le_bytes(out[0..4].try_into().unwrap()), 0);
+    assert_eq!(i64::from_le_bytes(out[8..16].try_into().unwrap()), 0x8000);
+    let r2 = read(host_ptr + REGS_OFF + 2 * 8, 8);
+    assert_eq!(
+        u64::from_le_bytes(r2.try_into().unwrap()),
+        0x1234,
+        "r2 loaded through the ASYNC mem_load shim"
+    );
+}
+
+/// The async bake requires an async-built module: binding the `*_async`
+/// shims against a sync interpreter module fails loudly.
+#[test]
+fn bake_aot_async_requires_the_async_module() {
+    let target = interp_module_sync();
+    let err = vane_patch::bake_aot_async(&target, vec![(0x1000, simple_trace(1))])
+        .expect_err("a sync module has no async shims");
+    assert!(
+        format!("{err:?}").contains("vane_mem_load_async"),
+        "error should name the missing export: {err:?}"
+    );
+}
+
+/// The asyncify orchestration: the external transform (simulated) strips the
+/// module's custom sections; `asyncify_module` audits structure and
+/// re-attaches them, so the baked metadata survives. A tool failure
+/// surfaces as `PatchError::Weval`.
+#[test]
+fn asyncify_module_reattaches_and_audits() {
+    // A baked module carrying metadata (the traces custom section + vane.aot).
+    let target = interp_module();
+    let baked = vane_patch::bake_aot(&target, vec![(0x1000, simple_trace(1))]).expect("bake");
+    let with_traces =
+        write_traces_section(&baked.wasm, &[(0x1000, simple_trace(1))]).expect("traces section");
+
+    // The "transform": a pass that drops every custom section (the stripping
+    // asyncify is known to need repair for) but is otherwise valid WASM.
+    let strip_customs = |wasm: &[u8]| -> Result<Vec<u8>, String> {
+        let mut m = walrus::Module::from_buffer(wasm).map_err(|e| e.to_string())?;
+        let names: Vec<String> = m.customs.iter().map(|(_, s)| s.name().to_string()).collect();
+        for n in names {
+            m.customs.remove_raw(&n);
+        }
+        Ok(m.emit_wasm())
+    };
+    let out = vane_patch::asyncify_module(&with_traces, strip_customs).expect("asyncify");
+    // The metadata survived (re-attached).
+    let back = read_traces_section(&out).expect("read traces");
+    assert_eq!(back.len(), 1);
+    assert_eq!(back[0].0, 0x1000);
+    assert!(audit_no_stripping(&with_traces, &out)
+        .expect("audit")
+        .is_clean());
+
+    // Tool failure propagates.
+    let err = vane_patch::asyncify_module(&with_traces, |_| Err("wasm-opt missing".into()))
+        .expect_err("tool failure");
+    assert!(format!("{err:?}").contains("wasm-opt missing"));
 }

@@ -17,6 +17,15 @@ default = ["js-host", "console_error_panic_hook"]
 # aarch64/x86_64/riscv64 machine code and register them into the dispatch
 # loop's compiled registry. Host-only (std); off by default.
 native-jit = ["dep:vane-jit"]
+# Binaryen asyncify support (PLAN_ASYNC_JIT Phase B): the async memory shims
+# (`vane_mem_load_async`/`vane_mem_store_async`) suspend via
+# `env.asyncify_start_unwind`, unwinding the WASM stack to the driver — the
+# WASM counterpart of the native Fiber. The async build ALSO needs
+# `RUSTFLAGS="-C link-arg=--allow-undefined"` (the import links as a function
+# import the asyncify runtime satisfies — verified: undefined extern fns do
+# NOT link by default on this toolchain) and a post-build `wasm-opt
+# --asyncify` transform (`vane_patch::asyncify_module`).
+asyncify = []
 # The wasm-bindgen/JS surface (D1 in PLAN_LINUX_WASM.md). Disable for
 # `wasm32-wasip1`, WASIX, and native hosts; the plain-Rust twin API is
 # always available.
