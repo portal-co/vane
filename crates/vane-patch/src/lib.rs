@@ -106,6 +106,39 @@ pub fn compile_trace_vane(ops: Vec<StackOp>, abi: &VaneAbiConfig) -> Function {
     f
 }
 
+/// Generate a **trampoline** with the `CompiledTraceFn` WASM ABI
+/// `(ret_ptr: i32, host_ptr: i32, ct_ptr: i32) -> ()` that bridges the vane
+/// interpreter's dispatch loop to a vane-native pack trace fn. Verified against
+/// rustc's WASM lowering: the sret `ret_ptr` is param 0, `host_ptr` param 1,
+/// `ct_ptr` param 2. The trampoline:
+///
+/// 1. computes `regs_base = host_ptr + regs_offset` (the `LocalStackHost`'s
+///    `regs` field address — `regs_offset` is baked in by the patcher from the
+///    interpreter's exported offset),
+/// 2. calls the pack trace fn at `pack_fn_idx` (the vane-native ABI
+///    `(regs_base: i32) -> (exit_tag: i32, exit_pc: i64)`, a multi-value
+///    return),
+/// 3. calls the `vane_make_exit(exit_tag, exit_pc, ret_ptr)` host import
+///    (`make_exit_idx`), which constructs the `Exit` — including the
+///    `Trap(String)` case, which WASM can't build — and writes it to `ret_ptr`.
+///
+/// The dispatch loop is untouched: an AOT'd trace's `CompiledTrace.f` points at
+/// this trampoline.
+pub fn compile_trampoline(pack_fn_idx: u32, regs_offset: u32, make_exit_idx: u32) -> Function {
+    let mut f = Function::new([]); // no extra locals
+    // regs_base = host_ptr + regs_offset
+    f.instruction(&Instruction::LocalGet(1)); // host_ptr
+    f.instruction(&Instruction::I32Const(regs_offset as i32));
+    f.instruction(&Instruction::I32Add);
+    // (exit_tag, exit_pc) = pack_fn(regs_base)
+    f.instruction(&Instruction::Call(pack_fn_idx));
+    // vane_make_exit(exit_tag, exit_pc, ret_ptr)
+    f.instruction(&Instruction::LocalGet(0)); // ret_ptr
+    f.instruction(&Instruction::Call(make_exit_idx));
+    f.instruction(&Instruction::End);
+    f
+}
+
 /// Build a "precompiled trace pack" module: hot `StackOp` traces recompiled to
 /// WASM and placed in a dispatch table's slots, so the next instance uses the
 /// precompiled code. `traces` maps each hot guest pc to its `StackOp` trace.

@@ -363,3 +363,101 @@ fn vane_native_trace_validates() {
     // `validate` is feature-gated off in this workspace).
     walrus::Module::from_buffer(&bytes).expect("the vane-native trace is valid WASM");
 }
+
+/// Build a full vane-native module (a pack trace + a trampoline + the host
+/// imports) and validate it — the trampoline's ABI bridging (the
+/// `CompiledTraceFn` sret signature -> the vane-native pack fn ->
+/// `vane_make_exit`) is checked by the WASM validator.
+#[test]
+fn vane_native_trampoline_validates() {
+    use wasm_encoder::{
+        CodeSection, EntityType, ExportKind, ExportSection, FunctionSection, ImportSection,
+        MemoryType, Module, TypeSection, ValType,
+    };
+    let vane_abi = VaneAbiConfig {
+        mem_idx: 0,
+        regs_base_local: 0,
+        scratch_a: 1,
+        scratch_b: 2,
+        scratch32: 3,
+        mem_load_func: 0,
+        mem_store_func: 1,
+        check_code_func: 2,
+        ecall_func: 3,
+    };
+    let trace = vec![
+        StackOp::CheckCode {
+            addr: 0x8000,
+            expected: vec![].into(),
+            miss_label: String::new(),
+        },
+        StackOp::LoadReg(1),
+        StackOp::LoadMem {
+            width: MemWidth::B8,
+            signed: false,
+        },
+        StackOp::StoreReg(2),
+        StackOp::PushImm(0x8004),
+        StackOp::TailCall,
+    ];
+    let pack_fn = vane_patch::compile_trace_vane(trace, &vane_abi);
+    // The trampoline: pack fn at func index 5, vane_make_exit at import index
+    // 4, regs_offset 0x40 (a placeholder — the real offset is the interpreter's
+    // exported value).
+    let trampoline = vane_patch::compile_trampoline(5, 0x40, 4);
+
+    let mut module = Module::new();
+    let mut types = TypeSection::new();
+    types
+        .ty()
+        .function([ValType::I64, ValType::I32, ValType::I32], [ValType::I64]); // 0: mem_load
+    types
+        .ty()
+        .function([ValType::I64, ValType::I32, ValType::I64], []); // 1: mem_store
+    types
+        .ty()
+        .function([ValType::I64], [ValType::I32, ValType::I64]); // 2: check_code
+    types.ty().function([ValType::I32], [ValType::I32]); // 3: ecall
+    types
+        .ty()
+        .function([ValType::I32, ValType::I64, ValType::I32], []); // 4: vane_make_exit
+    types
+        .ty()
+        .function([ValType::I32], [ValType::I32, ValType::I64]); // 5: pack trace fn
+    types
+        .ty()
+        .function([ValType::I32, ValType::I32, ValType::I32], []); // 6: trampoline
+    let mut imports = ImportSection::new();
+    imports.import("env", "mem_load", EntityType::Function(0));
+    imports.import("env", "mem_store", EntityType::Function(1));
+    imports.import("env", "check_code", EntityType::Function(2));
+    imports.import("env", "ecall", EntityType::Function(3));
+    imports.import("env", "vane_make_exit", EntityType::Function(4));
+    imports.import(
+        "env",
+        "memory",
+        EntityType::Memory(MemoryType {
+            minimum: 1,
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        }),
+    );
+    let mut funcs = FunctionSection::new();
+    funcs.function(5); // pack fn
+    funcs.function(6); // trampoline
+    let mut code = CodeSection::new();
+    code.function(&pack_fn);
+    code.function(&trampoline);
+    let mut exports = ExportSection::new();
+    exports.export("trampoline", ExportKind::Func, 6);
+    module
+        .section(&types)
+        .section(&imports)
+        .section(&funcs)
+        .section(&exports)
+        .section(&code);
+    let bytes = module.finish();
+    walrus::Module::from_buffer(&bytes).expect("the vane-native trampoline module is valid WASM");
+}
