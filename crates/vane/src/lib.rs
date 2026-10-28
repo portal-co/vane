@@ -141,6 +141,41 @@ pub extern "C" fn vane_mem_store(addr: i64, width: i32, value: i64) {
         .lr_store_mem(addr as u64, mw(width), value as u64);
 }
 
+/// `check_code(addr) -> (exit_tag, exit_pc)` — the instruction-boundary check
+/// (trap/irq), as an sret Rust helper (a Rust tuple return is sret, not
+/// multi-value, so the patcher generates a thin WASM wrapper that calls this
+/// and re-returns multi-value). Writes `(tag, pc)` to `ret_ptr`; tag
+/// `u32::MAX` means Continue. The code-integrity re-read is the dispatch
+/// loop's retain+revalidate job (the trace doesn't re-read here). TODO: the
+/// fuel check (the dispatch loop's op budget) isn't replicated here yet.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn vane_check_code_impl(ret_ptr: i32, addr: i64) {
+    use vane_arch::interp::AsyncStackHost;
+    let host = unsafe { current_host() };
+    let (tag, pc): (i32, i64) = if host.take_pending_trap() {
+        (3, host.pc as i64) // TAG_BAIL, the current instruction's pc
+    } else if host.take_irq_check() {
+        (0, addr) // TAG_TAILCALL, re-dispatch to the boundary address
+    } else {
+        (u32::MAX as i32, 0) // Continue
+    };
+    // SAFETY: `ret_ptr` is the caller's sret out-pointer for `(i32, i64)`.
+    unsafe { core::ptr::write(ret_ptr as *mut (i32, i64), (tag, pc)) };
+}
+
+/// `ecall(regs_base) -> cont` — the host's ecall handling. Sets the host's
+/// pending_ecall and returns 0 (the trace returns `Ecall`); the dispatch loop
+/// runs the actual ecall. `regs_base` is unused (the host already has the regs
+/// via `VANE_CURRENT_HOST`); it matches the renderer's shim signature.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn vane_ecall(_regs_base: i32) -> i32 {
+    let host = unsafe { current_host() };
+    host.pending_ecall = true;
+    0 // cont == 0 -> the trace returns Ecall
+}
+
 /// Decode the MemWidth discriminant the renderer bakes in (B1=0, B2=1, B4=2,
 /// B8=3).
 #[cfg(target_arch = "wasm32")]
