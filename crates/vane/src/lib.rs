@@ -320,6 +320,66 @@ impl Reactor {
         self.core.lock().compiled.borrow_mut().insert(pc, ct);
     }
 
+    /// Register the AOT-compiled WASM traces the patcher baked into this binary
+    /// (PLAN_ASYNC_JIT Phase B). The patcher writes a trace table — a count +
+    /// `{ pc, trampoline_table_idx }` entries — and satisfies these extern
+    /// statics (converting the imports into baked globals); this reads the
+    /// table and populates the compiled registry so the dispatch loop calls
+    /// each trace's trampoline (its `CompiledTraceFn`) directly.
+    ///
+    /// Verified against rustc's WASM lowering: a fn pointer IS the funcref
+    /// table index (entry 0 is reserved), so `transmute(table_idx)` recovers
+    /// the trampoline's `CompiledTraceFn`. The trace's ops come from the trace
+    /// cache (restored by the snapshot / re-emitted on a miss).
+    #[cfg(target_arch = "wasm32")]
+    pub fn register_aot_traces(&self) {
+        use vane_arch::interp::{CompiledTrace, CompiledTraceFn, TraceBackend};
+        #[repr(C)]
+        struct AotTraceEntry {
+            pc: u64,
+            trampoline_table_idx: u32,
+            _pad: u32,
+        }
+        extern "C" {
+            static VANE_AOT_TRACE_COUNT: u32;
+            static VANE_AOT_TRACE_TABLE: AotTraceEntry; // the base of the array
+        }
+        // SAFETY: the patcher bakes VANE_AOT_TRACE_TABLE as an array of
+        // VANE_AOT_TRACE_COUNT entries; reading within that count is in-bounds.
+        let (count, base) = unsafe {
+            (
+                VANE_AOT_TRACE_COUNT as usize,
+                &VANE_AOT_TRACE_TABLE as *const AotTraceEntry,
+            )
+        };
+        for i in 0..count {
+            let entry = unsafe { &*base.add(i) };
+            let Some(ops) = self
+                .core
+                .lock()
+                .trace_cache
+                .borrow()
+                .get(&entry.pc)
+                .cloned()
+            else {
+                continue; // trace not in the cache (not restored) — skip it
+            };
+            // SAFETY: trampoline_table_idx is the patcher-baked funcref table
+            // index of a fn with the CompiledTraceFn WASM signature.
+            let f: CompiledTraceFn<Self> =
+                unsafe { core::mem::transmute(entry.trampoline_table_idx as usize) };
+            self.register_compiled_trace(
+                entry.pc,
+                CompiledTrace {
+                    f,
+                    ops,
+                    kind: TraceBackend::Weval,
+                    native: None,
+                },
+            );
+        }
+    }
+
     /// Serialize the hot trace cache (guest pc → `StackOp` trace) to bytes, so
     /// it can be embedded in the module (via `vane_patch::write_traces_section`)
     /// before Wizer snapshots — the patcher then reads the traces from the
