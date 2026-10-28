@@ -23,9 +23,8 @@ use vane_target_core::StackOp;
 use vane_target_wasm::{VaneAbiConfig, WasmAbiConfig};
 
 use walrus::ir::{
-    BinaryOp, Binop, Br, Block, Call, Const, Drop, IfElse, Instr, InstrSeqType, Load, LoadKind,
-    LocalGet, LocalSet, LocalTee, Loop, MemArg, Return, Store, StoreKind, UnaryOp, Unop,
-    Unreachable, Value,
+    BinaryOp, Binop, Block, Br, Call, Const, Drop, IfElse, InstrSeqType, Load, LoadKind, LocalGet,
+    LocalSet, LocalTee, Loop, MemArg, Return, Store, StoreKind, UnaryOp, Unop, Unreachable, Value,
 };
 use walrus::{
     DataKind, ElementItems, ElementKind, ExportItem, FunctionBuilder, GlobalKind, LocalId,
@@ -859,7 +858,7 @@ pub fn bake_aot(
     // Point VANE_AOT_TRACE at the blob: patch its four baked bytes inside
     // whichever existing segment holds them (its non-zero sentinel initial
     // value guarantees a real segment exists).
-    patch_static(&mut module, aot_trace_addr, &(blob_addr as u32).to_le_bytes())?;
+    patch_static(&mut module, aot_trace_addr, &blob_addr.to_le_bytes())?;
 
     // A self-describing marker for the host/instantiator.
     let mut meta = Vec::with_capacity(8);
@@ -1060,7 +1059,11 @@ fn build_trampoline(
 ) -> Result<walrus::FunctionId, PatchError> {
     let mut fb = FunctionBuilder::new(
         &mut module.types,
-        &[walrus::ValType::I32, walrus::ValType::I32, walrus::ValType::I32],
+        &[
+            walrus::ValType::I32,
+            walrus::ValType::I32,
+            walrus::ValType::I32,
+        ],
         &[],
     );
     let ret_ptr = module.locals.add(walrus::ValType::I32);
@@ -1106,8 +1109,12 @@ struct Frame {
 }
 
 enum FrameKind {
-    Block { seq: walrus::ir::InstrSeqId },
-    Loop { seq: walrus::ir::InstrSeqId },
+    Block {
+        seq: walrus::ir::InstrSeqId,
+    },
+    Loop {
+        seq: walrus::ir::InstrSeqId,
+    },
     If {
         seq: walrus::ir::InstrSeqId,
         ty: InstrSeqType,
@@ -1206,13 +1213,11 @@ fn blockty_to_seq_type(
 ) -> Result<InstrSeqType, PatchError> {
     Ok(match blockty {
         wasmparser::BlockType::Empty => InstrSeqType::new(types, &[], &[]),
-        wasmparser::BlockType::Type(vt) => {
-            InstrSeqType::new(types, &[], &[valtype_to_walrus(vt)?])
-        }
+        wasmparser::BlockType::Type(vt) => InstrSeqType::new(types, &[], &[valtype_to_walrus(vt)?]),
         wasmparser::BlockType::FuncType(_) => {
             return Err(PatchError::Parse(
                 "bake: multi-value block types are not emitted by the renderer".into(),
-            ))
+            ));
         }
     })
 }
@@ -1227,7 +1232,7 @@ fn valtype_to_walrus(vt: wasmparser::ValType) -> Result<walrus::ValType, PatchEr
         wasmparser::ValType::Ref(_) => {
             return Err(PatchError::Parse(
                 "bake: reference-typed values are not emitted by the renderer".into(),
-            ))
+            ));
         }
     })
 }
@@ -1293,7 +1298,7 @@ fn lower_op(
                 _ => {
                     return Err(PatchError::Parse(
                         "bake: `else` without a matching `if`".into(),
-                    ))
+                    ));
                 }
             };
             let alt = fb.dangling_instr_seq(ty).id();
@@ -1352,54 +1357,58 @@ fn lower_op(
                         .into(),
                 ));
             };
-            fb.instr_seq(cur_seq(frames, entry)).instr(Br { block: seq });
+            fb.instr_seq(cur_seq(frames, entry))
+                .instr(Br { block: seq });
             Ok(())
         }
         O::Return => {
             fb.instr_seq(cur_seq(frames, entry)).instr(Return {});
-           Ok(())
+            Ok(())
         }
         O::Unreachable => {
             fb.instr_seq(cur_seq(frames, entry)).instr(Unreachable {});
-           Ok(())
+            Ok(())
         }
 
         // ── Locals / consts / shim calls ──────────────────────────────────
         O::LocalGet { local_index } => {
             let local = local_at(locals, local_index)?;
-            fb.instr_seq(cur_seq(frames, entry)).instr(LocalGet { local });
-           Ok(())
+            fb.instr_seq(cur_seq(frames, entry))
+                .instr(LocalGet { local });
+            Ok(())
         }
         O::LocalSet { local_index } => {
             let local = local_at(locals, local_index)?;
-            fb.instr_seq(cur_seq(frames, entry)).instr(LocalSet { local });
-           Ok(())
+            fb.instr_seq(cur_seq(frames, entry))
+                .instr(LocalSet { local });
+            Ok(())
         }
         O::LocalTee { local_index } => {
             let local = local_at(locals, local_index)?;
-            fb.instr_seq(cur_seq(frames, entry)).instr(LocalTee { local });
-           Ok(())
+            fb.instr_seq(cur_seq(frames, entry))
+                .instr(LocalTee { local });
+            Ok(())
         }
         O::I32Const { value } => {
             fb.instr_seq(cur_seq(frames, entry)).instr(Const {
                 value: Value::I32(value),
             });
-           Ok(())
+            Ok(())
         }
         O::I64Const { value } => {
             fb.instr_seq(cur_seq(frames, entry)).instr(Const {
                 value: Value::I64(value),
             });
-           Ok(())
+            Ok(())
         }
         O::Call { function_index } => {
             let func = shim_at(shims, function_index)?;
             fb.instr_seq(cur_seq(frames, entry)).instr(Call { func });
-           Ok(())
+            Ok(())
         }
         O::Drop => {
             fb.instr_seq(cur_seq(frames, entry)).instr(Drop {});
-           Ok(())
+            Ok(())
         }
 
         // ── Conversions / comparisons (unary) ────────────────────────────
@@ -1442,22 +1451,154 @@ fn lower_op(
         O::I64GeU => binop(fb, frames, entry, BinaryOp::I64GeU),
 
         // ── Linear-memory loads/stores (reg cache + flat scratch loads) ───
-        O::I64Load { memarg } => load(fb, frames, entry, memory, LoadKind::I64 { atomic: false }, &memarg),
-        O::I64Load8U { memarg } => load(fb, frames, entry, memory, LoadKind::I64_8 { kind: walrus::ir::ExtendedLoad::ZeroExtend }, &memarg),
-        O::I64Load8S { memarg } => load(fb, frames, entry, memory, LoadKind::I64_8 { kind: walrus::ir::ExtendedLoad::SignExtend }, &memarg),
-        O::I64Load16U { memarg } => load(fb, frames, entry, memory, LoadKind::I64_16 { kind: walrus::ir::ExtendedLoad::ZeroExtend }, &memarg),
-        O::I64Load16S { memarg } => load(fb, frames, entry, memory, LoadKind::I64_16 { kind: walrus::ir::ExtendedLoad::SignExtend }, &memarg),
-        O::I64Load32U { memarg } => load(fb, frames, entry, memory, LoadKind::I64_32 { kind: walrus::ir::ExtendedLoad::ZeroExtend }, &memarg),
-        O::I64Load32S { memarg } => load(fb, frames, entry, memory, LoadKind::I64_32 { kind: walrus::ir::ExtendedLoad::SignExtend }, &memarg),
-        O::I32Load { memarg } => load(fb, frames, entry, memory, LoadKind::I32 { atomic: false }, &memarg),
-        O::I32Load8U { memarg } => load(fb, frames, entry, memory, LoadKind::I32_8 { kind: walrus::ir::ExtendedLoad::ZeroExtend }, &memarg),
-        O::I32Load8S { memarg } => load(fb, frames, entry, memory, LoadKind::I32_8 { kind: walrus::ir::ExtendedLoad::SignExtend }, &memarg),
-        O::I32Load16U { memarg } => load(fb, frames, entry, memory, LoadKind::I32_16 { kind: walrus::ir::ExtendedLoad::ZeroExtend }, &memarg),
-        O::I32Load16S { memarg } => load(fb, frames, entry, memory, LoadKind::I32_16 { kind: walrus::ir::ExtendedLoad::SignExtend }, &memarg),
-        O::I64Store { memarg } => store(fb, frames, entry, memory, StoreKind::I64 { atomic: false }, &memarg),
-        O::I64Store8 { memarg } => store(fb, frames, entry, memory, StoreKind::I64_8 { atomic: false }, &memarg),
-        O::I64Store16 { memarg } => store(fb, frames, entry, memory, StoreKind::I64_16 { atomic: false }, &memarg),
-        O::I64Store32 { memarg } => store(fb, frames, entry, memory, StoreKind::I64_32 { atomic: false }, &memarg),
+        O::I64Load { memarg } => load(
+            fb,
+            frames,
+            entry,
+            memory,
+            LoadKind::I64 { atomic: false },
+            &memarg,
+        ),
+        O::I64Load8U { memarg } => load(
+            fb,
+            frames,
+            entry,
+            memory,
+            LoadKind::I64_8 {
+                kind: walrus::ir::ExtendedLoad::ZeroExtend,
+            },
+            &memarg,
+        ),
+        O::I64Load8S { memarg } => load(
+            fb,
+            frames,
+            entry,
+            memory,
+            LoadKind::I64_8 {
+                kind: walrus::ir::ExtendedLoad::SignExtend,
+            },
+            &memarg,
+        ),
+        O::I64Load16U { memarg } => load(
+            fb,
+            frames,
+            entry,
+            memory,
+            LoadKind::I64_16 {
+                kind: walrus::ir::ExtendedLoad::ZeroExtend,
+            },
+            &memarg,
+        ),
+        O::I64Load16S { memarg } => load(
+            fb,
+            frames,
+            entry,
+            memory,
+            LoadKind::I64_16 {
+                kind: walrus::ir::ExtendedLoad::SignExtend,
+            },
+            &memarg,
+        ),
+        O::I64Load32U { memarg } => load(
+            fb,
+            frames,
+            entry,
+            memory,
+            LoadKind::I64_32 {
+                kind: walrus::ir::ExtendedLoad::ZeroExtend,
+            },
+            &memarg,
+        ),
+        O::I64Load32S { memarg } => load(
+            fb,
+            frames,
+            entry,
+            memory,
+            LoadKind::I64_32 {
+                kind: walrus::ir::ExtendedLoad::SignExtend,
+            },
+            &memarg,
+        ),
+        O::I32Load { memarg } => load(
+            fb,
+            frames,
+            entry,
+            memory,
+            LoadKind::I32 { atomic: false },
+            &memarg,
+        ),
+        O::I32Load8U { memarg } => load(
+            fb,
+            frames,
+            entry,
+            memory,
+            LoadKind::I32_8 {
+                kind: walrus::ir::ExtendedLoad::ZeroExtend,
+            },
+            &memarg,
+        ),
+        O::I32Load8S { memarg } => load(
+            fb,
+            frames,
+            entry,
+            memory,
+            LoadKind::I32_8 {
+                kind: walrus::ir::ExtendedLoad::SignExtend,
+            },
+            &memarg,
+        ),
+        O::I32Load16U { memarg } => load(
+            fb,
+            frames,
+            entry,
+            memory,
+            LoadKind::I32_16 {
+                kind: walrus::ir::ExtendedLoad::ZeroExtend,
+            },
+            &memarg,
+        ),
+        O::I32Load16S { memarg } => load(
+            fb,
+            frames,
+            entry,
+            memory,
+            LoadKind::I32_16 {
+                kind: walrus::ir::ExtendedLoad::SignExtend,
+            },
+            &memarg,
+        ),
+        O::I64Store { memarg } => store(
+            fb,
+            frames,
+            entry,
+            memory,
+            StoreKind::I64 { atomic: false },
+            &memarg,
+        ),
+        O::I64Store8 { memarg } => store(
+            fb,
+            frames,
+            entry,
+            memory,
+            StoreKind::I64_8 { atomic: false },
+            &memarg,
+        ),
+        O::I64Store16 { memarg } => store(
+            fb,
+            frames,
+            entry,
+            memory,
+            StoreKind::I64_16 { atomic: false },
+            &memarg,
+        ),
+        O::I64Store32 { memarg } => store(
+            fb,
+            frames,
+            entry,
+            memory,
+            StoreKind::I64_32 { atomic: false },
+            &memarg,
+        ),
 
         // The speet regfn dispatch (`return_call` to a lookup stub) never
         // appears in vane-native traces — the vane ABI returns exits instead.

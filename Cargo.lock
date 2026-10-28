@@ -2346,7 +2346,15 @@ name = "volar-wasm-circuit-import"
 version = "0.1.0"
 
 [[patch.unused]]
+name = "dreamcompiler-log"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "dreamcompiler-minibc"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-minibc-c-interp"
 version = "0.1.0"
 
 [[patch.unused]]

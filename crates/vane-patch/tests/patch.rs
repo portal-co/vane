@@ -487,23 +487,20 @@ const SEED_ADDR: u32 = 0x2000;
 fn interp_module() -> Vec<u8> {
     use wasm_encoder::{
         CodeSection, ConstExpr, DataSection, ExportKind, ExportSection, FunctionSection,
-        GlobalSection, GlobalType, Instruction, MemArg, MemorySection, MemoryType, Module,
-        RefType, TableSection, TableType, TypeSection, ValType,
+        GlobalSection, GlobalType, Instruction, MemArg, MemorySection, MemoryType, Module, RefType,
+        TableSection, TableType, TypeSection, ValType,
     };
     let mut types = TypeSection::new();
     types.ty().function([], [ValType::I32]); // 0: vane_regs_offset
-    types.ty().function(
-        [ValType::I32, ValType::I64, ValType::I32],
-        [],
-    ); // 1: vane_make_exit
-    types.ty().function(
-        [ValType::I64, ValType::I32, ValType::I32],
-        [ValType::I64],
-    ); // 2: vane_mem_load
-    types.ty().function(
-        [ValType::I64, ValType::I32, ValType::I64],
-        [],
-    ); // 3: vane_mem_store
+    types
+        .ty()
+        .function([ValType::I32, ValType::I64, ValType::I32], []); // 1: vane_make_exit
+    types
+        .ty()
+        .function([ValType::I64, ValType::I32, ValType::I32], [ValType::I64]); // 2: vane_mem_load
+    types
+        .ty()
+        .function([ValType::I64, ValType::I32, ValType::I64], []); // 3: vane_mem_store
     types.ty().function([ValType::I32, ValType::I64], []); // 4: vane_check_code_impl
     types.ty().function([ValType::I32], [ValType::I32]); // 5: vane_ecall
 
@@ -692,7 +689,12 @@ fn bake_aot_validates_and_stays_additive() {
     // (which had exactly one entry).
     assert_eq!(baked.entries, vec![(0x1000, 1), (0x2000, 2)]);
     let text = wasmprinter::print_bytes(&baked.wasm).expect("printable");
-    for name in ["vane_pack_1000", "vane_tramp_1000", "vane_pack_2000", "vane_tramp_2000"] {
+    for name in [
+        "vane_pack_1000",
+        "vane_tramp_1000",
+        "vane_pack_2000",
+        "vane_tramp_2000",
+    ] {
         assert!(text.contains(name), "missing export {name}: {text}");
     }
     // The self-describing marker section survived emit.
@@ -749,7 +751,9 @@ fn bake_aot_runs_traces_in_wasmi() {
         .call(&mut store, (ret_ptr as i32, host_ptr as i32, 0))
         .expect("the trampoline should run without trapping");
 
-    let mem = instance.get_memory(&store, "memory").expect("memory export");
+    let mem = instance
+        .get_memory(&store, "memory")
+        .expect("memory export");
     let read = |addr: u32, len: usize| -> Vec<u8> {
         let mut buf = vec![0u8; len];
         mem.read(&store, addr as usize, &mut buf)
@@ -829,4 +833,3 @@ fn bake_aot_with_no_traces_is_a_noop() {
     let audit = audit_no_stripping(&target, &baked.wasm).expect("audit");
     assert!(audit.is_clean());
 }
-
