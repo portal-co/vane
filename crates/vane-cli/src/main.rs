@@ -268,21 +268,26 @@ impl EchoNet {
         self.backlog.push_back(r);
     }
 
-    /// Reply to an ICMP echo request.
+    /// Reply to an ICMP echo request. `ip` starts at the IPv4 header (i.e.
+    /// `frame[14..]`); `icmp` at `ip[ihl..]`. All indexing is bounds-checked —
+    /// this parses GUEST-supplied frames and must never panic (an earlier
+    /// draft double-offset the IP fields and crashed vane-cli on the first
+    /// guest frame).
     fn reply_icmp_echo(&mut self, eth: &[u8], ip: &[u8], icmp: &[u8]) {
-        if icmp.len() < 8 || icmp[0] != 8 {
-            return; // only echo requests
-        }
         let ihl = (ip[0] & 0x0f) as usize * 4;
+        if icmp.len() < 8 || icmp[0] != 8 || ip.len() < ihl + 8 {
+            return; // only well-formed echo requests
+        }
         let mut r = vec![0u8; 14 + ihl + icmp.len()];
         // Ethernet: to the guest's MAC, from ours.
         r[0..6].copy_from_slice(&eth[6..12]);
         r[6..12].copy_from_slice(&Self::MAC);
         r[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
-        // IPv4 header: swap src/dst, recompute checksum.
+        // IPv4 header: swap src/dst, recompute checksum. (src @ 12..16,
+        // dst @ 16..20 within the header — NOT frame offsets.)
         r[14..14 + ihl].copy_from_slice(&ip[..ihl]);
-        r[14 + 12..14 + 16].copy_from_slice(&ip[14 + 16..14 + 20]); // src (was dst)
-        r[14 + 16..14 + 20].copy_from_slice(&ip[14 + 12..14 + 16]); // dst (was src)
+        r[14 + 12..14 + 16].copy_from_slice(&ip[16..20]); // src (was dst)
+        r[14 + 16..14 + 20].copy_from_slice(&ip[12..16]); // dst (was src)
         r[14 + 10..14 + 12].copy_from_slice(&[0, 0]);
         let sum = internet_checksum(&r[14..14 + ihl]);
         r[14 + 10..14 + 12].copy_from_slice(&sum.to_be_bytes());
@@ -326,7 +331,9 @@ impl vane::vane_riscv::virtio_net::NetBackend for EchoNet {
                     && u16::from_be_bytes([arp[6], arp[7]]) == 1
                     && arp[24..28] == Self::HOST_IP
                 {
-                    let ip = [arp[28], arp[29], arp[30], arp[31]]; // sender (guest) IP
+                    // spa @ 14..18 — the REQUESTER's IP (arp is exactly 28
+                    // bytes; [28..32] panicked on the first guest ARP).
+                    let ip = [arp[14], arp[15], arp[16], arp[17]];
                     self.reply_arp(arp, &frame[6..12], ip);
                 }
             }

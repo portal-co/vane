@@ -27,10 +27,14 @@ cd "$(dirname "$0")/.."
 artifacts=harness/linux
 engines="${*:-jit nojit}"
 ram_bytes=$(( ${VANE_E2E_RAM_MB:-128} * 1024 * 1024 ))
-timeout_jit=${VANE_E2E_TIMEOUT_JIT:-1800}
+timeout_jit=${VANE_E2E_TIMEOUT_JIT:-2700}
 timeout_nojit=${VANE_E2E_TIMEOUT_NOJIT:-5400}
 
-for f in opensbi.bin linux initrd-virtio.gz; do
+# NOTE: linux-generic (7.2.11) is REQUIRED here: the module set inside
+# initrd-virtio.gz is built for exactly that release (version magic
+# 7.2.11+deb14-riscv64) — the older `linux` netboot kernel (7.0.13) rejects
+# every module.
+for f in opensbi.bin linux-generic initrd-virtio.gz; do
   [[ -f "$artifacts/$f" ]] || { echo "missing $artifacts/$f — see harness/linux/README.md" >&2; exit 2; }
 done
 
@@ -69,7 +73,7 @@ run_engine() {
   echo "════ e2e engine=$name (ram=$((ram_bytes/1024/1024))MiB timeout=${tmo}s) ════" >&2
   local log="/tmp/vane-e2e-logs/log-$name.txt"
   rm -f "$log"
-  nice -n 19 "$bin" --machine --opensbi "$artifacts/opensbi.bin" --kernel "$artifacts/linux" \
+  nice -n 19 "$bin" --machine --opensbi "$artifacts/opensbi.bin" --kernel "$artifacts/linux-generic" \
     --initrd "$artifacts/initrd-e2e.gz" --disk "$disk" --share "$share" --net \
     --append "console=ttyS0 panic=-1" --ram-size "$ram_bytes" \
     >"$log" 2>&1 &

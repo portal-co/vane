@@ -27,8 +27,14 @@ def build_image(files, total_sectors, out_path):
     first_data_block = inode_table_start + inode_table_blocks
 
     blocks = [bytearray(BLOCK) for _ in range(total_blocks)]
-    block_bitmap = bytearray((total_blocks + 7) // 8)
-    inode_bitmap = bytearray((n_inodes + 7) // 8)
+    # Both bitmaps occupy a FULL block on disk (the group's bitmap covers
+    # BLOCK*8 blocks/inodes), so they must be sized to the block — bits past
+    # the filesystem's end are "outside the fs" and must read as SET (a
+    # total_blocks-sized array has no padding region at all, and ext4 fails
+    # validation with "padding at end of block bitmap is not set").
+    blocks_per_group = BLOCK * 8
+    block_bitmap = bytearray(BLOCK)
+    inode_bitmap = bytearray(BLOCK)
     inodes = [bytearray(128) for _ in range(n_inodes)]
 
     used_blocks = set(range(first_data_block))
@@ -104,9 +110,16 @@ def build_image(files, total_sectors, out_path):
             blk = alloc_block()
             data = bytearray(BLOCK)
             off = 0
-            for name, cino in entries:
+            # The LAST entry in a directory block must have its rec_len run to
+            # the block's end (ext2 semantics: the kernel scans entries by
+            # rec_len and treats the tail as one entry — a short rec_len left
+            # the tail misparsed as "directory entry overrun", and every
+            # create in that directory failed).
+            for idx, (name, cino) in enumerate(entries):
                 nb = name.encode()
                 rec_len = (8 + len(nb) + 3) & ~3
+                if idx == len(entries) - 1:
+                    rec_len = BLOCK - off
                 struct.pack_into("<IHB", data, off, cino, rec_len, len(nb))
                 is_dir = name in (".", "..") or node["children"].get(name, {}).get("is_dir", False)
                 struct.pack_into("<B", data, off + 7, 2 if is_dir else 1)
@@ -142,13 +155,29 @@ def build_image(files, total_sectors, out_path):
 
     for b in used_blocks:
         block_bitmap[b // 8] |= 1 << (b % 8)
+    # The group's block bitmap covers blocks_per_group (BLOCK*8 = 8192)
+    # blocks, but the filesystem ends at total_blocks: every bit past the
+    # end is "outside the fs" and MUST read as set, or ext4 fails
+    # validation — "padding at end of block bitmap is not set" — and
+    # delayed allocation aborts every write (found live on the e2e boot).
+    for bit in range(total_blocks, blocks_per_group):
+        block_bitmap[bit // 8] |= 1 << (bit % 8)
+    # Inodes 1-10 are RESERVED by the ext2/ext4 spec (bad-blocks, root-quotas,
+    # the inode table, etc.) and MUST be marked in-use in the bitmap even when
+    # never allocated: leaving them clear makes ext4 abort inode allocation
+    # with "reserved inode found cleared" and any create fails with ENOSPC
+    # (found live on the e2e boot). Bits beyond n_inodes are also kept set.
+    for i in range(1, 11):
+        inode_bitmap[(i - 1) // 8] |= 1 << ((i - 1) % 8)
+    for bit in range(n_inodes, blocks_per_group):
+        inode_bitmap[bit // 8] |= 1 << (bit % 8)
     for i in used_inodes:
         inode_bitmap[(i - 1) // 8] |= 1 << ((i - 1) % 8)
     blocks[2][: len(block_bitmap)] = block_bitmap
     blocks[3][: len(inode_bitmap)] = inode_bitmap
 
     free_blocks = total_blocks - len(used_blocks)
-    free_inodes = n_inodes - len(used_inodes)
+    free_inodes = n_inodes - len(used_inodes) - 10  # minus the reserved range
 
     bgdt = bytearray(BLOCK)
     struct.pack_into("<III", bgdt, 0, 2, 3, inode_table_start)

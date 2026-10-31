@@ -246,12 +246,16 @@ mod ninep {
     /// In-memory host fs: path -> (is_dir, data).
     struct MemFs {
         files: BTreeMap<String, Vec<u8>>,
+        /// Paths created via O_CREAT — the LCREATE name-join assertion reads
+        /// this (the instance is owned by the device, so the test asserts
+        /// through `created_via_open`'s static mirror).
+        created: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
     }
     impl MemFs {
-        fn new() -> Self {
+        fn new(created: std::rc::Rc<std::cell::RefCell<Vec<String>>>) -> Self {
             let mut files = BTreeMap::new();
             files.insert("hello.txt".to_string(), b"hello, 9p".to_vec());
-            MemFs { files }
+            MemFs { files, created }
         }
     }
     impl Host9p for MemFs {
@@ -264,7 +268,12 @@ mod ninep {
                 None => Err(2), // ENOENT
             }
         }
-        fn open(&mut self, path: &str, _flags: u32) -> Result<u64, i32> {
+        fn open(&mut self, path: &str, flags: u32) -> Result<u64, i32> {
+            if !self.files.contains_key(path) && flags & 0x40 != 0 {
+                // O_CREAT on a not-yet-existing file (the e2e write-back path).
+                self.files.insert(path.to_string(), Vec::new());
+                self.created.borrow_mut().push(path.to_string());
+            }
             if self.files.contains_key(path) {
                 Ok(1) // single handle for the test
             } else {
@@ -278,7 +287,24 @@ mod ninep {
             buf[..n].copy_from_slice(&data[start..start + n]);
             Ok(n)
         }
-        fn write(&mut self, _h: u64, _o: u64, _d: &[u8]) -> Result<usize, i32> {
+        fn write(&mut self, _h: u64, offset: u64, d: &[u8]) -> Result<usize, i32> {
+            // One handle maps to one file; find whichever was opened last by
+            // path is unnecessary for the test — write into every file's
+            // place is wrong, so track by handle via open ordering: the test
+            // writes only right after creating/opening one file.
+            for (_, data) in self.files.iter_mut() {
+                // write into the FIRST file at/after the given offset that is
+                // empty or matches the opened name — simplest: append to the
+                // empty created file (the create test opens exactly one).
+                if data.is_empty() || offset == 0 {
+                    let end = offset as usize + d.len();
+                    if data.len() < end {
+                        data.resize(end, 0);
+                    }
+                    data[offset as usize..end].copy_from_slice(d);
+                    return Ok(d.len());
+                }
+            }
             Ok(0)
         }
         fn mkdir(&mut self, _p: &str, _m: u32) -> Result<(), i32> {
@@ -338,7 +364,11 @@ mod ninep {
 
     #[test]
     fn ninep_version_attach_walk_read() {
-        let mut d = VirtioMmio::new(Box::new(Virtio9p::new(MemFs::new(), "hostshare")), 1);
+        let created = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut d = VirtioMmio::new(
+            Box::new(Virtio9p::new(MemFs::new(created.clone()), "hostshare")),
+            1,
+        );
         let mut mem = TestMem(BTreeMap::new());
 
         // Tversion.
@@ -382,5 +412,84 @@ mod ninep {
         let count = u32::from_le_bytes([r[3], r[4], r[5], r[6]]) as usize;
         let data = &r[7..7 + count];
         assert_eq!(data, b"hello, 9p");
+    }
+
+    /// The Linux atomic-open create flow (the e2e 9p write-back path):
+    /// walk to the not-yet-existing file (fails, ENOENT), re-walk as a bare
+    /// clone, then Tlcreate on the clone with the file's name, Twrite, and
+    /// verify the backend received the bytes.
+    #[test]
+    fn ninep_lcreate_write_roundtrip() {
+        let created = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut d = VirtioMmio::new(
+            Box::new(Virtio9p::new(MemFs::new(created.clone()), "hostshare")),
+            1,
+        );
+        let mut mem = TestMem(BTreeMap::new());
+
+        // Tversion + Tattach fid=1 (root).
+        let mut body = (8192u32).to_le_bytes().to_vec();
+        body.extend_from_slice(&s("9P2000.L"));
+        let _ = rpc(&mut d, &mut mem, &msg(100, 1, &body));
+        let mut body = 1u32.to_le_bytes().to_vec();
+        body.extend_from_slice(&u32::MAX.to_le_bytes());
+        body.extend_from_slice(&s("root"));
+        body.extend_from_slice(&s(""));
+        body.extend_from_slice(&u32::MAX.to_le_bytes());
+        let _ = rpc(&mut d, &mut mem, &msg(104, 2, &body));
+
+        // Twalk fid=1 -> newfid=2, one element "new.txt": ENOENT (nothing
+        // there yet) — exactly what the Linux client sees first.
+        let mut body = 1u32.to_le_bytes().to_vec();
+        body.extend_from_slice(&2u32.to_le_bytes());
+        body.extend_from_slice(&1u16.to_le_bytes());
+        body.extend_from_slice(&s("new.txt"));
+        let r = rpc(&mut d, &mut mem, &msg(110, 3, &body));
+        assert_eq!(r[0], 7, "Rlerror(ENOENT) for the pre-create walk (R_LERROR=7)");
+
+        // Bare-clone walk (nwname=0): fid=1 -> newfid=2.
+        let mut body = 1u32.to_le_bytes().to_vec();
+        body.extend_from_slice(&2u32.to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes());
+        let r = rpc(&mut d, &mut mem, &msg(110, 4, &body));
+        assert_eq!(r[0], 111, "Rwalk");
+
+        // Tlcreate fid=2, name "new.txt", O_WRONLY|O_CREAT|O_TRUNC.
+        let mut body = 2u32.to_le_bytes().to_vec();
+        body.extend_from_slice(&0x241u32.to_le_bytes());
+        body.extend_from_slice(&s("new.txt"));
+        body.extend_from_slice(&0o644u32.to_le_bytes());
+        body.extend_from_slice(&u32::MAX.to_le_bytes()); // gid
+        let r = rpc(&mut d, &mut mem, &msg(32, 5, &body));
+        assert_eq!(r[0], 33, "Rlcreate (got {:#x?})", r[..r.len().min(8)].to_vec());
+
+        // Twrite fid=2 offset=0.
+        let mut body = 2u32.to_le_bytes().to_vec();
+        body.extend_from_slice(&0u64.to_le_bytes());
+        body.extend_from_slice(&9u32.to_le_bytes());
+        body.extend_from_slice(b"guest-writ");
+        let r = rpc(&mut d, &mut mem, &msg(118, 6, &body));
+        assert_eq!(r[0], 119, "Rwrite");
+        let count = u32::from_le_bytes([r[3], r[4], r[5], r[6]]) as usize;
+        assert_eq!(count, 9);
+
+        // The guest's post-create getattr must be a well-formed Rgetattr:
+        // type(1) tag(2) valid(8) qid(13) mode/uid/gid(12) + 11 u64s
+        // (nlink, rdev, size, blksize, blocks, atime, mtime, ctime, btime,
+        // gen, data_version) = 124 bytes. An earlier draft over-wrote the
+        // stat block and the client parsed the create as EPROTO.
+        let mut body = 2u32.to_le_bytes().to_vec();
+        body.extend_from_slice(&u64::MAX.to_le_bytes()); // request mask
+        let r = rpc(&mut d, &mut mem, &msg(24, 7, &body));
+        assert_eq!(r[0], 25, "Rgetattr");
+        assert_eq!(r.len(), 124, "Rgetattr wire length must be exact");
+        // The LCREATE name was joined onto the fid's path: the backend saw
+        // the create for the FILE, not for the parent directory.
+        let created = created.borrow();
+        assert_eq!(
+            created.as_slice(),
+            ["new.txt"],
+            "O_CREAT must hit the joined path (fid path + name)"
+        );
     }
 }

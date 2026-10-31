@@ -11,7 +11,8 @@
 #   - virtio-net: bring up eth0 (10.0.0.2) and ping the built-in ARP/ICMP
 #                 responder peer (10.0.0.1, vane-cli --net)
 set -euo pipefail
-cd "$(dirname "$0")/linux"
+BASE="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$BASE/harness/linux"
 
 src=initrd-virtio.gz
 [[ -f "$src" ]] || { echo "missing $src" >&2; exit 1; }
@@ -28,6 +29,11 @@ mkdir -p "$work/rootfs"
   exit 1
 }
 
+echo "== adding the extra modules (netfs/failover/net_failover) ==" >&2
+"$BASE/harness/fetch-modules.sh" >/dev/null
+mkdir -p "$work/rootfs/lib/modules"
+cp "$BASE"/harness/linux/modules-extra/*.ko "$work/rootfs/lib/modules/"
+
 echo "== installing the e2e /init ==" >&2
 cat > "$work/rootfs/init" <<'INITEOF'
 #!/bin/busybox sh
@@ -41,9 +47,10 @@ mount -t devtmpfs dev /dev 2>/dev/null
 
 echo "=== VANE E2E BOOT ==="
 # Dependency order proven on the R8 boot (deps before dependents), then the
-# 9p + net sets.
+# 9p + net sets (netfs underlies 9pnet; failover underlies net_failover
+# underlies virtio_net).
 for m in crc32c-cryptoapi crc16 virtio_mmio virtio_blk mbcache jbd2 ext4 \
-         9pnet 9pnet_virtio 9p virtio_net; do
+         netfs 9pnet 9pnet_virtio 9p failover net_failover virtio_net; do
   insmod "/lib/modules/$m.ko" 2>/dev/null || echo "WARN: insmod $m"
 done
 echo "=== E2E MODULES DONE ==="

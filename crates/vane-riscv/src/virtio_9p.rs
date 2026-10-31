@@ -340,12 +340,13 @@ impl<B: Host9p> Virtio9p<B> {
                         w.u64(meta.size);
                         w.u64(512); // blksize
                         w.u64(meta.size.div_ceil(512)); // blocks
-                        for _ in 0..8 {
-                            w.u64(0); // atime/mtime/ctime sec+nsec
+                        // EXACTLY six stat u64s: atime, mtime, ctime, btime,
+                        // gen, data_version (9P2000.L has no nsec fields;
+                        // over-writing the response made every post-create
+                        // getattr parse as EPROTO on the guest).
+                        for _ in 0..6 {
+                            w.u64(0);
                         }
-                        w.u64(0); // btime
-                        w.u64(0); // gen
-                        w.u64(0); // data_version
                     }
                     Err(e) => {
                         err(&mut w, e);
@@ -356,8 +357,14 @@ impl<B: Host9p> Virtio9p<B> {
             T_LOPEN | T_LCREATE => {
                 let fid = r.u32();
                 let flags = r.u32();
+                let mut name = String::new();
                 if mtype == T_LCREATE {
-                    let _name = r.str();
+                    // 9P2000.L: the fid points at the PARENT directory and
+                    // `name` is the file to create within it (the Linux
+                    // client's atomic-open walks to the parent, then sends
+                    // Tlcreate with the name — ignoring it opened the
+                    // directory itself and every guest create failed).
+                    name = r.str();
                     let _perm = r.u32();
                     let _gid = r.u32();
                 }
@@ -365,9 +372,20 @@ impl<B: Host9p> Virtio9p<B> {
                     err(&mut w, 2);
                     return w.b;
                 };
-                match self.backend.open(&f, flags) {
+                let path = if mtype == T_LCREATE {
+                    join(&f, &name)
+                } else {
+                    f.clone()
+                };
+                match self.backend.open(&path, flags) {
                     Ok(handle) => {
                         if let Some(fe) = self.fids.get_mut(&fid) {
+                            // The fid now NAMES the created file: the guest's
+                            // next getattr/read/write on it resolves against
+                            // this path (leaving the parent here made the
+                            // post-create getattr report a directory ->
+                            // EPROTO on every create).
+                            fe.path = path;
                             fe.handle = Some(handle);
                         }
                         ok(&mut w);
@@ -536,6 +554,13 @@ fn join(dir: &str, name: &str) -> String {
 impl<B: Host9p> VirtioDevice for Virtio9p<B> {
     fn device_id(&self) -> u32 {
         DEV_9P
+    }
+    // VIRTIO_9P_MOUNT_TAG (bit 0): modern 9pnet_virtio REQUIRES it — without
+    // the bit the Linux driver's probe returns -EINVAL ("probe with driver
+    // 9pnet_virtio failed with error -22") and the tag in the config space
+    // is never read, so the mount finds no channel.
+    fn features(&self) -> u32 {
+        1
     }
     fn num_queues(&self) -> usize {
         1
