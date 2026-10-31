@@ -75,6 +75,11 @@ struct Args {
     /// Host directory to share with the guest via virtio-9p (V3), mounted in
     /// the guest with `mount -t 9p -o trans=virtio hostshare <mountpoint>`.
     share: Option<String>,
+    /// Attach a virtio-net NIC backed by the built-in ARP/ICMP responder
+    /// (`EchoNet`): the guest (10.0.0.2) can ARP for and ping the host side
+    /// (10.0.0.1) through the full guest network stack — a deterministic
+    /// loopback for e2e tests, not a real network.
+    net: bool,
 }
 
 const RAM_BASE: u64 = 0x8000_0000;
@@ -222,6 +227,126 @@ impl vane::vane_riscv::virtio_blk::BlockBackend for FileBlock {
     }
 }
 
+/// A deterministic host-side "network simulator" for e2e tests: answers ARP
+/// requests for 10.0.0.1 and ICMP echo requests (ping) addressed to it. No
+/// real network — the guest exercises its full stack (driver → ARP → ICMP)
+/// against a fixed peer.
+struct EchoNet {
+    /// Frames awaiting delivery to the guest.
+    backlog: std::collections::VecDeque<Vec<u8>>,
+}
+
+impl EchoNet {
+    const MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x01];
+    /// The host-side IP the guest ARPs for / pings.
+    const HOST_IP: [u8; 4] = [10, 0, 0, 1];
+
+    fn new() -> Self {
+        EchoNet {
+            backlog: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Reply to an ARP request for HOST_IP.
+    fn reply_arp(&mut self, req: &[u8], requester_mac: &[u8], requester_ip: [u8; 4]) {
+        if req.len() < 28 {
+            return;
+        }
+        let mut r = vec![0u8; 42]; // eth(14) + arp(28)
+        r[0..6].copy_from_slice(requester_mac);
+        r[6..12].copy_from_slice(&Self::MAC);
+        r[12..14].copy_from_slice(&0x0806u16.to_be_bytes());
+        r[14..16].copy_from_slice(&req[0..2]); // htype
+        r[16..18].copy_from_slice(&req[2..4]); // pro
+        r[18] = req[4]; // hln
+        r[19] = req[5]; // pln
+        r[20..22].copy_from_slice(&2u16.to_be_bytes()); // oper = reply
+        r[22..28].copy_from_slice(&Self::MAC); // sha
+        r[28..32].copy_from_slice(&Self::HOST_IP); // spa
+        r[32..38].copy_from_slice(requester_mac); // tha
+        r[38..42].copy_from_slice(&requester_ip); // tpa
+        self.backlog.push_back(r);
+    }
+
+    /// Reply to an ICMP echo request.
+    fn reply_icmp_echo(&mut self, eth: &[u8], ip: &[u8], icmp: &[u8]) {
+        if icmp.len() < 8 || icmp[0] != 8 {
+            return; // only echo requests
+        }
+        let ihl = (ip[0] & 0x0f) as usize * 4;
+        let mut r = vec![0u8; 14 + ihl + icmp.len()];
+        // Ethernet: to the guest's MAC, from ours.
+        r[0..6].copy_from_slice(&eth[6..12]);
+        r[6..12].copy_from_slice(&Self::MAC);
+        r[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+        // IPv4 header: swap src/dst, recompute checksum.
+        r[14..14 + ihl].copy_from_slice(&ip[..ihl]);
+        r[14 + 12..14 + 16].copy_from_slice(&ip[14 + 16..14 + 20]); // src (was dst)
+        r[14 + 16..14 + 20].copy_from_slice(&ip[14 + 12..14 + 16]); // dst (was src)
+        r[14 + 10..14 + 12].copy_from_slice(&[0, 0]);
+        let sum = internet_checksum(&r[14..14 + ihl]);
+        r[14 + 10..14 + 12].copy_from_slice(&sum.to_be_bytes());
+        // ICMP: type 0 (echo reply), recompute checksum.
+        r[14 + ihl..].copy_from_slice(icmp);
+        r[14 + ihl] = 0;
+        r[14 + ihl + 2..14 + ihl + 4].copy_from_slice(&[0, 0]);
+        let sum = internet_checksum(&r[14 + ihl..]);
+        r[14 + ihl + 2..14 + ihl + 4].copy_from_slice(&sum.to_be_bytes());
+        self.backlog.push_back(r);
+    }
+}
+
+/// The internet checksum (ones-complement sum folded).
+fn internet_checksum(bytes: &[u8]) -> u16 {
+    let mut sum = 0u32;
+    for pair in bytes.chunks(2) {
+        let w = match pair.len() {
+            2 => ((pair[0] as u32) << 8) | pair[1] as u32,
+            _ => (pair[0] as u32) << 8,
+        };
+        sum += w;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+impl vane::vane_riscv::virtio_net::NetBackend for EchoNet {
+    fn send_frame(&mut self, frame: &[u8]) {
+        if frame.len() < 14 {
+            return;
+        }
+        let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
+        match ethertype {
+            0x0806 => {
+                // ARP: payload starts at 14. Reply to requests for HOST_IP.
+                let arp = &frame[14..];
+                if arp.len() >= 28
+                    && u16::from_be_bytes([arp[6], arp[7]]) == 1
+                    && arp[24..28] == Self::HOST_IP
+                {
+                    let ip = [arp[28], arp[29], arp[30], arp[31]]; // sender (guest) IP
+                    self.reply_arp(arp, &frame[6..12], ip);
+                }
+            }
+            0x0800 => {
+                let ip = &frame[14..];
+                if ip.len() >= 20 && (ip[0] >> 4) == 4 && ip[9] == 1 {
+                    let ihl = (ip[0] & 0x0f) as usize * 4;
+                    if ip.len() >= ihl {
+                        self.reply_icmp_echo(frame, ip, &ip[ihl..]);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    fn poll_recv(&mut self) -> Option<Vec<u8>> {
+        self.backlog.pop_front()
+    }
+}
+
 fn parse_args() -> Result<Args, String> {
     let mut elf_path = None;
     let mut entry = None;
@@ -241,6 +366,7 @@ fn parse_args() -> Result<Args, String> {
     let mut swap_key = None;
     let mut disk = None;
     let mut share = None;
+    let mut net = false;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -275,6 +401,7 @@ fn parse_args() -> Result<Args, String> {
             "--swap" => swap = Some(it.next().ok_or("--swap needs a value")?),
             "--disk" => disk = Some(it.next().ok_or("--disk needs a value")?),
             "--share" => share = Some(it.next().ok_or("--share needs a value")?),
+            "--net" => net = true,
             "--swap-key" => swap_key = Some(it.next().ok_or("--swap-key needs a value")?),
             "--resident" => {
                 let v = it.next().ok_or("--resident needs a value")?;
@@ -314,6 +441,7 @@ fn parse_args() -> Result<Args, String> {
         swap_key,
         disk,
         share,
+        net,
     })
 }
 
@@ -385,6 +513,15 @@ fn main() {
             reactor.add_virtio_device(Box::new(dev));
             virtio_dev_ids.push(vane::vane_riscv::virtio::DEV_9P);
             eprintln!("virtio-9p: {share_path} shared as 'hostshare'");
+        }
+        if args.net {
+            let dev = vane::vane_riscv::virtio_net::VirtioNet::new(
+                [0x52, 0x54, 0x00, 0x12, 0x34, 0x01],
+                Box::new(EchoNet::new()),
+            );
+            reactor.add_virtio_device(Box::new(dev));
+            virtio_dev_ids.push(vane::vane_riscv::virtio::DEV_NET);
+            eprintln!("virtio-net: echo NIC attached (guest 10.0.0.2, host peer 10.0.0.1)");
         }
 
         // M5: encrypted swap for the RAM region. Set up BEFORE loading images

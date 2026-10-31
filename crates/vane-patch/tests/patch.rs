@@ -1191,9 +1191,15 @@ fn bake_aot_undoes_partial_writes_on_bail() {
     // r5's PRE-instruction value: 7 (written straight into the register
     // cache, which lives in linear memory at host_ptr + regs_offset).
     let regs_base = host_ptr + REGS_OFF;
-    let mem = instance.get_memory(&store, "memory").expect("memory export");
-    mem.write(&mut store, (regs_base + 5 * 8) as usize, &7u64.to_le_bytes())
-        .expect("preset r5");
+    let mem = instance
+        .get_memory(&store, "memory")
+        .expect("memory export");
+    mem.write(
+        &mut store,
+        (regs_base + 5 * 8) as usize,
+        &7u64.to_le_bytes(),
+    )
+    .expect("preset r5");
 
     tramp
         .call(&mut store, (ret_ptr as i32, host_ptr as i32, 0))
@@ -1223,9 +1229,17 @@ fn bake_aot_undoes_partial_writes_on_bail() {
     );
     // The undo log truncated back to the base (nothing pending survives).
     let lenb = read(UNDO_LOGLEN, 4);
-    assert_eq!(u32::from_le_bytes(lenb.try_into().unwrap()), 0, "undo log empty");
+    assert_eq!(
+        u32::from_le_bytes(lenb.try_into().unwrap()),
+        0,
+        "undo log empty"
+    );
     let markb = read(UNDO_MARK, 4);
-    assert_eq!(u32::from_le_bytes(markb.try_into().unwrap()), 0, "base is 0");
+    assert_eq!(
+        u32::from_le_bytes(markb.try_into().unwrap()),
+        0,
+        "base is 0"
+    );
 }
 
 /// The benign control: the same shape without the trapping address — the
@@ -1274,7 +1288,9 @@ fn bake_aot_commits_undo_at_boundaries() {
         .call(&mut store, (ret_ptr as i32, host_ptr as i32, 0))
         .expect("the trampoline should run without trapping");
 
-    let mem = instance.get_memory(&store, "memory").expect("memory export");
+    let mem = instance
+        .get_memory(&store, "memory")
+        .expect("memory export");
     let read = |addr: u32, len: usize| -> Vec<u8> {
         let mut buf = vec![0u8; len];
         mem.read(&store, addr as usize, &mut buf)
@@ -1296,7 +1312,11 @@ fn bake_aot_commits_undo_at_boundaries() {
     );
     // The boundary committed the undo entry (log truncated back to base 0).
     let lenb = read(UNDO_LOGLEN, 4);
-    assert_eq!(u32::from_le_bytes(lenb.try_into().unwrap()), 0, "undo log committed");
+    assert_eq!(
+        u32::from_le_bytes(lenb.try_into().unwrap()),
+        0,
+        "undo log committed"
+    );
 }
 
 /// The async bake (PLAN_ASYNC_JIT Phase B): memory ops bind to the
@@ -1347,7 +1367,9 @@ fn bake_aot_async_runs_traces_in_wasmi() {
         .call(&mut store, (ret_ptr as i32, host_ptr as i32, 0))
         .expect("the trampoline should run without trapping");
 
-    let mem = instance.get_memory(&store, "memory").expect("memory export");
+    let mem = instance
+        .get_memory(&store, "memory")
+        .expect("memory export");
     let read = |addr: u32, len: usize| -> Vec<u8> {
         let mut buf = vec![0u8; len];
         mem.read(&store, addr as usize, &mut buf)
@@ -1394,7 +1416,11 @@ fn asyncify_module_reattaches_and_audits() {
     // asyncify is known to need repair for) but is otherwise valid WASM.
     let strip_customs = |wasm: &[u8]| -> Result<Vec<u8>, String> {
         let mut m = walrus::Module::from_buffer(wasm).map_err(|e| e.to_string())?;
-        let names: Vec<String> = m.customs.iter().map(|(_, s)| s.name().to_string()).collect();
+        let names: Vec<String> = m
+            .customs
+            .iter()
+            .map(|(_, s)| s.name().to_string())
+            .collect();
         for n in names {
             m.customs.remove_raw(&n);
         }
@@ -1405,9 +1431,11 @@ fn asyncify_module_reattaches_and_audits() {
     let back = read_traces_section(&out).expect("read traces");
     assert_eq!(back.len(), 1);
     assert_eq!(back[0].0, 0x1000);
-    assert!(audit_no_stripping(&with_traces, &out)
-        .expect("audit")
-        .is_clean());
+    assert!(
+        audit_no_stripping(&with_traces, &out)
+            .expect("audit")
+            .is_clean()
+    );
 
     // Tool failure propagates.
     let err = vane_patch::asyncify_module(&with_traces, |_| Err("wasm-opt missing".into()))
