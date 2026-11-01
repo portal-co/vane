@@ -21,6 +21,9 @@
 use wasm_bindgen::prelude::*;
 
 use vane::vane_riscv::machine::{self, PowerAction};
+use spin::Mutex;
+use vane::vane_riscv::display::{DisplaySurface, InputEvent};
+use vane::vane_arch::{self, Shared};
 use vane::Reactor;
 use vane_swap::{PageCache, SwapError, SwapStore, NONCE_BYTES, RECORD_BYTES};
 
@@ -131,6 +134,10 @@ impl SwapStore for JsSwapStore {
 pub struct WebMachine {
     reactor: Reactor,
     pc: u64,
+    /// Guest display seam: framebuffer + damage + input queue. The shell
+    /// (this surface) drains and injects; the future virtio-display device
+    /// will take its own `Shared` clone to produce from the guest side.
+    display: Shared<Mutex<DisplaySurface>>,
 }
 
 #[wasm_bindgen]
@@ -143,6 +150,7 @@ impl WebMachine {
         WebMachine {
             reactor,
             pc: RAM_BASE,
+            display: vane::vane_arch::shared_new(Mutex::new(DisplaySurface::new(1280, 720, 64))),
         }
     }
 
@@ -242,6 +250,56 @@ impl WebMachine {
     #[wasm_bindgen(js_name = "uartInput")]
     pub fn uart_input(&self, bytes: &[u8]) {
         self.reactor.with_machine(|m| m.uart.push_rx(bytes));
+    }
+
+    /// Drain accumulated display damage: `{width, height, regions:
+    /// [{x, y, w, h, pixels}]}` with `pixels` the RGBA8888 subimage rows
+    /// (texSubImage2D-shaped). Empty `regions` = nothing to render. Each
+    /// call refills the guest's frame credits, so a runaway guest stalls
+    /// between frames instead of flooding the host.
+    #[wasm_bindgen(js_name = "displayDrain")]
+    pub fn display_drain(&self) -> Result<JsValue, JsValue> {
+        use wasm_bindgen::JsCast;
+        let mut surface = self.display.lock();
+        let mut regions: Vec<JsValue> = Vec::with_capacity(surface.pending_len());
+        for (r, px) in surface.drain() {
+            let o = js_sys::Object::new();
+            js_sys::Reflect::set(&o, &"x".into(), &r.x.into())?;
+            js_sys::Reflect::set(&o, &"y".into(), &r.y.into())?;
+            js_sys::Reflect::set(&o, &"w".into(), &r.w.into())?;
+            js_sys::Reflect::set(&o, &"h".into(), &r.h.into())?;
+            js_sys::Reflect::set(&o, &"pixels".into(), &js_sys::Uint8Array::from(px.as_slice()))?;
+            regions.push(o.into());
+        }
+        drop(surface);
+        let out = js_sys::Object::new();
+        js_sys::Reflect::set(&out, &"width".into(), &(1280u32).into())?;
+        js_sys::Reflect::set(&out, &"height".into(), &(720u32).into())?;
+        js_sys::Reflect::set(&out, &"regions".into(), &js_sys::Array::from_iter(regions))?;
+        Ok(out.into())
+    }
+
+    /// Debug hook (guest-less): fill the framebuffer with a deterministic
+    /// test pattern and mark the full frame damaged, so a shell fixture can
+    /// exercise the entire display pipeline before the virtio-display
+    /// device exists. The next `displayDrain` returns it.
+    #[wasm_bindgen(js_name = "displayTestPattern")]
+    pub fn display_test_pattern(&self) {
+        self.display.lock().fill_test_pattern();
+    }
+
+    /// Inject a keyboard event (producer's key code; the guest device maps
+    /// it when it lands). `pressed` = key down.
+    #[wasm_bindgen(js_name = "inputKey")]
+    pub fn input_key(&self, code: u32, pressed: bool) {
+        self.display.lock().push_input(InputEvent::Key { code, pressed });
+    }
+
+    /// Inject a pointer event. `kind`: 0 = move, 1 = button down, 2 = button
+    /// up; `buttons` is the live button bitmask.
+    #[wasm_bindgen(js_name = "inputPointer")]
+    pub fn input_pointer(&self, x: u32, y: u32, buttons: u8, kind: u8) {
+        self.display.lock().push_input(InputEvent::Pointer { x, y, buttons, kind });
     }
 
     /// Swap accounting (resident/faults/evictions/bytes/integrity failures).

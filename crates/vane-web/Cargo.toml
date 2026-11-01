@@ -10,6 +10,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+spin = { workspace = true }
 vane = { path = "../vane", default-features = false }
 vane-swap = { path = "../vane-swap" }
 wasm-bindgen = "0.2"

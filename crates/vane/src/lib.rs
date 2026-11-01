@@ -31,6 +31,7 @@ pub fn trace_dispatch_counters() -> (u64, u64, u64) {
     vane_arch::trace_dispatch_counters()
 }
 /// Re-exported for host/test access to the privileged hart state.
+pub use vane_arch;
 pub use vane_riscv;
 pub use vane_riscv::hint;
 use vane_riscv::template::Params;

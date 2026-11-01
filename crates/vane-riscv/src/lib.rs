@@ -20,6 +20,7 @@ pub mod state {
     }
 }
 
+pub mod display;
 pub mod fdt;
 pub mod fp;
 pub mod hart;
