@@ -290,6 +290,7 @@ fn vane_native_trace_validates() {
         check_code_func: 2,
         ecall_func: 3,
         undo_shims: None,
+        tail_call: None,
     };
     // A trace exercising regs (linear memory), a memory op (shim), a CheckCode
     // (shim), and the TailCall (return to the dispatch loop).
@@ -386,6 +387,7 @@ fn vane_native_trampoline_validates() {
         check_code_func: 2,
         ecall_func: 3,
         undo_shims: None,
+        tail_call: None,
     };
     let trace = vec![
         StackOp::CheckCode {
@@ -485,6 +487,10 @@ const AOT_ADDR: u32 = 65792;
 const REGS_OFF: u32 = 64;
 /// A seeded u64 the test trace loads through the `mem_load` shim.
 const SEED_ADDR: u32 = 0x2000;
+/// The one-shot direct-tail lookup cell: 0 = "no chaining" (the shim
+/// returns -1); otherwise `target_idx + 1`, consumed (zeroed) on read so a
+/// chained trace's own TailCall exits normally.
+const LOOKUP_ADDR: u32 = 0x2400;
 // ── The synthetic host's undo-log cells (bss addresses; the interpreter's
 // real `LocalStackHost` keeps the log in Rust, the stub models it in linear
 // memory so the exact protocol is exercised end-to-end).
@@ -534,6 +540,7 @@ fn interp_module_with_async(async_shims: bool) -> Vec<u8> {
         .ty()
         .function([ValType::I32, ValType::I32, ValType::I64], []); // 6: vane_record_undo
     types.ty().function([ValType::I32], [ValType::I32]); // 7: vane_set_undo_base
+    types.ty().function([ValType::I32], [ValType::I32]); // 8: vane_tail_lookup
 
     let mut funcs = FunctionSection::new();
     for ty in 0..8u32 {
@@ -544,6 +551,7 @@ fn interp_module_with_async(async_shims: bool) -> Vec<u8> {
         funcs.function(2); // 8: vane_mem_load_async
         funcs.function(3); // 9: vane_mem_store_async
     }
+    funcs.function(8); // tail_lookup (always present: the direct-tail bake resolves it)
 
     let mut tables = TableSection::new();
     tables.table(TableType {
@@ -608,6 +616,12 @@ fn interp_module_with_async(async_shims: bool) -> Vec<u8> {
     .into_iter()
     .chain(async_shims.then_some("vane_mem_load_async"))
     .chain(async_shims.then_some("vane_mem_store_async"))
+    // The direct-tail lookup shim is exported LAST (func index 10 with the
+    // async shims, 8 without — computed below from the export order).
+    .chain(async_shims.then_some("__pad_async0"))
+    .chain(async_shims.then_some("__pad_async1"))
+    .chain(core::iter::once("vane_tail_lookup"))
+    .filter(|n| !n.starts_with("__pad"))
     .enumerate()
     {
         exports.export(name, ExportKind::Func, i as u32);
@@ -624,7 +638,8 @@ fn interp_module_with_async(async_shims: bool) -> Vec<u8> {
     f.instruction(&Instruction::I32Const(REGS_OFF as i32));
     f.instruction(&Instruction::End);
     code.function(&f);
-    // 1: vane_make_exit(tag, pc, ret_ptr): *(i32*)ret = tag; *(i64*)(ret+8) = pc
+
+       // 1: vane_make_exit(tag, pc, ret_ptr): *(i32*)ret = tag; *(i64*)(ret+8) = pc
     let mut f = wasm_encoder::Function::new([]);
     f.instruction(&Instruction::LocalGet(2));
     f.instruction(&Instruction::LocalGet(0));
@@ -956,6 +971,30 @@ fn interp_module_with_async(async_shims: bool) -> Vec<u8> {
         &ConstExpr::i32_const(AOT_ADDR as i32),
         [0xffu8, 0xff, 0xff, 0xff],
     );
+    // 10: vane_tail_lookup(pc) -> idx: the one-shot LOOKUP cell (`idx + 1`,
+    // or 0 = "no chaining"). Zeroed on read so the chained trace's own
+    // TailCall exits normally. The real interpreter shim consults the
+    // host's compiled-trace registry with the hop-budget/dirty/hooks
+    // contract; this stub models the registry hit/miss only.
+    let mut f = wasm_encoder::Function::new([]);
+    f.instruction(&Instruction::I32Const(LOOKUP_ADDR as i32));
+    f.instruction(&Instruction::I32Load(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    // zero the cell (one-shot)
+    f.instruction(&Instruction::I32Const(LOOKUP_ADDR as i32));
+    f.instruction(&Instruction::I32Const(0));
+    f.instruction(&Instruction::I32Store(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::I32Const(1));
+    f.instruction(&Instruction::I32Sub);
+    f.instruction(&Instruction::End);
+    code.function(&f);
 
     let mut module = Module::new();
     module
@@ -1441,4 +1480,90 @@ fn asyncify_module_reattaches_and_audits() {
     let err = vane_patch::asyncify_module(&with_traces, |_| Err("wasm-opt missing".into()))
         .expect_err("tool failure");
     assert!(format!("{err:?}").contains("wasm-opt missing"));
+}
+
+/// The DIRECT-TAIL chain gate: two baked traces; A's TailCall looks up B's
+/// trampoline through the (one-shot) lookup shim and calls it with the sret
+/// scratch — B runs entirely, and B's exit propagates back through A's pack
+/// fn to the ORIGINAL trampoline's ret_ptr. Proves shim lookup -> dynamic
+/// call_indirect -> chained execution -> exit propagation with an ordinary
+/// call (no tail-call proposal needed; chain depth is bounded by the hop
+/// budget).
+#[test]
+fn bake_aot_direct_tail_chains_in_wasmi() {
+    let target = interp_module();
+    // A: CheckCode; reg1 = 0xAAA; TailCall (chained).
+    let trace_a = vec![
+        StackOp::CheckCode {
+            addr: 0x100,
+            expected: vec![].into(),
+            miss_label: String::new(),
+        },
+        StackOp::PushImm(0xAAA),
+        StackOp::StoreReg(1),
+        StackOp::PushImm(0x2000), // B's pc (the shim's registry entry)
+        StackOp::TailCall,
+    ];
+    // B: CheckCode; reg2 = 0x5B5B; TailCall -> normal exit (the lookup cell
+    // is one-shot, so B's own TailCall exits to the dispatch loop).
+    let trace_b = vec![
+        StackOp::CheckCode {
+            addr: 0x100,
+            expected: vec![].into(),
+            miss_label: String::new(),
+        },
+        StackOp::PushImm(0x5B5B),
+        StackOp::StoreReg(2),
+        StackOp::PushImm(0x8000),
+        StackOp::TailCall,
+    ];
+    let baked = vane_patch::bake_aot(&target, vec![(0x1000, trace_a), (0x2000, trace_b)])
+        .expect("bake");
+    // entries: [(0x1000, trampA), (0x2000, trampB)] — table base 1.
+    assert_eq!(baked.entries, vec![(0x1000, 1), (0x2000, 2)]);
+
+    let mut config = wasmi::Config::default();
+    config.wasm_multi_memory(false);
+    let engine = wasmi::Engine::new(&config);
+    let module =
+        wasmi::Module::new(&engine, &baked.wasm[..]).expect("baked module validates in wasmi");
+    let mut store = wasmi::Store::new(&engine, ());
+    let linker = wasmi::Linker::<()>::new(&engine);
+    let instance = linker
+        .instantiate_and_start(&mut store, &module)
+        .expect("instantiate");
+
+    // Wire the one-shot lookup cell: trampB + 1 (0 = "no chaining").
+    let mem = instance.get_memory(&store, "memory").expect("memory");
+    mem.write(&mut store, LOOKUP_ADDR as usize, &[3u8]).expect("lookup cell");
+
+    let host_ptr: u32 = 2048;
+    let ret_ptr: u32 = 4096;
+    let tramp_a = instance
+        .get_typed_func::<(i32, i32, i32), ()>(&store, "vane_tramp_1000")
+        .expect("trampA export");
+    // Trampoline ABI: (ret_ptr, host_ptr, ct) — ret_ptr FIRST.
+    tramp_a
+        .call(&mut store, (ret_ptr as i32, host_ptr as i32, 0))
+        .expect("chained trace runs");
+
+    // The register cache lives at host_ptr + regs_offset (reg r at +r*8).
+    // A's store landed...
+    let mut reg1 = [0u8; 8];
+    mem.read(&store, (host_ptr + REGS_OFF + 8) as usize, &mut reg1)
+        .expect("reg1");
+    assert_eq!(u64::from_le_bytes(reg1), 0xAAA, "trace A ran");
+    // ...AND B's store landed too — the chain executed the whole next trace.
+    let mut reg2 = [0u8; 8];
+    mem.read(&store, (host_ptr + REGS_OFF + 16) as usize, &mut reg2)
+        .expect("reg2");
+    assert_eq!(u64::from_le_bytes(reg2), 0x5B5B, "trace B ran via direct tail");
+    // B's exit propagated back through A's pack fn to the ORIGINAL ret_ptr:
+    // (TAG_TAILCALL, 0x8000) — B's own TailCall, not A's chained one.
+    let mut tag = [0u8; 4];
+    let mut pc = [0u8; 8];
+    mem.read(&store, ret_ptr as usize, &mut tag).expect("tag");
+    mem.read(&store, (ret_ptr + 8) as usize, &mut pc).expect("pc");
+    assert_eq!(u32::from_le_bytes(tag), 0, "TAG_TAILCALL");
+    assert_eq!(u64::from_le_bytes(pc), 0x8000, "B's tail target");
 }

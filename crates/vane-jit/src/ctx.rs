@@ -56,6 +56,19 @@ pub type ShimIntToFp = unsafe extern "C" fn(u8, u8, u8, u64) -> u64;
 pub type ShimFpToInt = unsafe extern "C" fn(u8, u8, u8, u64) -> u64;
 pub type ShimFpConvert = unsafe extern "C" fn(u8, u8, u64) -> u64;
 
+/// A direct tail-call target, returned by the tail-lookup shim in two
+/// registers (`#[repr(C)]` struct of two `usize` — aarch64 SysV returns
+/// x0/x1): `ct` is the target's `&CompiledTrace` (passed as the callee's
+/// second arg), `f` its fn pointer (jumped to with the host pointer in
+/// x0). `(0, 0)` means "not available — exit to the dispatch loop".
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TailTarget {
+    pub ct: usize,
+    pub f: usize,
+}
+pub type ShimTailLookup = unsafe extern "C" fn(ctx: *mut TraceCtx, pc: u64) -> TailTarget;
+
 /// The context block a native trace operates on.
 #[repr(C)]
 pub struct TraceCtx {
@@ -111,6 +124,10 @@ pub struct TraceCtx {
     pub pending_c: u64,
     /// The fulfilled op's result, read by the shim on resume.
     pub pending_result: u64,
+    /// Direct tail-call lookup (compiled -> compiled chaining). Appended
+    /// last so the offsets the codegen bakes via `offset_of!` for the
+    /// fields above are unchanged.
+    pub tail_lookup: ShimTailLookup,
 }
 
 /// Pending-op tags written by the async shims into `TraceCtx::pending_op`.

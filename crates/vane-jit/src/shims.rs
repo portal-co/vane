@@ -10,7 +10,7 @@
 //! native call, and the generated code is paused (in the `blr`) while a shim
 //! runs — no concurrent access.
 
-use crate::ctx::TraceCtx;
+use crate::ctx::{TailTarget, TraceCtx};
 use vane_arch::interp::{
     float_binary, float_convert, float_eq, float_lt, float_to_int, float_unary, float_unordered,
     int_to_float, LocalReactor, LocalStackHost, PrivOutcome,
@@ -252,6 +252,20 @@ pub fn build_ctx<R: LocalReactor>(host: &mut LocalStackHost<R>) -> TraceCtx {
         core::ptr::addr_of_mut!((*p).int_to_fp).write(shim_int_to_fp);
         core::ptr::addr_of_mut!((*p).fp_to_int).write(shim_fp_to_int);
         core::ptr::addr_of_mut!((*p).fp_convert).write(shim_fp_convert);
+        core::ptr::addr_of_mut!((*p).tail_lookup).write(shim_tail_lookup::<R>);
         u.assume_init()
     }
+}
+
+/// Direct tail-call lookup: compiled-trace -> compiled-trace chaining.
+/// Returns the target's `(ct, fn)` in two registers; `(0, 0)` means "not
+/// available — take the normal exit" (budget exhausted / code dirty /
+/// hooks / unregistered target — the host decides; see
+/// `LocalReactor::lr_direct_tail_target`).
+pub unsafe extern "C" fn shim_tail_lookup<R: LocalReactor>(
+    ctx: *mut TraceCtx,
+    pc: u64,
+) -> TailTarget {
+    let (ct, f) = host::<R>(ctx).reactor.lr_direct_tail_target(pc);
+    TailTarget { ct, f }
 }

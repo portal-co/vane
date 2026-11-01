@@ -869,6 +869,26 @@ pub trait LocalReactor {
     fn lr_has_local_regfile(&self) -> bool {
         false
     }
+    /// Direct tail-call lookup (compiled-trace -> compiled-trace chaining):
+    /// given the tail target pc, return `(target_fn, target_ct)` so JIT'd
+    /// code can jump straight into the next compiled trace instead of
+    /// exiting to the Rust dispatch loop. `(0, 0)` means "no direct tail
+    /// available — exit normally" and MUST be returned when any of:
+    ///
+    /// - the hop budget is exhausted (bounds the chain so the dispatch
+    ///   loop's interrupt delivery, fuel accounting and io ticks keep
+    ///   their cadence),
+    /// - the code is dirty (a fence.i/satp invalidation must drain
+    ///   through the loop before any further code executes),
+    /// - hooks are installed (hook events need the loop's per-trace
+    ///   visibility),
+    /// - the target is not a registered compiled trace.
+    ///
+    /// The default returns `(0, 0)` (no direct tailing) so hosts without a
+    /// compiled-trace registry are unaffected.
+    fn lr_direct_tail_target(&mut self, _pc: u64) -> (usize, usize) {
+        (0, 0)
+    }
     /// Byte width of a [`MemWidth`].
     fn lr_width_bytes(width: MemWidth) -> u64 {
         match width {

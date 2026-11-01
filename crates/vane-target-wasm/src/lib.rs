@@ -168,6 +168,34 @@ pub struct VaneAbiConfig {
     /// [`UndoShims::set_undo_base_func`] when the boundary check passes; on a
     /// trap the host rolls back exactly the current instruction's writes.
     pub undo_shims: Option<UndoShims>,
+    /// Direct tail-call chaining (compiled -> compiled). When `Some`, the
+    /// `TailCall` lowering asks the interpreter-side shim for the target's
+    /// funcref-table index and `return_call_indirect`s straight into its
+    /// trampoline (frame-replacing) instead of returning
+    /// `(TAG_TAILCALL, target)` to the dispatch loop. The shim returns -1
+    /// when chaining is not allowed (hop budget / code dirty / hooks /
+    /// uncompiled target), and the lowering falls back to the normal exit.
+    pub tail_call: Option<TailCallShims>,
+}
+
+/// The direct tail-call shims, resolved by the patcher from the
+/// interpreter's exports.
+#[derive(Clone, Copy, Debug)]
+pub struct TailCallShims {
+    /// `(pc: i32) -> (idx: i32)` — the target trace's trampoline table
+    /// index, or -1 to take the normal exit.
+    pub lookup_func: u32,
+    /// The `VANE_CURRENT_HOST` global's index: the pack fn reads the host
+    /// pointer the trampoline stashed there to pass as the callee's first
+    /// argument.
+    pub host_global: u32,
+    /// The funcref type of the `CompiledTraceFn` trampolines
+    /// `(i32, i32, i32) -> ()` — the `call_indirect` signature.
+    pub trampoline_type: u32,
+    /// Linear-memory address of a 16-byte sret scratch the sentinel hands
+    /// the target trampoline; the calling pack fn reads the resulting
+    /// `(tag, pc)` back from it and returns them.
+    pub ret_scratch_addr: u32,
 }
 
 /// The undo (trap-atomicity) shim function indices, resolved by the patcher

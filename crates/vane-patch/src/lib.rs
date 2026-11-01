@@ -20,11 +20,12 @@
 
 pub use vane_riscv::stackop_ser::{deserialize_trace_cache, serialize_trace_cache};
 use vane_target_core::StackOp;
-use vane_target_wasm::{UndoShims, VaneAbiConfig, WasmAbiConfig};
+use vane_target_wasm::{TailCallShims, UndoShims, VaneAbiConfig, WasmAbiConfig};
 
 use walrus::ir::{
-    BinaryOp, Binop, Block, Br, Call, Const, Drop, IfElse, InstrSeqType, Load, LoadKind, LocalGet,
-    LocalSet, LocalTee, Loop, MemArg, Return, Store, StoreKind, UnaryOp, Unop, Unreachable, Value,
+    BinaryOp, Binop, Block, Br, Call, CallIndirect, Const, Drop, GlobalGet, IfElse, InstrSeqType,
+    Load, LoadKind, LocalGet, LocalSet, LocalTee, Loop, MemArg, Return, Store, StoreKind, UnaryOp,
+    Unop, Unreachable, Value,
 };
 use walrus::{
     DataKind, ElementItems, ElementKind, ExportItem, FunctionBuilder, GlobalKind, LocalId,
@@ -685,6 +686,9 @@ const BAKE_CHECK_CODE: usize = 2;
 const BAKE_ECALL: usize = 3;
 const BAKE_RECORD_UNDO: usize = 4;
 const BAKE_SET_UNDO_BASE: usize = 5;
+/// Direct tail-call lookup shim (`vane_tail_lookup`): slot 6 in the pack
+/// fns' shim index space (see `VaneAbiConfig::tail_call`).
+const BAKE_TAIL_LOOKUP: usize = 6;
 
 /// The result of a successful [`bake_aot`].
 #[derive(Debug, Clone)]
@@ -814,6 +818,8 @@ fn bake_aot_impl(
     let record_undo = exported_func(&module, "vane_record_undo")?;
     let set_undo_base = exported_func(&module, "vane_set_undo_base")?;
     let current_host_addr = exported_global_addr(&module, "VANE_CURRENT_HOST")?;
+    let tail_lookup = exported_func(&module, "vane_tail_lookup")?;
+    let current_host_global = exported_global_id(&module, "VANE_CURRENT_HOST")?;
     let aot_trace_addr = exported_global_addr(&module, "VANE_AOT_TRACE")?;
     let async_op_addr = if async_shims {
         Some(exported_global_addr(&module, "VANE_ASYNC_OP")?)
@@ -829,6 +835,12 @@ fn bake_aot_impl(
     // (a Rust tuple return is sret, NOT multi-value, so the pack fn's
     // `(addr) -> (tag, pc)` shim must be generated here).
     let check_buf = scratch.alloc(16);
+    // The direct-tail sret scratch: the sentinel calls the TARGET's
+    // trampoline with this as its ret_ptr; the resulting (tag, pc) is read
+    // back and returned by the calling pack fn (an ordinary call — the
+    // chain depth is bounded by the hop budget, so no tail-call proposal
+    // is required).
+    let tail_ret_buf = scratch.alloc(16);
     let check_code = build_check_code_wrapper(&mut module, check_code_impl, check_buf, memory)?;
 
     // ── Pack fns + trampolines, one pair per trace ────────────────────────
@@ -846,6 +858,17 @@ fn bake_aot_impl(
             record_undo_func: BAKE_RECORD_UNDO as u32,
             set_undo_base_func: BAKE_SET_UNDO_BASE as u32,
         }),
+        // Direct tail chaining: the renderer emits a sentinel
+        // call_indirect; the bake substitutes the real global/type/table
+        // ids and the post-encode splice makes the opcode a true tail
+        // call. The placeholder indices here are never encoded — the bake
+        // lowers CallIndirect/GlobalGet by kind, not by index.
+        tail_call: Some(TailCallShims {
+            lookup_func: BAKE_TAIL_LOOKUP as u32,
+            host_global: 0,
+            trampoline_type: 0,
+            ret_scratch_addr: tail_ret_buf,
+        }),
     };
     let shims = [
         mem_load,
@@ -854,12 +877,34 @@ fn bake_aot_impl(
         ecall,
         record_undo,
         set_undo_base,
+        tail_lookup,
     ];
     let old_table_size = module.tables.get(table).initial;
     let mut entries = Vec::with_capacity(traces.len());
     let mut tramp_ids = Vec::with_capacity(traces.len());
     for (pc, ops) in traces {
-        let pack_fn = build_pack_fn(&mut module, ops, abi, memory, &shims)?;
+        // The trampolines' funcref signature `(ret_ptr, host, ct) -> ()`:
+        // created once, referenced by the direct-tail call_indirect
+        // sentinels (structurally identical to build_trampoline's type —
+        // WASM type matching is structural, so a duplicate entry is valid).
+        let trampoline_ty = module.types.add(
+            &[
+                walrus::ValType::I32,
+                walrus::ValType::I32,
+                walrus::ValType::I32,
+            ],
+            &[],
+        );
+        let pack_fn = build_pack_fn(
+            &mut module,
+            ops,
+            abi,
+            memory,
+            &shims,
+            current_host_global,
+            trampoline_ty,
+            table,
+        )?;
         let tramp = build_trampoline(
             &mut module,
             pack_fn,
@@ -1010,6 +1055,26 @@ fn exported_func(module: &Module, name: &str) -> Result<walrus::FunctionId, Patc
                     "export `{name}` is not a function"
                 ))),
             };
+        }
+    }
+    Err(PatchError::Parse(format!(
+        "target module missing export `{name}`"
+    )))
+}
+
+/// Look up an exported global's walrus id (the direct-tail lowering reads
+/// `VANE_CURRENT_HOST` through the global, not its baked address).
+fn exported_global_id(module: &Module, name: &str) -> Result<walrus::GlobalId, PatchError> {
+    for e in module.exports.iter() {
+        if e.name == name {
+            match e.item {
+                ExportItem::Global(id) => return Ok(id),
+                _ => {
+                    return Err(PatchError::Parse(format!(
+                        "export `{name}` is not a global"
+                    )))
+                }
+            }
         }
     }
     Err(PatchError::Parse(format!(
@@ -1216,12 +1281,16 @@ fn cur_seq(frames: &[Frame], entry: walrus::ir::InstrSeqId) -> walrus::ir::Instr
 /// only ever branches to loops). The trailing `unreachable` matches
 /// [`compile_trace_vane`] (a finite trace's nested TailCall `return` leaves
 /// the implicit final return unreachable).
+#[allow(clippy::too_many_arguments)]
 fn build_pack_fn(
     module: &mut Module,
     ops: Vec<StackOp>,
     abi: VaneAbiConfig,
     memory: MemoryId,
-    shims: &[walrus::FunctionId; 6],
+    shims: &[walrus::FunctionId; 7],
+    host_global: walrus::GlobalId,
+    trampoline_ty: walrus::TypeId,
+    table: walrus::TableId,
 ) -> Result<walrus::FunctionId, PatchError> {
     let mut fb = FunctionBuilder::new(
         &mut module.types,
@@ -1262,6 +1331,9 @@ fn build_pack_fn(
             shims,
             memory,
             &mut module.types,
+            host_global,
+            trampoline_ty,
+            table,
         )?;
     }
     debug_assert!(
@@ -1280,7 +1352,7 @@ fn local_at(locals: &[LocalId], index: u32) -> Result<LocalId, PatchError> {
         .ok_or_else(|| PatchError::Parse(format!("renderer references unknown local {index}")))
 }
 
-fn shim_at(shims: &[walrus::FunctionId; 6], index: u32) -> Result<walrus::FunctionId, PatchError> {
+fn shim_at(shims: &[walrus::FunctionId; 7], index: u32) -> Result<walrus::FunctionId, PatchError> {
     shims
         .get(index as usize)
         .copied()
@@ -1334,15 +1406,19 @@ fn memarg_to_walrus(m: &wasmparser::MemArg) -> MemArg {
 /// lowering (the renderer's set is closed — see the ops enumerated in
 /// `render_with_abi`).
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 fn lower_op(
     fb: &mut FunctionBuilder,
     frames: &mut Vec<Frame>,
     entry: walrus::ir::InstrSeqId,
     op: wasmparser::Operator<'_>,
     locals: &[LocalId],
-    shims: &[walrus::FunctionId; 6],
+    shims: &[walrus::FunctionId; 7],
     memory: MemoryId,
     types: &mut ModuleTypes,
+    host_global: walrus::GlobalId,
+    trampoline_ty: walrus::TypeId,
+    table: walrus::TableId,
 ) -> Result<(), PatchError> {
     use wasmparser::Operator as O;
     match op {
@@ -1486,6 +1562,41 @@ fn lower_op(
         O::Call { function_index } => {
             let func = shim_at(shims, function_index)?;
             fb.instr_seq(cur_seq(frames, entry)).instr(Call { func });
+            Ok(())
+        }
+        // The direct tail-call sentinel: the renderer emits this ONE
+        // call_indirect (the pack fns have no others) and the post-encode
+        // splice rewrites the opcode to return_call_indirect (0x11 -> 0x13)
+        // inside the baked function bodies.
+        O::CallIndirect {
+            type_index: _,
+            table_index: _,
+        } => {
+            let seq = cur_seq(frames, entry);
+            fb.instr_seq(seq).instr(CallIndirect {
+                ty: trampoline_ty,
+                table,
+            });
+            Ok(())
+        }
+        // The renderer reads VANE_CURRENT_HOST (the host pointer the
+        // trampoline stored) as global-get + i32.load: the global holds the
+        // static's ADDRESS, the live host pointer sits at it.
+        O::GlobalGet { global_index: _ } => {
+            let seq = cur_seq(frames, entry);
+            fb.instr_seq(seq).instr(GlobalGet { global: host_global });
+            Ok(())
+        }
+        O::I32Load { memarg } if memarg.align == 2 && memarg.offset == 0 => {
+            // (overlaps the generic I32Load arm below only if align != 2 —
+            // this is the VANE_CURRENT_HOST dereference; keep the generic
+            // load behavior, same encoding)
+            let seq = cur_seq(frames, entry);
+            fb.instr_seq(seq).instr(Load {
+                memory,
+                kind: LoadKind::I32 { atomic: false },
+                arg: memarg_to_walrus(&memarg),
+            });
             Ok(())
         }
         O::Drop => {

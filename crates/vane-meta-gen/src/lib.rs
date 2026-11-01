@@ -199,6 +199,19 @@ macro_rules! vane_meta {
             /// One-shot: the hooked pc to dispatch without pausing (set by
             /// the pause, consumed by the resume).
             skip_hook_pause_once: Option<u64>,
+            /// Direct tail-call hop budget (see
+            /// [`LocalReactor::lr_direct_tail_target`]): reset to the cap at
+            /// each dispatch-loop iteration; a compiled-trace chain spends
+            /// it per direct hop and falls back to the normal exit at 0.
+            direct_hops: u32,
+            /// Direct-tail pin slots: the compiled trace being executed
+            /// (and the one about to be jumped to) are pinned here so a
+            /// concurrent registry clear cannot munmap executing code. Two
+            /// slots rotate per hop (the trace two hops ago is by then
+            /// definitely exited).
+            tail_pin_a: Option<$crate::vane_arch::interp::CompiledTrace<$t>>,
+            tail_pin_b: Option<$crate::vane_arch::interp::CompiledTrace<$t>>,
+            tail_flip: bool,
         }
 
         const _: () = {
@@ -227,6 +240,48 @@ macro_rules! vane_meta {
                 // `Core.regs`, so the trace engine may cache it.
                 fn lr_has_local_regfile(&self) -> bool {
                     true
+                }
+                // Direct tail-call chaining (compiled -> compiled). The
+                // budget is refreshed by the dispatch loop each iteration;
+                // see the trait doc for the full bail-out contract.
+                fn lr_direct_tail_target(&mut self, pc: u64) -> (usize, usize) {
+                    if self.core.lock().direct_hops == 0 {
+                        return (0, 0);
+                    }
+                    let mut lock = self.core.lock();
+                    if lock.direct_hops == 0 || lock.code_dirty
+                        || !lock.hook_events.is_empty() || lock.pause_on_hook
+                    {
+                        return (0, 0);
+                    }
+                    lock.direct_hops -= 1;
+                    // Hooks at the TARGET pc must fire through the loop.
+                    if lock.hooks.at(pc).is_some() {
+                        return (0, 0);
+                    }
+                    let Some(ct) = lock.compiled.borrow().get(&pc).cloned() else {
+                        return (0, 0);
+                    };
+                    // Pin rotation: two slots, alternating per hop. At any
+                    // instant they hold the currently-executing trace's ct
+                    // and the jump target's, so a registry clear mid-chain
+                    // cannot drop (and munmap) executing code. The pin also
+                    // owns the returned address: a local clone would dangle
+                    // the moment this fn returns, but the pinned clone lives
+                    // inside `Core` (shared, heap-stable) until rotated out
+                    // two hops later.
+                    lock.tail_flip = !lock.tail_flip;
+                    let (f, ct_addr) = if lock.tail_flip {
+                        let p = lock.tail_pin_a.insert(ct);
+                        (p.f as usize, core::ptr::from_ref(p) as usize)
+                    } else {
+                        let p = lock.tail_pin_b.insert(ct);
+                        (p.f as usize, core::ptr::from_ref(p) as usize)
+                    };
+                    drop(lock);
+                    $crate::vane_arch::VANE_TAIL_DIRECT
+                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    (f, ct_addr)
                 }
                 // Execute a privileged instruction inline in a trace
                 // (PLAN_TRACE_CUTOVER). The handler lives on the Reactor
@@ -450,6 +505,10 @@ macro_rules! vane_meta {
                                 if hart_enabled0 {
                                     lock.hart.itime = lock.hart.itime.wrapping_add(1);
                                 }
+                                // Fresh direct-tail hop budget for this
+                                // dispatch iteration.
+                                lock.direct_hops =
+                                    $crate::vane_arch::DIRECT_TAIL_HOP_CAP;
                                 if lock.code_dirty {
                                     // fence.i: the code may have changed. Bump the
                                     // code generation so cached traces are lazily
@@ -784,6 +843,10 @@ macro_rules! vane_meta {
                     lock.trace_pages.borrow_mut().clear();
                     lock.page_index.borrow_mut().clear();
                     lock.compiled.borrow_mut().clear();
+                    // Drop the direct-tail pins with the registry: they hold
+                    // the native code mappings alive (munmap-on-drop).
+                    lock.tail_pin_a = None;
+                    lock.tail_pin_b = None;
                     lock.trace_gen.borrow_mut().clear();
                     lock.code_dirty = false;
                 }
@@ -1041,6 +1104,40 @@ macro_rules! vane_meta {
                 }
                 fn lr_store_reg(&self, r: u8, v: u64) {
                     set_reg(self.clone(), r, v);
+                }
+                // Direct tail-call chaining (compiled -> compiled), same
+                // contract as the plain-Rust impl: the budget is refreshed
+                // by the dispatch loop each iteration; bail-outs force the
+                // normal exit path.
+                fn lr_direct_tail_target(&mut self, pc: u64) -> (usize, usize) {
+                    let mut lock = self.core.lock();
+                    if lock.direct_hops == 0 || lock.code_dirty
+                        || !lock.hook_events.is_empty() || lock.pause_on_hook
+                    {
+                        return (0, 0);
+                    }
+                    lock.direct_hops -= 1;
+                    // Hooks at the TARGET pc must fire through the loop.
+                    if lock.hooks.at(pc).is_some() {
+                        return (0, 0);
+                    }
+                    let Some(ct) = lock.compiled.borrow().get(&pc).cloned() else {
+                        return (0, 0);
+                    };
+                    // Pin rotation: two slots, alternating per hop (see the
+                    // plain-Rust impl for the ownership reasoning).
+                    lock.tail_flip = !lock.tail_flip;
+                    let (f, ct_addr) = if lock.tail_flip {
+                        let p = lock.tail_pin_a.insert(ct);
+                        (p.f as usize, core::ptr::from_ref(p) as usize)
+                    } else {
+                        let p = lock.tail_pin_b.insert(ct);
+                        (p.f as usize, core::ptr::from_ref(p) as usize)
+                    };
+                    drop(lock);
+                    $crate::vane_arch::VANE_TAIL_DIRECT
+                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    (f, ct_addr)
                 }
                 fn lr_read_byte(&self, addr: u64) -> u8 {
                     // Fetch validation (CheckCode): translate as exec.

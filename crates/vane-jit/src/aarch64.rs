@@ -56,6 +56,8 @@ const O_FP_CMP: usize = offset_of!(TraceCtx, fp_cmp);
 const O_INT_TO_FP: usize = offset_of!(TraceCtx, int_to_fp);
 const O_FP_TO_INT: usize = offset_of!(TraceCtx, fp_to_int);
 const O_FP_CONVERT: usize = offset_of!(TraceCtx, fp_convert);
+const O_TAIL_LOOKUP: usize = offset_of!(TraceCtx, tail_lookup);
+const O_HOST: usize = offset_of!(TraceCtx, host);
 
 /// The aarch64 assembler + the codegen state (loop/if label stacks, exit
 /// jumps to the shared epilogue).
@@ -342,6 +344,12 @@ impl Asm {
     }
     fn ret(&mut self) {
         self.u32(0xd65f03c0);
+    }
+    /// `br x{n}` — an UNCONDITIONAL tail jump: the frame is replaced, the
+    /// callee returns directly to our caller. Used for compiled ->
+    /// compiled direct tail calls.
+    fn br_reg(&mut self, n: u8) {
+        self.u32(0xd61f0000 | ((n as u32) << 5));
     }
     /// Emit a `b <placeholder>`; patch later with [`patch_to_here`]. Returns
     /// the instruction offset.
@@ -703,6 +711,22 @@ impl Asm {
             }
             StackOp::TailCall => {
                 self.pop(9);
+                // Direct tail path: ask the host for the target's compiled
+                // fn; jump straight into it when available instead of
+                // exiting to the dispatch loop. The host's lookup decides
+                // when NOT to (hop budget / code dirty / hooks / uncompiled
+                // target) by returning ct == 0.
+                self.str_(9, 19, O_EXIT_PC); // persist: the stub may clobber x9
+                self.mov_reg(1, 9);          // x1 = target pc (call only sets x0)
+                self.call(O_TAIL_LOOKUP);    // → x0 = ct, x1 = target fn
+                let fb = self.cbz_fwd(0);    // ct == 0 → normal exit
+                // Tail-jump: x0 = host, x1 = ct, br target_fn.
+                self.mov_reg(2, 1);          // x2 = f
+                self.mov_reg(1, 0);          // x1 = ct
+                self.ldr(0, 19, O_HOST);     // x0 = ctx.host
+                self.br_reg(2);
+                self.patch_to_here(fb);
+                self.ldr(9, 19, O_EXIT_PC);
                 self.exit_tailcall_x9();
             }
             StackOp::Log(msg) => {

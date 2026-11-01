@@ -704,12 +704,114 @@ fn render_with_abi<'a>(
                                 function_index: s.lookup_stub_func_idx
                             });
                         }
-                        RenderAbi::Vane(_) => {
-                            // Stack: [addr: i64]; return (TAILCALL, addr) to the
-                            // dispatch loop (which looks up the next trace).
+                        RenderAbi::Vane(v) => {
+                            // Stack: [addr: i64]; pop the target.
                             op!(Operator::LocalSet {
                                 local_index: scratch_a
-                            }); // pop target
+                            });
+                            if let Some(t) = v.tail_call {
+                                // DIRECT TAIL PATH: ask the interpreter-side
+                                // shim for the target trampoline's funcref
+                                // table index; -1 = chain not allowed (hop
+                                // budget / code dirty / hooks / uncompiled
+                                // target). When allowed, call the target
+                                // trampoline with (ret_scratch, host, 0): it
+                                // runs the whole next trace and sret-writes
+                                // the Exit into the scratch; this pack fn
+                                // reads (tag, pc) back and returns them as its
+                                // own results, so the ORIGINAL trampoline (the
+                                // dispatch loop's callee) forwards the final
+                                // exit to vane_make_exit exactly as a
+                                // single-trace run would. An ordinary call —
+                                // chain depth is bounded by the host's hop
+                                // budget, so no tail-call proposal is needed.
+                                // (`t` is a Copy: no borrows across yields.)
+                                op!(Operator::LocalGet {
+                                    local_index: scratch_a
+                                });
+                                op!(Operator::I32WrapI64);
+                                op!(Operator::Call {
+                                    function_index: t.lookup_func,
+                                });
+                                op!(Operator::LocalTee {
+                                    local_index: v.scratch32
+                                });
+                                op!(Operator::I32Const { value: -1 });
+                                op!(Operator::I32Ne);
+                                op!(Operator::If {
+                                    blockty: wasmparser::BlockType::Empty,
+                                });
+                                {
+                                    op!(Operator::I32Const {
+                                        value: t.ret_scratch_addr as i32,
+                                    });
+                                    // The live host pointer: VANE_CURRENT_HOST
+                                    // holds the static's ADDRESS; the pointer
+                                    // was stored AT it.
+                                    op!(Operator::GlobalGet {
+                                        global_index: t.host_global,
+                                    });
+                                    op!(Operator::I32Load {
+                                        memarg: wasmparser::MemArg {
+                                            align: 2,
+                                            max_align: 2,
+                                            offset: 0,
+                                            memory: 0,
+                                        },
+                                    });
+                                    op!(Operator::I32Const { value: 0 }); // ct: unused
+                                    // THE DYNAMIC CALLEE: call_indirect pops the
+                                    // funcref-table index from the stack (after
+                                    // the args) — the shim's idx IS the target
+                                    // trampoline's table slot.
+                                    op!(Operator::LocalGet {
+                                        local_index: v.scratch32
+                                    });
+                                    op!(Operator::CallIndirect {
+                                        type_index: t.trampoline_type,
+                                        table_index: 0,
+                                    });
+                                    // (tag, pc) = *(Exit*)ret_scratch
+                                    op!(Operator::I32Const {
+                                        value: t.ret_scratch_addr as i32,
+                                    });
+                                    op!(Operator::I32Load {
+                                        memarg: wasmparser::MemArg {
+                                            align: 2,
+                                            max_align: 2,
+                                            offset: 0,
+                                            memory: 0,
+                                        },
+                                    });
+                                    op!(Operator::LocalSet {
+                                        local_index: v.scratch32
+                                    });
+                                    op!(Operator::I32Const {
+                                        value: t.ret_scratch_addr as i32,
+                                    });
+                                    op!(Operator::I64Load {
+                                        memarg: wasmparser::MemArg {
+                                            align: 3,
+                                            max_align: 3,
+                                            offset: 8,
+                                            memory: 0,
+                                        },
+                                    });
+                                    op!(Operator::LocalSet {
+                                        local_index: scratch_a
+                                    });
+                                    op!(Operator::LocalGet {
+                                        local_index: v.scratch32
+                                    });
+                                    op!(Operator::LocalGet {
+                                        local_index: scratch_a
+                                    });
+                                    op!(Operator::Return);
+                                    op!(Operator::End);
+                                }
+                            }
+                            // Fallback / no-direct-tail lowering: return
+                            // (TAG_TAILCALL, target) to the dispatch loop.
                             op!(Operator::I32Const { value: 0 }); // TAG_TAILCALL
                             op!(Operator::LocalGet {
                                 local_index: scratch_a

@@ -145,6 +145,24 @@ pub extern "C" fn vane_mem_store(addr: i64, width: i32, value: i64) {
         .lr_store_mem(addr as u64, mw(width), value as u64);
 }
 
+/// `tail_lookup(pc) -> idx` — direct tail-call chaining for AOT'd traces:
+/// returns the target trace's trampoline funcref-table index (the dispatch
+/// loop registered `ct.f` AS the table index), or -1 when chaining is not
+/// allowed (hop budget / code dirty / hooks / uncompiled target) so the
+/// pack fn falls back to the normal `(TAG_TAILCALL, target)` exit. The
+/// pack fn then `return_call_indirect`s into the trampoline with
+/// (host, 0) — frame-replacing, so a chain costs no stack.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn vane_tail_lookup(pc: i32) -> i32 {
+    use vane_arch::interp::LocalReactor;
+    let host = unsafe { current_host() };
+    let (f, _ct) = host.reactor.lr_direct_tail_target(pc as u64);
+    // On wasm32 the registry's fn pointers ARE funcref-table indices
+    // (register_aot_traces transmutes them in); 0 means "no target".
+    if f == 0 { -1 } else { f as i32 }
+}
+
 /// `check_code(addr) -> (exit_tag, exit_pc)` — the instruction-boundary check
 /// (trap/irq), as an sret Rust helper (a Rust tuple return is sret, not
 /// multi-value, so the patcher generates a thin WASM wrapper that calls this
@@ -482,6 +500,10 @@ impl Reactor {
                 hook_events: Vec::new(),
                 pause_on_hook: false,
                 skip_hook_pause_once: None,
+                direct_hops: 0,
+                tail_pin_a: None,
+                tail_pin_b: None,
+                tail_flip: false,
             })),
         }
     }
