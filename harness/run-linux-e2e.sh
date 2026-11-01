@@ -74,7 +74,7 @@ run_engine() {
   echo "════ e2e engine=$name (ram=$((ram_bytes/1024/1024))MiB timeout=${tmo}s) ════" >&2
   local log="/tmp/vane-e2e-logs/log-$name.txt"
   rm -f "$log"
-  nice -n 19 "$bin" --machine --opensbi "$artifacts/opensbi.bin" --kernel "$artifacts/linux-generic" \
+  VANE_9P_DEBUG=1 nice -n 19 "$bin" --machine --opensbi "$artifacts/opensbi.bin" --kernel "$artifacts/linux-generic" \
     --initrd "$artifacts/initrd-e2e.gz" --disk "$disk" --share "$share" --net \
     --append "console=ttyS0 panic=-1" --ram-size "$ram_bytes" \
     >"$log" 2>&1 &

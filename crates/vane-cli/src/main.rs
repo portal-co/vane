@@ -116,6 +116,72 @@ impl DirFs {
     }
 }
 
+/// Per-message 9P logger wrapping the device (VANE_9P_DEBUG): delegates
+/// everything, prints one line per completed request. The response type is
+/// req+1 (Rlerror = 7 on errors).
+struct Trace9p<B: vane::vane_riscv::virtio_9p::Host9p> {
+    inner: vane::vane_riscv::virtio_9p::Virtio9p<B>,
+    n: u64,
+}
+
+fn p9_name(t: u8) -> &'static str {
+    use vane::vane_riscv::virtio_9p::*;
+    match t {
+        R_LERROR => "Rlerror",
+        T_STATFS => "Tstatfs",
+        T_LOPEN => "Tlopen",
+        T_LCREATE => "Tlcreate",
+        T_GETATTR => "Tgetattr",
+        T_READDIR => "Treaddir",
+        T_MKDIR => "Tmkdir",
+        T_VERSION => "Tversion",
+        T_ATTACH => "Tattach",
+        T_FLUSH => "Tflush",
+        T_WALK => "Twalk",
+        T_READ => "Tread",
+        T_WRITE => "Twrite",
+        T_CLUNK => "Tclunk",
+        _ => "T?",
+    }
+}
+
+impl<B: vane::vane_riscv::virtio_9p::Host9p> vane::vane_riscv::virtio::VirtioDevice for Trace9p<B> {
+    fn device_id(&self) -> u32 {
+        self.inner.device_id()
+    }
+    fn num_queues(&self) -> usize {
+        self.inner.num_queues()
+    }
+    fn features(&self) -> u32 {
+        self.inner.features()
+    }
+    fn read_config(&self, offset: u64, buf: &mut [u8]) {
+        self.inner.read_config(offset, buf)
+    }
+    fn process(
+        &mut self,
+        queue: usize,
+        chain: &vane::vane_riscv::virtio::DescriptorChain,
+        mem: &mut dyn vane::vane_riscv::virtio::QueueMem,
+    ) -> u32 {
+        self.n += 1;
+        // The request is size(u32) + type(u8) + tag(u16): peek the type for
+        // the log line (read_request is a non-destructive read).
+        let req = chain.read_request(mem);
+        let ty = req.get(4).copied().unwrap_or(0);
+        let written = self.inner.process(queue, chain, mem);
+        eprintln!(
+            "9p#{}: {}({}) -> {} resp {}B",
+            self.n,
+            p9_name(ty),
+            ty,
+            if ty + 1 == 7 { "Rlerror" } else { p9_name(ty + 1) },
+            written
+        );
+        written
+    }
+}
+
 impl vane::vane_riscv::virtio_9p::Host9p for DirFs {
     fn stat(&mut self, path: &str) -> Result<vane::vane_riscv::virtio_9p::Meta9p, i32> {
         let p = self.resolve(path);
@@ -528,7 +594,16 @@ fn main() {
         if let Some(share_path) = &args.share {
             let backend = DirFs::new(std::path::PathBuf::from(share_path));
             let dev = vane::vane_riscv::virtio_9p::Virtio9p::new(backend, "hostshare");
-            reactor.add_virtio_device(Box::new(dev));
+            if std::env::var_os("VANE_9P_DEBUG").is_some() {
+                // Live per-message trace of the 9P exchange (the mount-flake
+                // diagnostic): every request that REACHED the device and was
+                // completed. A retried mount printing nothing = the transport
+                // never delivered (queue/IRQ wedge on the device side).
+                let inner = Trace9p { inner: dev, n: 0 };
+                reactor.add_virtio_device(Box::new(inner));
+            } else {
+                reactor.add_virtio_device(Box::new(dev));
+            }
             virtio_dev_ids.push(vane::vane_riscv::virtio::DEV_9P);
             eprintln!("virtio-9p: {share_path} shared as 'hostshare'");
         }

@@ -19,21 +19,21 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 // 9P2000.L message types.
-const T_STATFS: u8 = 8;
-const T_LOPEN: u8 = 12;
-const T_LCREATE: u8 = 32;
-const T_GETATTR: u8 = 24;
-const T_READDIR: u8 = 40;
-const T_MKDIR: u8 = 72;
-const T_VERSION: u8 = 100;
-const T_ATTACH: u8 = 104;
-const T_FLUSH: u8 = 108;
-const T_WALK: u8 = 110;
-const T_READ: u8 = 116;
-const T_WRITE: u8 = 118;
-const T_CLUNK: u8 = 120;
+pub const T_STATFS: u8 = 8;
+pub const T_LOPEN: u8 = 12;
+pub const T_LCREATE: u8 = 32;
+pub const T_GETATTR: u8 = 24;
+pub const T_READDIR: u8 = 40;
+pub const T_MKDIR: u8 = 72;
+pub const T_VERSION: u8 = 100;
+pub const T_ATTACH: u8 = 104;
+pub const T_FLUSH: u8 = 108;
+pub const T_WALK: u8 = 110;
+pub const T_READ: u8 = 116;
+pub const T_WRITE: u8 = 118;
+pub const T_CLUNK: u8 = 120;
 
-const R_LERROR: u8 = 7;
+pub const R_LERROR: u8 = 7;
 
 // QID types.
 const QT_DIR: u8 = 0x80;
