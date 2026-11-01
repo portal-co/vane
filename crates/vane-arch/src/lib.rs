@@ -660,6 +660,11 @@ pub static TRACE_FLUSH_DROPPED: core::sync::atomic::AtomicU64 =
 /// WITHOUT returning to the Rust dispatch loop. Nonzero in the heartbeat
 /// means the direct-tail fast path is live.
 pub static VANE_TAIL_DIRECT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Direct-tail kill-switch state (set once from the generated-code side):
+/// 0 = unknown, 1 = disabled (`VANE_NO_DIRECT_TAIL`), 2 = enabled.
+pub static DIRECT_TAIL_GATE: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(0);
+
 /// Budget of consecutive compiled->compiled direct tail hops before the
 /// chain exits to the dispatch loop (so interrupt delivery, io ticks and
 /// the outer fuel budget keep their cadence). 4096 traces per chain is

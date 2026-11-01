@@ -245,6 +245,23 @@ macro_rules! vane_meta {
                 // budget is refreshed by the dispatch loop each iteration;
                 // see the trait doc for the full bail-out contract.
                 fn lr_direct_tail_target(&mut self, pc: u64) -> (usize, usize) {
+                    if {
+                        let g = $crate::vane_arch::DIRECT_TAIL_GATE
+                            .load(core::sync::atomic::Ordering::Relaxed);
+                        let g = if g == 0 {
+                            let off = std::env::var_os("VANE_NO_DIRECT_TAIL").is_some();
+                            $crate::vane_arch::DIRECT_TAIL_GATE.store(
+                                if off { 1 } else { 2 },
+                                core::sync::atomic::Ordering::Relaxed,
+                            );
+                            if off { 1 } else { 2 }
+                        } else {
+                            g
+                        };
+                        g == 1
+                    } {
+                        return (0, 0);
+                    }
                     if self.core.lock().direct_hops == 0 {
                         return (0, 0);
                     }
@@ -1110,6 +1127,23 @@ macro_rules! vane_meta {
                 // by the dispatch loop each iteration; bail-outs force the
                 // normal exit path.
                 fn lr_direct_tail_target(&mut self, pc: u64) -> (usize, usize) {
+                    if {
+                        let g = $crate::vane_arch::DIRECT_TAIL_GATE
+                            .load(core::sync::atomic::Ordering::Relaxed);
+                        let g = if g == 0 {
+                            let off = std::env::var_os("VANE_NO_DIRECT_TAIL").is_some();
+                            $crate::vane_arch::DIRECT_TAIL_GATE.store(
+                                if off { 1 } else { 2 },
+                                core::sync::atomic::Ordering::Relaxed,
+                            );
+                            if off { 1 } else { 2 }
+                        } else {
+                            g
+                        };
+                        g == 1
+                    } {
+                        return (0, 0);
+                    }
                     let mut lock = self.core.lock();
                     if lock.direct_hops == 0 || lock.code_dirty
                         || !lock.hook_events.is_empty() || lock.pause_on_hook
