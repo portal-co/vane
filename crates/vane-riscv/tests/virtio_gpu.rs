@@ -111,14 +111,7 @@ fn new_device(w: u32, h: u32, credits: u32) -> (VirtioMmio, TestMem, Surface) {
 
 /// Set up resource 1 (whole-surface size, given format) with backing at
 /// 0x40000 and the guest fb already transferred to host.
-fn setup_resource(
-    d: &mut VirtioMmio,
-    mem: &mut TestMem,
-    w: u32,
-    h: u32,
-    format: u32,
-    fb: &[u8],
-) {
+fn setup_resource(d: &mut VirtioMmio, mem: &mut TestMem, w: u32, h: u32, format: u32, fb: &[u8]) {
     let mut body = u32l(1);
     body.extend(u32l(w));
     body.extend(u32l(h));

@@ -25,7 +25,7 @@
 //! happens at flush.
 
 use crate::display::{DisplaySurface, PushStatus};
-use crate::virtio::{DescriptorChain, QueueMem, VirtioDevice, DEV_GPU};
+use crate::virtio::{DEV_GPU, DescriptorChain, QueueMem, VirtioDevice};
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use spin::Mutex;
