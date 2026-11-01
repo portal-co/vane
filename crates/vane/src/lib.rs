@@ -157,7 +157,7 @@ pub extern "C" fn vane_mem_store(addr: i64, width: i32, value: i64) {
 pub extern "C" fn vane_tail_lookup(pc: i32) -> i32 {
     use vane_arch::interp::LocalReactor;
     let host = unsafe { current_host() };
-    let (f, _ct) = host.reactor.lr_direct_tail_target(pc as u64);
+    let (f, _ops_ptr, _ops_len) = host.reactor.lr_direct_tail_target(pc as u64);
     // On wasm32 the registry's fn pointers ARE funcref-table indices
     // (register_aot_traces transmutes them in); 0 means "no target".
     if f == 0 {
@@ -1857,15 +1857,23 @@ impl Reactor {
     /// path (registers synced through the [`LocalReactor`] interface).
     fn step_privileged_full(&self, pc: u64) -> Result<u64, String> {
         use vane_arch::interp::LocalReactor;
+        // The timing debug only exists off-wasm: `Instant::now` panics on
+        // wasm32-unknown-unknown (no OS time source), and this runs
+        // unconditionally on the privileged step path.
+        #[cfg(not(target_arch = "wasm32"))]
         let dbg = std::env::var("VANE_DEBUG_STEPFALL").is_ok();
+        #[cfg(not(target_arch = "wasm32"))]
         let t0 = std::time::Instant::now();
         let mut regs = [0u64; 32];
         for i in 1..32u8 {
             regs[i as usize] = self.lr_load_reg(i);
         }
+        #[cfg(not(target_arch = "wasm32"))]
         let t1 = std::time::Instant::now();
         let r = self.step_one(pc, &mut regs);
+        #[cfg(not(target_arch = "wasm32"))]
         let t2 = std::time::Instant::now();
+        #[cfg(not(target_arch = "wasm32"))]
         if dbg {
             eprintln!(
                 "  step_privileged_full pc={pc:#x} loadregs={:?} step_one={:?}",
@@ -1873,6 +1881,8 @@ impl Reactor {
                 t2 - t1
             );
         }
+        #[cfg(target_arch = "wasm32")]
+        let _ = pc;
         match r {
             Ok(StepOutcome::Next(np)) => {
                 for i in 1..32u8 {

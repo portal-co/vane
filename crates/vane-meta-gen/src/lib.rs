@@ -496,13 +496,18 @@ if {
                         // resident (not under js-host, where regs live in JS).
                         reg_cache: $crate::vane_arch::interp::LocalReactor::lr_has_local_regfile(self),
                     };
+                    // The heartbeat cannot exist on wasm32 (Instant::now
+                    // panics there — no OS time source).
+                    #[cfg(not(target_arch = "wasm32"))]
                     let mut _hb_last = std::time::Instant::now();
+                    #[cfg(not(target_arch = "wasm32"))]
                     let _hb = std::env::var_os("VANE_HEARTBEAT").is_some();
                     // Per-segment nanosecond profiling: gated so the
                     // Instant pairs cost nothing in normal runs (the
                     // counters below are cheap atomics and stay on).
                     let _prof = std::env::var_os("VANE_PROFILE").is_some();
                     loop {
+                        #[cfg(not(target_arch = "wasm32"))]
                         if _hb && _hb_last.elapsed().as_secs() >= 2 {
                             _hb_last = std::time::Instant::now();
                             eprintln!(
