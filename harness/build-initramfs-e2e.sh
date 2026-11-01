@@ -73,7 +73,16 @@ fi
 
 # ── 9P (virtio-9p host share) ────────────────────────────────────────────────
 mkdir -p /mnt/host
-if mount -t 9p -o trans=virtio,version=9p2000.L,msize=8192 hostshare /mnt/host; then
+ok9p=""
+for try in 1 2 3; do
+  if mount -t 9p -o trans=virtio,version=9p2000.L,msize=8192 hostshare /mnt/host; then
+    ok9p=1
+    break
+  fi
+  echo "WARN: 9p mount attempt $try failed"
+  sleep 1
+done
+if [ -n "$ok9p" ]; then
   echo "=== E2E 9P MOUNT OK ==="
   if cat /mnt/host/from-host.txt; then
     echo "=== E2E 9P READ OK ==="

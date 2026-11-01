@@ -261,10 +261,18 @@ mod ninep {
     impl Host9p for MemFs {
         fn stat(&mut self, path: &str) -> Result<Meta9p, i32> {
             if path.is_empty() {
-                return Ok(Meta9p { mode: 0o755, size: 0, is_dir: true });
+                return Ok(Meta9p {
+                    mode: 0o755,
+                    size: 0,
+                    is_dir: true,
+                });
             }
             match self.files.get(path) {
-                Some(d) => Ok(Meta9p { mode: 0o644, size: d.len() as u64, is_dir: false }),
+                Some(d) => Ok(Meta9p {
+                    mode: 0o644,
+                    size: d.len() as u64,
+                    is_dir: false,
+                }),
                 None => Err(2), // ENOENT
             }
         }
@@ -376,7 +384,10 @@ mod ninep {
         body.extend_from_slice(&s("9P2000.L"));
         let r = rpc(&mut d, &mut mem, &msg(100, 1, &body));
         assert_eq!(r[0], 101, "Rversion");
-        assert!(r.windows(8).any(|w| w == b"9P2000.L"), "version string echoed");
+        assert!(
+            r.windows(8).any(|w| w == b"9P2000.L"),
+            "version string echoed"
+        );
 
         // Tattach fid=1.
         let mut body = 1u32.to_le_bytes().to_vec();
@@ -445,7 +456,10 @@ mod ninep {
         body.extend_from_slice(&1u16.to_le_bytes());
         body.extend_from_slice(&s("new.txt"));
         let r = rpc(&mut d, &mut mem, &msg(110, 3, &body));
-        assert_eq!(r[0], 7, "Rlerror(ENOENT) for the pre-create walk (R_LERROR=7)");
+        assert_eq!(
+            r[0], 7,
+            "Rlerror(ENOENT) for the pre-create walk (R_LERROR=7)"
+        );
 
         // Bare-clone walk (nwname=0): fid=1 -> newfid=2.
         let mut body = 1u32.to_le_bytes().to_vec();
@@ -461,7 +475,12 @@ mod ninep {
         body.extend_from_slice(&0o644u32.to_le_bytes());
         body.extend_from_slice(&u32::MAX.to_le_bytes()); // gid
         let r = rpc(&mut d, &mut mem, &msg(32, 5, &body));
-        assert_eq!(r[0], 33, "Rlcreate (got {:#x?})", r[..r.len().min(8)].to_vec());
+        assert_eq!(
+            r[0],
+            33,
+            "Rlcreate (got {:#x?})",
+            r[..r.len().min(8)].to_vec()
+        );
 
         // Twrite fid=2 offset=0.
         let mut body = 2u32.to_le_bytes().to_vec();

@@ -215,9 +215,7 @@ impl TlbCache {
     #[inline]
     fn index(vpn: u64, asid: u64) -> usize {
         // Splitmix-style mixing so consecutive vpns land in distinct slots.
-        let h = vpn
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            ^ asid.wrapping_mul(0xD1B5_4A32_D192_ED03);
+        let h = vpn.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ asid.wrapping_mul(0xD1B5_4A32_D192_ED03);
         ((h >> 20) as usize) & (Self::SLOTS - 1)
     }
 

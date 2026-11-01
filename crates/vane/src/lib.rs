@@ -160,7 +160,11 @@ pub extern "C" fn vane_tail_lookup(pc: i32) -> i32 {
     let (f, _ct) = host.reactor.lr_direct_tail_target(pc as u64);
     // On wasm32 the registry's fn pointers ARE funcref-table indices
     // (register_aot_traces transmutes them in); 0 means "no target".
-    if f == 0 { -1 } else { f as i32 }
+    if f == 0 {
+        -1
+    } else {
+        f as i32
+    }
 }
 
 /// `check_code(addr) -> (exit_tag, exit_pc)` — the instruction-boundary check

@@ -639,7 +639,7 @@ fn interp_module_with_async(async_shims: bool) -> Vec<u8> {
     f.instruction(&Instruction::End);
     code.function(&f);
 
-       // 1: vane_make_exit(tag, pc, ret_ptr): *(i32*)ret = tag; *(i64*)(ret+8) = pc
+    // 1: vane_make_exit(tag, pc, ret_ptr): *(i32*)ret = tag; *(i64*)(ret+8) = pc
     let mut f = wasm_encoder::Function::new([]);
     f.instruction(&Instruction::LocalGet(2));
     f.instruction(&Instruction::LocalGet(0));
@@ -1517,8 +1517,8 @@ fn bake_aot_direct_tail_chains_in_wasmi() {
         StackOp::PushImm(0x8000),
         StackOp::TailCall,
     ];
-    let baked = vane_patch::bake_aot(&target, vec![(0x1000, trace_a), (0x2000, trace_b)])
-        .expect("bake");
+    let baked =
+        vane_patch::bake_aot(&target, vec![(0x1000, trace_a), (0x2000, trace_b)]).expect("bake");
     // entries: [(0x1000, trampA), (0x2000, trampB)] — table base 1.
     assert_eq!(baked.entries, vec![(0x1000, 1), (0x2000, 2)]);
 
@@ -1535,7 +1535,8 @@ fn bake_aot_direct_tail_chains_in_wasmi() {
 
     // Wire the one-shot lookup cell: trampB + 1 (0 = "no chaining").
     let mem = instance.get_memory(&store, "memory").expect("memory");
-    mem.write(&mut store, LOOKUP_ADDR as usize, &[3u8]).expect("lookup cell");
+    mem.write(&mut store, LOOKUP_ADDR as usize, &[3u8])
+        .expect("lookup cell");
 
     let host_ptr: u32 = 2048;
     let ret_ptr: u32 = 4096;
@@ -1557,13 +1558,18 @@ fn bake_aot_direct_tail_chains_in_wasmi() {
     let mut reg2 = [0u8; 8];
     mem.read(&store, (host_ptr + REGS_OFF + 16) as usize, &mut reg2)
         .expect("reg2");
-    assert_eq!(u64::from_le_bytes(reg2), 0x5B5B, "trace B ran via direct tail");
+    assert_eq!(
+        u64::from_le_bytes(reg2),
+        0x5B5B,
+        "trace B ran via direct tail"
+    );
     // B's exit propagated back through A's pack fn to the ORIGINAL ret_ptr:
     // (TAG_TAILCALL, 0x8000) — B's own TailCall, not A's chained one.
     let mut tag = [0u8; 4];
     let mut pc = [0u8; 8];
     mem.read(&store, ret_ptr as usize, &mut tag).expect("tag");
-    mem.read(&store, (ret_ptr + 8) as usize, &mut pc).expect("pc");
+    mem.read(&store, (ret_ptr + 8) as usize, &mut pc)
+        .expect("pc");
     assert_eq!(u32::from_le_bytes(tag), 0, "TAG_TAILCALL");
     assert_eq!(u64::from_le_bytes(pc), 0x8000, "B's tail target");
 }

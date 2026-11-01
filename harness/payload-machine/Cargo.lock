@@ -79,11 +79,19 @@ name = "portal-solutions-asm-riscv32"
 version = "0.1.0"
 
 [[patch.unused]]
+name = "portal-solutions-asm-riscv64"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "portal-solutions-asm-writer"
 version = "0.1.0"
 
 [[patch.unused]]
 name = "portal-solutions-asm-x86"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-x86-64"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -144,6 +152,10 @@ version = "0.1.0"
 
 [[patch.unused]]
 name = "lazy-repo-std"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-ffi-sig"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -356,10 +368,6 @@ version = "0.1.0"
 
 [[patch.unused]]
 name = "volar-wasm-circuit-import"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-ffi-sig"
 version = "0.1.0"
 
 [[patch.unused]]
