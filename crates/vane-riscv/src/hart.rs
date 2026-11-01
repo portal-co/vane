@@ -10,7 +10,6 @@
 //! [`vane_arch::Mem`]; page-table pages are ordinary guest pages (the
 //! swap-layer pinning invariant is M5's concern and noted in the plan).
 
-use alloc::collections::BTreeMap;
 use vane_arch::Mem;
 
 /// Privilege modes. Numeric values match the spec encoding.
@@ -177,12 +176,86 @@ pub const MISA_VALUE: u64 = (2 << 62)
 pub const SATP_MODE_BARE: u64 = 0;
 pub const SATP_MODE_SV39: u64 = 8;
 
+#[derive(Clone, Copy)]
 struct TlbEntry {
     /// Physical page number (already shifted: physical address of the page).
     pa_base: u64,
     flags: u8, // R W X U G as in the PTE low bits
     /// log2 of the page size (12 for 4 KiB, 21 for 2 MiB, 30 for 1 GiB).
     shift: u8,
+}
+
+/// Fixed-size direct-mapped TLB: slot index = mix(vpn, asid), one entry per
+/// slot, last writer wins (a collision evicts). Replaces the previous
+/// `BTreeMap<(u64, u64), TlbEntry>` whose per-access tree walk was the
+/// second-biggest frame family in the Linux-boot profile; a miss simply
+/// falls through to the page-table walk, so eviction is always
+/// correctness-neutral.
+#[derive(Clone, Copy)]
+struct TlbSlot {
+    vpn: u64,
+    asid: u64,
+    entry: TlbEntry,
+}
+
+struct TlbCache {
+    slots: [Option<TlbSlot>; Self::SLOTS],
+}
+
+impl TlbCache {
+    /// 4096 slots × 32 B = 128 KiB — L2-resident for the boot hot set.
+    const SLOTS: usize = 4096;
+
+    fn new() -> Self {
+        TlbCache {
+            slots: [None; Self::SLOTS],
+        }
+    }
+
+    #[inline]
+    fn index(vpn: u64, asid: u64) -> usize {
+        // Splitmix-style mixing so consecutive vpns land in distinct slots.
+        let h = vpn
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ asid.wrapping_mul(0xD1B5_4A32_D192_ED03);
+        ((h >> 20) as usize) & (Self::SLOTS - 1)
+    }
+
+    #[inline]
+    fn get(&self, vpn: u64, asid: u64) -> Option<&TlbEntry> {
+        let s = self.slots[Self::index(vpn, asid)].as_ref()?;
+        (s.vpn == vpn && s.asid == asid).then_some(&s.entry)
+    }
+
+    fn insert(&mut self, key: (u64, u64), entry: TlbEntry) {
+        let (vpn, asid) = key;
+        let i = Self::index(vpn, asid);
+        self.slots[i] = Some(TlbSlot { vpn, asid, entry });
+    }
+
+    fn clear(&mut self) {
+        self.slots = [None; Self::SLOTS];
+    }
+
+    /// Same predicate semantics as the old `BTreeMap::retain`: keep entries
+    /// for which `f` returns true. Scans every slot, so a selective
+    /// `sfence.vma` still drops ALL matching entries.
+    fn retain(&mut self, mut f: impl FnMut(&(u64, u64), &TlbEntry) -> bool) {
+        for s in &mut self.slots {
+            if let Some(slot) = s {
+                let key = (slot.vpn, slot.asid);
+                if !f(&key, &slot.entry) {
+                    *s = None;
+                }
+            }
+        }
+    }
+
+    /// Probe only: an entry evicted by a collision reports as absent. The
+    /// sole caller is the VANE_DEBUG_DECODE helper, where that is fine.
+    fn contains_key(&self, vpn: u64, asid: u64) -> bool {
+        self.get(vpn, asid).is_some()
+    }
 }
 
 /// Privileged architectural state of one hart.
@@ -230,7 +303,7 @@ pub struct HartState {
     pub mcycle: u64,
     pub minstret: u64,
 
-    tlb: BTreeMap<(u64, u64), TlbEntry>,
+    tlb: TlbCache,
 
     /// LR/SC reservation: the physical address of the outstanding
     /// load-reserved (single-hart model). Cleared by trap entry and SC.
@@ -305,7 +378,7 @@ impl Default for HartState {
             pmpaddr: [0; 64],
             mcycle: 0,
             minstret: 0,
-            tlb: BTreeMap::new(),
+            tlb: TlbCache::new(),
             reservation: None,
             fregs: [0; 32],
             fcsr: 0,
@@ -624,7 +697,7 @@ impl HartState {
     pub fn tlb_contains(&self, vaddr: u64) -> bool {
         let asid = (self.satp >> 44) & 0xFFFF;
         let vpn = vaddr >> 12;
-        self.tlb.contains_key(&(vpn, asid))
+        self.tlb.contains_key(vpn, asid)
     }
 
     pub fn sfence_vma(&mut self, vaddr: u64, asid: u64) {
@@ -877,7 +950,7 @@ impl HartState {
         let asid = (self.satp >> 44) & 0xFFFF;
         let vpn = vaddr >> 12;
 
-        if let Some(entry) = self.tlb.get(&(vpn, asid)) {
+        if let Some(entry) = self.tlb.get(vpn, asid) {
             if self.tlb_permits(entry.flags, access) {
                 let offset = vaddr & ((1 << entry.shift) - 1);
                 return Ok(entry.pa_base + offset);
@@ -1046,13 +1119,8 @@ impl HartState {
         }
 
         let shift = 12 + 9 * level as u64;
-        // Bound the TLB: it grows unboundedly with the working set, and every
-        // `sfence.vma` does an O(len) `retain` scan, so an unbounded TLB makes
-        // each flush scan the entire map. Cap it — the TLB is a cache, so a
-        // clear-on-full just costs re-walks.
-        if self.tlb.len() >= 4096 {
-            self.tlb.clear();
-        }
+        // (No capacity guard: the TLB is a fixed-size direct-mapped cache —
+        // collisions evict, so it cannot grow.)
         // Assemble: the PTE's PPN above the page offset + the vaddr's
         // in-page (and, for superpages, in-superpage) offset.
         let pa = (ppn << 12 & !((1 << shift) - 1)) | (vaddr & ((1 << shift) - 1));

@@ -15,7 +15,7 @@ macro_rules! gen_block {
     };
 }
 
-use alloc::{boxed::Box, collections::btree_map::BTreeMap};
+use alloc::{boxed::Box, collections::btree_map::BTreeMap, vec::Vec};
 #[doc(hidden)]
 pub use core;
 
@@ -80,7 +80,7 @@ pub use template::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PagingMode {
     /// Use the legacy on-demand page allocation system (default)
-    /// - 64KB pages stored in BTreeMap
+    /// - 64KB pages in a direct page table ([`PageMap`])
     /// - Automatic page allocation on access
     /// - Best for sparse address spaces
     #[default]
@@ -124,8 +124,11 @@ pub enum PagingMode {
 /// See PAGING.md for detailed documentation on the paging system.
 #[derive(Default)]
 pub struct Mem {
-    /// Legacy paging: on-demand allocated pages
-    pub pages: BTreeMap<u64, Box<[u8; 65536]>>,
+    /// Legacy paging: on-demand allocated pages. A direct page table over
+    /// the low 4 GiB with a B-tree overflow — see [`PageMap`] (this was a
+    /// whole-address-space `BTreeMap`, whose per-access tree walk dominated
+    /// the Linux-boot profile).
+    pub pages: PageMap,
 
     /// Optional shared backing (Phase 4 of the aarch64-jit-parity/shared-
     /// memory plan). When `Some`, [`read_byte`](Self::read_byte)/
@@ -167,22 +170,124 @@ pub struct Mem {
     /// `Mem`, so locks never nest.
     pub swap: Option<spin::Mutex<vane_swap::PageCache>>,
 
-    /// Physical address of the first swap-backed byte (machine RAM base).
+/// Physical address of the first swap-backed byte (machine RAM base).
     pub swap_base: u64,
 
     /// Size in bytes of the swap-backed RAM region.
     pub swap_len: u64,
 }
+
+/// Sparse 64 KiB-page guest memory backing [`Mem`]'s legacy paging.
+///
+/// Layout: a **direct page table** of 65536 slots covering the low 4 GiB
+/// (slot = `addr >> 16`, `None` until the page is touched — untouched
+/// regions cost only the 512 KiB null-pointer table) plus a B-tree
+/// overflow for addresses at or above 4 GiB (rv64 guests mapping high
+/// memory; kept for correctness, nothing in the current machines places
+/// hot memory there).
+///
+/// This replaces the previous whole-address-space `BTreeMap<u64,
+/// Box<[u8; 65536]>>`: the sample profile of a Linux boot showed roughly
+/// 40% of main-thread samples inside `btree::search_tree`/
+/// `find_key_index` from per-access page lookups (`read_byte`,
+/// `write_byte`, `get_page`). The direct table turns every RAM access
+/// into one index and one deref.
+///
+/// The direct table never resizes after construction, so raw pointers
+/// handed out by [`Mem::get_page`] stay valid for the life of the `Mem`
+/// (a `Box` never moves once allocated).
+#[derive(Clone, Default)]
+pub struct PageMap {
+    /// One slot per 64 KiB page of the low 4 GiB.
+    direct: Vec<Option<Box<[u8; 65536]>>>,
+    /// Overflow for page numbers >= 65536 (addresses >= 4 GiB).
+    overflow: BTreeMap<u64, Box<[u8; 65536]>>,
+}
+
+impl PageMap {
+    /// Slots covering the low 4 GiB.
+    const DIRECT_SLOTS: usize = 1 << 16;
+
+    pub fn new() -> Self {
+        PageMap {
+            direct: alloc::vec![None; Self::DIRECT_SLOTS],
+            overflow: BTreeMap::new(),
+        }
+    }
+
+    #[inline]
+    fn slot(&self, page_no: u64) -> Option<&Box<[u8; 65536]>> {
+        if page_no < Self::DIRECT_SLOTS as u64 {
+            return self.direct[page_no as usize].as_ref();
+        }
+        self.overflow.get(&page_no)
+    }
+
+    /// Address-space lookup (read paths).
+    #[inline]
+    pub fn get(&self, page_no: &u64) -> Option<&Box<[u8; 65536]>> {
+        self.slot(*page_no)
+    }
+
+    /// Allocation-on-touch store access (write paths / `get_page`).
+    pub fn get_or_alloc_mut(&mut self, page_no: u64) -> &mut Box<[u8; 65536]> {
+        if page_no < Self::DIRECT_SLOTS as u64 {
+            self.direct[page_no as usize]
+                .get_or_insert_with(|| Box::new([0u8; 65536]))
+        } else {
+            self.overflow
+                .entry(page_no)
+                .or_insert_with(|| Box::new([0u8; 65536]))
+        }
+    }
+
+    pub fn contains_key(&self, page_no: &u64) -> bool {
+        self.slot(*page_no).is_some()
+    }
+
+    /// Number of populated pages. Cold-path (snapshot sizes only).
+    pub fn len(&self) -> usize {
+        self.direct.iter().filter(|s| s.is_some()).count() + self.overflow.len()
+    }
+
+    /// True when no page is populated. Cold-path.
+    pub fn is_empty(&self) -> bool {
+        self.overflow.is_empty() && self.direct.iter().all(|s| s.is_none())
+    }
+
+    /// Ascending page-number iteration, matching the old `BTreeMap` order
+    /// (direct slots 0.., then the sorted overflow) so snapshot formats and
+    /// memory seeding stay byte-identical.
+    pub fn iter(&self) -> impl Iterator<Item = (u64, &Box<[u8; 65536]>)> {
+        self.direct
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| s.as_ref().map(|p| (i as u64, p)))
+            .chain(self.overflow.iter().map(|(&k, v)| (k, v)))
+    }
+}
+
+impl FromIterator<(u64, Box<[u8; 65536]>)> for PageMap {
+    fn from_iter<I: IntoIterator<Item = (u64, Box<[u8; 65536]>)>>(iter: I) -> Self {
+        let mut m = PageMap::new();
+        for (k, v) in iter {
+            *m.get_or_alloc_mut(k) = v;
+        }
+        m
+    }
+}
+
+impl core::fmt::Debug for PageMap {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PageMap").field("pages", &self.len()).finish()
+    }
+}
+
 impl Mem {
     /// Get a pointer to a specific address in memory (legacy system)
     pub fn get_page(&mut self, a: u64) -> *mut u8 {
-        match self
-            .pages
-            .entry(a >> 16)
-            .or_insert_with(|| Box::new([0u8; 65536]))
-        {
-            p => &raw mut p[(a & 0xffff) as usize],
-        }
+        let page = self.pages.get_or_alloc_mut(a >> 16);
+        &raw mut page[(a & 0xffff) as usize]
     }
 
     /// Translate address through shared page table (nested in legacy memory)
@@ -434,10 +539,7 @@ impl Mem {
             }
             return;
         }
-        let page = self
-            .pages
-            .entry(addr >> 16)
-            .or_insert_with(|| Box::new([0u8; 65536]));
+        let page = self.pages.get_or_alloc_mut(addr >> 16);
         page[(addr & 0xffff) as usize] = value;
     }
 

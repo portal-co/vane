@@ -2126,7 +2126,9 @@ impl Reactor {
                 }
             }
         } else {
-            pages = lock.mem.pages.clone();
+            // PageMap -> snapshot-interchange BTreeMap (cold path; ascending
+            // order preserved so the serialized format is byte-identical).
+            pages = lock.mem.pages.iter().map(|(k, v)| (k, v.clone())).collect();
         }
         #[cfg(not(feature = "js-host"))]
         let regs = lock.regs;
@@ -2173,7 +2175,8 @@ impl Reactor {
                 }
             }
         } else {
-            lock.mem.pages = snap.pages.clone();
+            // Snapshot-interchange BTreeMap -> PageMap (cold path).
+            lock.mem.pages = snap.pages.iter().map(|(&k, v)| (k, v.clone())).collect();
         }
         #[cfg(not(feature = "js-host"))]
         {

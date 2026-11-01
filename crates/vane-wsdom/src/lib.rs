@@ -154,7 +154,7 @@ pub fn bootstrap(browser: &Browser, mem_size: u64, abi: GuestAbi, host_callback:
 
 /// Copy every populated 64KB page of `mem` into browser guest memory.
 pub async fn seed_memory(browser: &Browser, mem: &Mem, mem_size: u64) {
-    for (&page_no, page) in mem.pages.iter() {
+    for (page_no, page) in mem.pages.iter() {
         let page_base = page_no << 16;
         let offset = page_base % mem_size;
         let bytes = page.iter().map(u8::to_string).collect::<Vec<_>>().join(",");
