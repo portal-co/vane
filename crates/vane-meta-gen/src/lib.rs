@@ -245,16 +245,20 @@ macro_rules! vane_meta {
                 // budget is refreshed by the dispatch loop each iteration;
                 // see the trait doc for the full bail-out contract.
                 fn lr_direct_tail_target(&mut self, pc: u64) -> (usize, usize, usize) {
-                    if {
+                    // DEFAULT-OFF (see the direct-tail commit trail): a chained trace's
+// ctx.exit_pc can come back corrupted with a host pointer (caught as
+// dispatch #1224991 pc=0x3f8cd69544 at the X.509 initcall — deterministic).
+// Opt in with VANE_DIRECT_TAIL=1 while the corruption is hunted.
+if {
                         let g = $crate::vane_arch::DIRECT_TAIL_GATE
                             .load(core::sync::atomic::Ordering::Relaxed);
                         let g = if g == 0 {
-                            let off = std::env::var_os("VANE_NO_DIRECT_TAIL").is_some();
+                            let on = std::env::var_os("VANE_DIRECT_TAIL").is_some();
                             $crate::vane_arch::DIRECT_TAIL_GATE.store(
-                                if off { 1 } else { 2 },
+                                if on { 2 } else { 1 },
                                 core::sync::atomic::Ordering::Relaxed,
                             );
-                            if off { 1 } else { 2 }
+                            if on { 2 } else { 1 }
                         } else {
                             g
                         };
@@ -1154,16 +1158,20 @@ macro_rules! vane_meta {
                 // by the dispatch loop each iteration; bail-outs force the
                 // normal exit path.
                 fn lr_direct_tail_target(&mut self, pc: u64) -> (usize, usize, usize) {
-                    if {
+                    // DEFAULT-OFF (see the direct-tail commit trail): a chained trace's
+// ctx.exit_pc can come back corrupted with a host pointer (caught as
+// dispatch #1224991 pc=0x3f8cd69544 at the X.509 initcall — deterministic).
+// Opt in with VANE_DIRECT_TAIL=1 while the corruption is hunted.
+if {
                         let g = $crate::vane_arch::DIRECT_TAIL_GATE
                             .load(core::sync::atomic::Ordering::Relaxed);
                         let g = if g == 0 {
-                            let off = std::env::var_os("VANE_NO_DIRECT_TAIL").is_some();
+                            let on = std::env::var_os("VANE_DIRECT_TAIL").is_some();
                             $crate::vane_arch::DIRECT_TAIL_GATE.store(
-                                if off { 1 } else { 2 },
+                                if on { 2 } else { 1 },
                                 core::sync::atomic::Ordering::Relaxed,
                             );
-                            if off { 1 } else { 2 }
+                            if on { 2 } else { 1 }
                         } else {
                             g
                         };
