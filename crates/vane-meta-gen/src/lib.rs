@@ -279,26 +279,37 @@ macro_rules! vane_meta {
                     let Some(ct) = lock.compiled.borrow().get(&pc).cloned() else {
                         return (0, 0);
                     };
+                    // ONLY native-JIT targets chain directly: the jump enters
+                    // the target's MACHINE CODE with the current TraceCtx, so
+                    // the innermost exit flows back through the shared ctx to
+                    // the ORIGINAL adapter. ct.f (native_adapter) is an sret
+                    // Rust fn that builds its own ctx — jumping there from
+                    // JIT'd code corrupts the hidden sret pointer (the boot
+                    // SIGBUS).
+                    let (Some(n), kind) = (&ct.native, &ct.kind) else {
+                        return (0, 0);
+                    };
+                    if *kind != $crate::vane_arch::interp::TraceBackend::Jit {
+                        return (0, 0);
+                    }
+                    let code = n.code as usize;
+                    if code == 0 {
+                        return (0, 0);
+                    }
                     // Pin rotation: two slots, alternating per hop. At any
                     // instant they hold the currently-executing trace's ct
                     // and the jump target's, so a registry clear mid-chain
-                    // cannot drop (and munmap) executing code. The pin also
-                    // owns the returned address: a local clone would dangle
-                    // the moment this fn returns, but the pinned clone lives
-                    // inside `Core` (shared, heap-stable) until rotated out
-                    // two hops later.
+                    // cannot drop (and munmap) executing code.
                     lock.tail_flip = !lock.tail_flip;
-                    let (f, ct_addr) = if lock.tail_flip {
-                        let p = lock.tail_pin_a.insert(ct);
-                        (p.f as usize, core::ptr::from_ref(p) as usize)
+                    let ct_addr = if lock.tail_flip {
+                        core::ptr::from_ref(lock.tail_pin_a.insert(ct)) as usize
                     } else {
-                        let p = lock.tail_pin_b.insert(ct);
-                        (p.f as usize, core::ptr::from_ref(p) as usize)
+                        core::ptr::from_ref(lock.tail_pin_b.insert(ct)) as usize
                     };
                     drop(lock);
                     $crate::vane_arch::VANE_TAIL_DIRECT
                         .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    (f, ct_addr)
+                    (code, ct_addr)
                 }
                 // Execute a privileged instruction inline in a trace
                 // (PLAN_TRACE_CUTOVER). The handler lives on the Reactor
@@ -1158,20 +1169,29 @@ macro_rules! vane_meta {
                     let Some(ct) = lock.compiled.borrow().get(&pc).cloned() else {
                         return (0, 0);
                     };
-                    // Pin rotation: two slots, alternating per hop (see the
-                    // plain-Rust impl for the ownership reasoning).
+                    // ONLY native-JIT targets chain (machine code + shared
+                    // ctx; see the plain-Rust impl).
+                    let (Some(n), kind) = (&ct.native, &ct.kind) else {
+                        return (0, 0);
+                    };
+                    if *kind != $crate::vane_arch::interp::TraceBackend::Jit {
+                        return (0, 0);
+                    }
+                    let code = n.code as usize;
+                    if code == 0 {
+                        return (0, 0);
+                    }
+                    // Pin rotation (see the plain-Rust impl).
                     lock.tail_flip = !lock.tail_flip;
-                    let (f, ct_addr) = if lock.tail_flip {
-                        let p = lock.tail_pin_a.insert(ct);
-                        (p.f as usize, core::ptr::from_ref(p) as usize)
+                    let ct_addr = if lock.tail_flip {
+                        core::ptr::from_ref(lock.tail_pin_a.insert(ct)) as usize
                     } else {
-                        let p = lock.tail_pin_b.insert(ct);
-                        (p.f as usize, core::ptr::from_ref(p) as usize)
+                        core::ptr::from_ref(lock.tail_pin_b.insert(ct)) as usize
                     };
                     drop(lock);
                     $crate::vane_arch::VANE_TAIL_DIRECT
                         .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    (f, ct_addr)
+                    (code, ct_addr)
                 }
                 fn lr_read_byte(&self, addr: u64) -> u8 {
                     // Fetch validation (CheckCode): translate as exec.

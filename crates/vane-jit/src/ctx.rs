@@ -58,9 +58,10 @@ pub type ShimFpConvert = unsafe extern "C" fn(u8, u8, u64) -> u64;
 
 /// A direct tail-call target, returned by the tail-lookup shim in two
 /// registers (`#[repr(C)]` struct of two `usize` — aarch64 SysV returns
-/// x0/x1): `ct` is the target's `&CompiledTrace` (passed as the callee's
-/// second arg), `f` its fn pointer (jumped to with the host pointer in
-/// x0). `(0, 0)` means "not available — exit to the dispatch loop".
+/// x0/x1): `f` is the target trace's MACHINE CODE entry (jumped to with the
+/// CURRENT TraceCtx in x0 — its exit flows back through the shared ctx to
+/// the original adapter), `ct` the pinned `&CompiledTrace` (bookkeeping).
+/// `(0, 0)` means "not available — exit to the dispatch loop".
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TailTarget {

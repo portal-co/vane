@@ -11,6 +11,10 @@ use vane_jit::compiled_trace;
 struct MockReactor {
     regs: std::cell::RefCell<[u64; 32]>,
     mem: std::cell::RefCell<std::collections::BTreeMap<u64, u8>>,
+    /// Direct-tail wiring (the direct_tail_chains test): pc -> `(target
+    /// machine code, unused)` — mirrors the real registry (only registered
+    /// pcs chain; anything else exits to the dispatch loop).
+    tail: std::cell::RefCell<std::collections::BTreeMap<u64, (usize, usize)>>,
 }
 
 impl LocalReactor for MockReactor {
@@ -29,6 +33,9 @@ impl LocalReactor for MockReactor {
     fn lr_has_local_regfile(&self) -> bool {
         true
     }
+    fn lr_direct_tail_target(&mut self, pc: u64) -> (usize, usize) {
+        self.tail.borrow().get(&pc).copied().unwrap_or((0, 0))
+    }
 }
 
 fn make_host() -> LocalStackHost<MockReactor> {
@@ -36,6 +43,7 @@ fn make_host() -> LocalStackHost<MockReactor> {
         reactor: MockReactor {
             regs: std::cell::RefCell::new([0; 32]),
             mem: std::cell::RefCell::new(Default::default()),
+            tail: std::cell::RefCell::new(Default::default()),
         },
         test_mode: false,
         pc: 0,
@@ -430,4 +438,57 @@ fn async_memory_ops_suspend_and_resume() {
         StackOp::PushImm(0xe000),
         StackOp::TailCall,
     ]);
+}
+
+/// The direct-tail chain gate: trace A's TailCall jumps straight into
+/// trace B's MACHINE CODE with the current TraceCtx (no adapter round
+/// trip); B runs entirely and its exit flows back through the shared ctx
+/// to A's adapter. This is the bug class the boot SIGBUS came from
+/// (jumping into native_adapter — an sret Rust fn — instead of the code).
+#[test]
+fn native_direct_tail_chains() {
+    let b_ops = vec![
+        StackOp::CheckCode {
+            addr: 0x2000,
+            expected: vec![].into(),
+            miss_label: String::new(),
+        },
+        StackOp::PushImm(0x5B5B),
+        StackOp::StoreReg(2),
+        StackOp::PushImm(0x8000),
+        StackOp::TailCall,
+    ];
+    let a_ops = vec![
+        StackOp::CheckCode {
+            addr: 0x1000,
+            expected: vec![].into(),
+            miss_label: String::new(),
+        },
+        StackOp::PushImm(0xAAA),
+        StackOp::StoreReg(1),
+        StackOp::PushImm(0x2000), // B's pc
+        StackOp::TailCall,
+    ];
+    // B first: its machine-code entry is what A's lookup returns.
+    let b = compiled_trace::<MockReactor>(vane_arch::shared_new(b_ops))
+        .expect("trace B compiles");
+    let b_code = b.native.as_ref().expect("native").code as usize;
+    let a = compiled_trace::<MockReactor>(vane_arch::shared_new(a_ops))
+        .expect("trace A compiles");
+
+    let mut host = make_host();
+    host.reactor
+        .tail
+        .borrow_mut()
+        .insert(0x2000, (b_code, 0));
+
+    let exit = (a.f)(&mut host, &a);
+    assert_eq!(exit_key(&exit), (0, 0x8000), "B's exit propagates");
+    // The register CACHE (host.regs — where ctx.regs points) is the
+    // harness's result surface (same as every differential test).
+    assert_eq!(host.regs[1], 0xAAA, "A ran");
+    assert_eq!(
+        host.regs[2], 0x5B5B,
+        "B ran via the direct tail (no adapter round trip)"
+    );
 }

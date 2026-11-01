@@ -718,13 +718,16 @@ impl Asm {
                 // target) by returning ct == 0.
                 self.str_(9, 19, O_EXIT_PC); // persist: the stub may clobber x9
                 self.mov_reg(1, 9); // x1 = target pc (call only sets x0)
-                self.call(O_TAIL_LOOKUP); // → x0 = ct, x1 = target fn
-                let fb = self.cbz_fwd(0); // ct == 0 → normal exit
-                                          // Tail-jump: x0 = host, x1 = ct, br target_fn.
-                self.mov_reg(2, 1); // x2 = f
-                self.mov_reg(1, 0); // x1 = ct
-                self.ldr(0, 19, O_HOST); // x0 = ctx.host
-                self.br_reg(2);
+                self.call(O_TAIL_LOOKUP); // → x0 = target MACHINE CODE (0 = none)
+                let fb = self.cbz_fwd(0); // 0 → normal exit to the loop
+                // Tail-jump into the target's machine code with the CURRENT
+                // ctx: its entry ABI is (ctx) with x19 = ctx, and its exit
+                // (whichever trace ends the chain) flows back to OUR adapter
+                // through the shared ctx. x19 is callee-saved, so it still
+                // holds the ctx after the stub call.
+                self.mov_reg(9, 0); // x9 = code
+                self.mov_reg(0, 19); // x0 = ctx
+                self.br_reg(9);
                 self.patch_to_here(fb);
                 self.ldr(9, 19, O_EXIT_PC);
                 self.exit_tailcall_x9();
