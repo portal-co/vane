@@ -34,6 +34,7 @@ pub mod virtio;
 pub mod virtio_9p;
 pub mod virtio_blk;
 pub mod virtio_net;
+pub mod virtio_gpu;
 
 #[cfg(feature = "fuzz-traces")]
 #[doc(hidden)]

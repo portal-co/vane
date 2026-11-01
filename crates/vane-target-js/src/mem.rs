@@ -105,7 +105,10 @@ mod tests {
             physical_address_bits: 56,
         };
         CoreJsMemoryCodegen.emit_page_table_glue(&mut b, &spec);
-        assert!(b.out.contains("shared paging emitter glue not yet generated"));
+        assert!(
+            b.out
+                .contains("shared paging emitter glue not yet generated")
+        );
         assert!(b.out.contains("$.perf"));
     }
 

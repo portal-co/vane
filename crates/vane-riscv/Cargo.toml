@@ -21,6 +21,7 @@ gen-blocks = []
 
 [dependencies]
 libm.workspace = true
+spin = { workspace = true }
 vane-arch = { path = "../vane-arch", default-features = false }
 rv-asm.workspace = true
 paste = "1.0.15"

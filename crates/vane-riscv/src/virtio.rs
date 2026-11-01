@@ -27,6 +27,7 @@ pub const DEV_NET: u32 = 1;
 pub const DEV_BLK: u32 = 2;
 pub const DEV_9P: u32 = 9;
 pub const DEV_RNG: u32 = 4;
+pub const DEV_GPU: u32 = 16;
 
 // Legacy (v1) register offsets within the 0x1000-byte MMIO region.
 const R_MAGIC: u64 = 0x000;

@@ -21,6 +21,8 @@
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
+use spin::Mutex;
+use vane_arch::Shared;
 use core::fmt::Formatter;
 
 /// One damage rectangle in framebuffer pixels.
@@ -87,6 +89,15 @@ pub struct DisplaySurface {
     /// Cap on queued input (a flood of pointer moves must not grow this
     /// unboundedly); oldest events are dropped past the cap.
     input_cap: usize,
+}
+
+/// The shell-device shared handle: `Shared<Mutex<DisplaySurface>>` (spin,
+/// matching the rest of the workspace's shared-mutability primitive).
+pub type SharedSurface = Shared<spin::Mutex<DisplaySurface>>;
+
+/// Construct a shared surface (the one path both shells and the device use).
+pub fn new_shared(width: u32, height: u32, max_credits: u32) -> SharedSurface {
+    Shared::new(Mutex::new(DisplaySurface::new(width, height, max_credits)))
 }
 
 impl DisplaySurface {

@@ -135,9 +135,13 @@ pub struct WebMachine {
     reactor: Reactor,
     pc: u64,
     /// Guest display seam: framebuffer + damage + input queue. The shell
-    /// (this surface) drains and injects; the future virtio-display device
-    /// will take its own `Shared` clone to produce from the guest side.
+    /// (this surface) drains and injects; the virtio-gpu 2D device takes
+    /// its own `Shared` clone to produce from the guest side (see
+    /// [`WebMachine::enableDisplayDevice`]).
     display: Shared<Mutex<DisplaySurface>>,
+    /// Whether the virtio-gpu 2D-subset device is attached (affects the
+    /// DTB's virtio,mmio node list at `boot`).
+    display_dev: bool,
 }
 
 #[wasm_bindgen]
@@ -151,6 +155,7 @@ impl WebMachine {
             reactor,
             pc: RAM_BASE,
             display: vane::vane_arch::shared_new(Mutex::new(DisplaySurface::new(1280, 720, 64))),
+            display_dev: false,
         }
     }
 
@@ -215,7 +220,16 @@ impl WebMachine {
             bytes.extend_from_slice(&w.to_le_bytes());
         }
         self.reactor.write_bytes(FW_DYNAMIC_INFO_ADDR, &bytes);
-        let dtb = machine::virt_dtb(ram_size, initrd_range, append);
+        let dtb = if self.display_dev {
+            machine::virt_dtb_with_virtio(
+                ram_size,
+                initrd_range,
+                append,
+                &[vane::vane_riscv::virtio::DEV_GPU],
+            )
+        } else {
+            machine::virt_dtb(ram_size, initrd_range, append)
+        };
         self.reactor.write_bytes(DTB_ADDR, &dtb);
 
         if self.reactor.swap_active() {
@@ -300,6 +314,23 @@ impl WebMachine {
     #[wasm_bindgen(js_name = "inputPointer")]
     pub fn input_pointer(&self, x: u32, y: u32, buttons: u8, kind: u8) {
         self.display.lock().push_input(InputEvent::Pointer { x, y, buttons, kind });
+    }
+
+    /// Attach the virtio-gpu 2D-subset display device (the guest-side
+    /// producer for the display seam). Call BEFORE `boot` so the DTB emits
+    /// the device's virtio,mmio node and the Linux virtio_gpu driver binds;
+    /// the guest's RESOURCE_FLUSH rects then arrive in `displayDrain`
+    /// through the same shared surface (and frame credits) as the test
+    /// pattern.
+    #[wasm_bindgen(js_name = "enableDisplayDevice")]
+    pub fn enable_display_device(&mut self) -> Result<(), JsValue> {
+        if self.display_dev {
+            return Err(JsValue::from_str("display device already enabled"));
+        }
+        let dev = vane::vane_riscv::virtio_gpu::VirtioGpuDisplay::new(self.display.clone());
+        self.reactor.add_virtio_device(Box::new(dev));
+        self.display_dev = true;
+        Ok(())
     }
 
     /// Swap accounting (resident/faults/evictions/bytes/integrity failures).

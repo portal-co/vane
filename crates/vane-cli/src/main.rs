@@ -80,6 +80,11 @@ struct Args {
     /// (10.0.0.1) through the full guest network stack — a deterministic
     /// loopback for e2e tests, not a real network.
     net: bool,
+    /// Attach the virtio-gpu 2D-subset display device (guest producer for
+    /// the display seam). Without a native shell attached, the drained
+    /// damage is summarized at poweroff — the end-to-end guest-pixels
+    /// proof for the e2e gate.
+    display: bool,
 }
 
 const RAM_BASE: u64 = 0x8000_0000;
@@ -114,6 +119,22 @@ impl DirFs {
         }
         p
     }
+}
+
+/// Drain the display surface and summarize the damage the guest produced
+/// (the no-native-shell end-to-end proof: Linux's virtio_gpu driver
+/// transferred and flushed real pixels through the device).
+fn report_display_damage(surface: &Option<vane::vane_riscv::display::SharedSurface>) {
+    let Some(surface) = surface else { return };
+    let mut s = surface.lock();
+    let (w, h) = (s.width(), s.height());
+    let drained = s.drain();
+    let bytes: usize = drained.iter().map(|(_, px)| px.len()).sum();
+    eprintln!(
+        "display: {} damage region(s), {} bytes of RGBA8888 drained from a {w}x{h} surface",
+        drained.len(),
+        bytes
+    );
 }
 
 /// Per-message 9P logger wrapping the device (VANE_9P_DEBUG): delegates
@@ -451,6 +472,7 @@ fn parse_args() -> Result<Args, String> {
     let mut disk = None;
     let mut share = None;
     let mut net = false;
+    let mut display = false;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -486,6 +508,7 @@ fn parse_args() -> Result<Args, String> {
             "--disk" => disk = Some(it.next().ok_or("--disk needs a value")?),
             "--share" => share = Some(it.next().ok_or("--share needs a value")?),
             "--net" => net = true,
+            "--display" => display = true,
             "--swap-key" => swap_key = Some(it.next().ok_or("--swap-key needs a value")?),
             "--resident" => {
                 let v = it.next().ok_or("--resident needs a value")?;
@@ -526,6 +549,7 @@ fn parse_args() -> Result<Args, String> {
         disk,
         share,
         net,
+        display,
     })
 }
 
@@ -570,6 +594,9 @@ fn main() {
     let reactor = Reactor::new();
 
     let entry;
+    // The display seam's shell-side handle (surface shared with the
+    // virtio-gpu device registered below) for the poweroff damage report.
+    let mut display_surface: Option<vane::vane_riscv::display::SharedSurface> = None;
     if args.machine {
         // Machine mode: devices + privileged architecture.
         reactor.set_hart_enabled(true);
@@ -615,6 +642,19 @@ fn main() {
             reactor.add_virtio_device(Box::new(dev));
             virtio_dev_ids.push(vane::vane_riscv::virtio::DEV_NET);
             eprintln!("virtio-net: echo NIC attached (guest 10.0.0.2, host peer 10.0.0.1)");
+        }
+
+        if args.display {
+            // virtio-gpu 2D subset -> the shared DisplaySurface. The shell
+            // side keeps the same handle for draining; here it exists to
+            // prove the guest pushes pixels (drained-damage report at
+            // poweroff).
+            let surface = vane::vane_riscv::display::new_shared(1280, 720, 64);
+            let dev = vane::vane_riscv::virtio_gpu::VirtioGpuDisplay::new(surface.clone());
+            reactor.add_virtio_device(Box::new(dev));
+            virtio_dev_ids.push(vane::vane_riscv::virtio::DEV_GPU);
+            display_surface = Some(surface.clone());
+            eprintln!("virtio-gpu: 2D display attached (1280x720, frame credits 64)");
         }
 
         // M5: encrypted swap for the RAM region. Set up BEFORE loading images
@@ -949,6 +989,7 @@ fn main() {
                 }
                 if let Some(p) = power {
                     use vane::vane_riscv::machine::PowerAction;
+                    report_display_damage(&display_surface);
                     match p {
                         PowerAction::PowerOff { code } => std::process::exit(code as i32),
                         PowerAction::Reboot => {
