@@ -58,6 +58,8 @@ const O_FP_TO_INT: usize = offset_of!(TraceCtx, fp_to_int);
 const O_FP_CONVERT: usize = offset_of!(TraceCtx, fp_convert);
 const O_TAIL_LOOKUP: usize = offset_of!(TraceCtx, tail_lookup);
 const O_HOST: usize = offset_of!(TraceCtx, host);
+const O_NEXT_OPS: usize = offset_of!(TraceCtx, next_ops);
+const O_NEXT_OPS_LEN: usize = offset_of!(TraceCtx, next_ops_len);
 
 /// The aarch64 assembler + the codegen state (loop/if label stacks, exit
 /// jumps to the shared epilogue).
@@ -720,13 +722,15 @@ impl Asm {
                 self.mov_reg(1, 9); // x1 = target pc (call only sets x0)
                 self.call(O_TAIL_LOOKUP); // → x0 = target MACHINE CODE (0 = none)
                 let fb = self.cbz_fwd(0); // 0 → normal exit to the loop
-                // Tail-jump into the target's machine code with the CURRENT
-                // ctx: its entry ABI is (ctx) with x19 = ctx, and its exit
-                // (whichever trace ends the chain) flows back to OUR adapter
-                // through the shared ctx. x19 is callee-saved, so it still
-                // holds the ctx after the stub call.
+                // Tail-jump into the target's machine code: (ctx, ops_ptr,
+                // ops_len) — the target's ops slice rides in the ctx (the
+                // shim stashed it); x19 (ctx) survives the stub call (it is
+                // callee-saved). The innermost exit flows back through the
+                // shared ctx to OUR adapter.
                 self.mov_reg(9, 0); // x9 = code
                 self.mov_reg(0, 19); // x0 = ctx
+                self.ldr(1, 19, O_NEXT_OPS); // x1 = target ops ptr
+                self.ldr(2, 19, O_NEXT_OPS_LEN); // x2 = target ops len
                 self.br_reg(9);
                 self.patch_to_here(fb);
                 self.ldr(9, 19, O_EXIT_PC);

@@ -253,6 +253,9 @@ pub fn build_ctx<R: LocalReactor>(host: &mut LocalStackHost<R>) -> TraceCtx {
         core::ptr::addr_of_mut!((*p).fp_to_int).write(shim_fp_to_int);
         core::ptr::addr_of_mut!((*p).fp_convert).write(shim_fp_convert);
         core::ptr::addr_of_mut!((*p).tail_lookup).write(shim_tail_lookup::<R>);
+        core::ptr::addr_of_mut!((*p).next_ops)
+            .write(core::ptr::null::<vane_arch::StackOp>());
+        core::ptr::addr_of_mut!((*p).next_ops_len).write(0);
         u.assume_init()
     }
 }
@@ -266,6 +269,11 @@ pub unsafe extern "C" fn shim_tail_lookup<R: LocalReactor>(
     ctx: *mut TraceCtx,
     pc: u64,
 ) -> TailTarget {
-    let (ct, f) = host::<R>(ctx).reactor.lr_direct_tail_target(pc);
-    TailTarget { ct, f }
+    let (code, ops_ptr, ops_len) = host::<R>(ctx).reactor.lr_direct_tail_target(pc);
+    // Hand the target's ops slice to the lowering via the ctx (the
+    // machine-code ABI is (ctx, ops_ptr, ops_len) — see NativeTraceFn).
+    core::ptr::addr_of_mut!((*ctx).next_ops)
+        .write(ops_ptr as *const vane_arch::StackOp);
+    core::ptr::addr_of_mut!((*ctx).next_ops_len).write(ops_len);
+    TailTarget { ct: code, f: ops_ptr }
 }

@@ -244,7 +244,7 @@ macro_rules! vane_meta {
                 // Direct tail-call chaining (compiled -> compiled). The
                 // budget is refreshed by the dispatch loop each iteration;
                 // see the trait doc for the full bail-out contract.
-                fn lr_direct_tail_target(&mut self, pc: u64) -> (usize, usize) {
+                fn lr_direct_tail_target(&mut self, pc: u64) -> (usize, usize, usize) {
                     if {
                         let g = $crate::vane_arch::DIRECT_TAIL_GATE
                             .load(core::sync::atomic::Ordering::Relaxed);
@@ -260,24 +260,24 @@ macro_rules! vane_meta {
                         };
                         g == 1
                     } {
-                        return (0, 0);
+                        return (0, 0, 0);
                     }
                     if self.core.lock().direct_hops == 0 {
-                        return (0, 0);
+                        return (0, 0, 0);
                     }
                     let mut lock = self.core.lock();
                     if lock.direct_hops == 0 || lock.code_dirty
                         || !lock.hook_events.is_empty() || lock.pause_on_hook
                     {
-                        return (0, 0);
+                        return (0, 0, 0);
                     }
                     lock.direct_hops -= 1;
                     // Hooks at the TARGET pc must fire through the loop.
                     if lock.hooks.at(pc).is_some() {
-                        return (0, 0);
+                        return (0, 0, 0);
                     }
                     let Some(ct) = lock.compiled.borrow().get(&pc).cloned() else {
-                        return (0, 0);
+                        return (0, 0, 0);
                     };
                     // ONLY native-JIT targets chain directly: the jump enters
                     // the target's MACHINE CODE with the current TraceCtx, so
@@ -287,15 +287,32 @@ macro_rules! vane_meta {
                     // JIT'd code corrupts the hidden sret pointer (the boot
                     // SIGBUS).
                     let (Some(n), kind) = (&ct.native, &ct.kind) else {
-                        return (0, 0);
+                        return (0, 0, 0);
                     };
                     if *kind != $crate::vane_arch::interp::TraceBackend::Jit {
-                        return (0, 0);
+                        return (0, 0, 0);
                     }
                     let code = n.code as usize;
-                    if code == 0 {
-                        return (0, 0);
+                    // The entry MUST be the machine-code entry (a huge
+                    // mmap'd address). A small value here means a registry
+                    // entry whose `native.code` is not a code pointer (e.g.
+                    // a tag or a table index leaking into the field) — bail
+                    // to the normal exit instead of br'ing into it (the
+                    // boot SIGBUS was exactly such a jump: pc = 3 = TAG_BAIL).
+                    if code < 4096 {
+                        if std::env::var_os("VANE_TAIL_DEBUG").is_some() {
+                            eprintln!(
+                                "[tail] bogus native.code {code:#x} for pc {pc:#x} (kind {:?}) — bail",
+                                *kind
+                            );
+                        }
+                        return (0, 0, 0);
                     }
+                    // The machine-code ABI takes the trace's ops slice: the
+                    // TARGET's slice rides along (the adapter hands the
+                    // ORIGINAL trace's slice; the code stashes it for the
+                    // trap-index path).
+                    let (ops_ptr, ops_len) = (ct.ops.as_ptr() as usize, ct.ops.len());
                     // Pin rotation: two slots, alternating per hop. At any
                     // instant they hold the currently-executing trace's ct
                     // and the jump target's, so a registry clear mid-chain
@@ -305,11 +322,10 @@ macro_rules! vane_meta {
                         core::ptr::from_ref(lock.tail_pin_a.insert(ct)) as usize
                     } else {
                         core::ptr::from_ref(lock.tail_pin_b.insert(ct)) as usize
-                    };
-                    drop(lock);
+                    };                    drop(lock);
                     $crate::vane_arch::VANE_TAIL_DIRECT
                         .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    (code, ct_addr)
+                    (code, ops_ptr, ops_len)
                 }
                 // Execute a privileged instruction inline in a trace
                 // (PLAN_TRACE_CUTOVER). The handler lives on the Reactor
@@ -1137,7 +1153,7 @@ macro_rules! vane_meta {
                 // contract as the plain-Rust impl: the budget is refreshed
                 // by the dispatch loop each iteration; bail-outs force the
                 // normal exit path.
-                fn lr_direct_tail_target(&mut self, pc: u64) -> (usize, usize) {
+                fn lr_direct_tail_target(&mut self, pc: u64) -> (usize, usize, usize) {
                     if {
                         let g = $crate::vane_arch::DIRECT_TAIL_GATE
                             .load(core::sync::atomic::Ordering::Relaxed);
@@ -1153,45 +1169,61 @@ macro_rules! vane_meta {
                         };
                         g == 1
                     } {
-                        return (0, 0);
+                        return (0, 0, 0);
                     }
                     let mut lock = self.core.lock();
                     if lock.direct_hops == 0 || lock.code_dirty
                         || !lock.hook_events.is_empty() || lock.pause_on_hook
                     {
-                        return (0, 0);
+                        return (0, 0, 0);
                     }
                     lock.direct_hops -= 1;
                     // Hooks at the TARGET pc must fire through the loop.
                     if lock.hooks.at(pc).is_some() {
-                        return (0, 0);
+                        return (0, 0, 0);
                     }
                     let Some(ct) = lock.compiled.borrow().get(&pc).cloned() else {
-                        return (0, 0);
+                        return (0, 0, 0);
                     };
                     // ONLY native-JIT targets chain (machine code + shared
                     // ctx; see the plain-Rust impl).
                     let (Some(n), kind) = (&ct.native, &ct.kind) else {
-                        return (0, 0);
+                        return (0, 0, 0);
                     };
                     if *kind != $crate::vane_arch::interp::TraceBackend::Jit {
-                        return (0, 0);
+                        return (0, 0, 0);
                     }
                     let code = n.code as usize;
-                    if code == 0 {
-                        return (0, 0);
+                    // The entry MUST be the machine-code entry (a huge
+                    // mmap'd address). A small value here means a registry
+                    // entry whose `native.code` is not a code pointer (e.g.
+                    // a tag or a table index leaking into the field) — bail
+                    // to the normal exit instead of br'ing into it (the
+                    // boot SIGBUS was exactly such a jump: pc = 3 = TAG_BAIL).
+                    if code < 4096 {
+                        if std::env::var_os("VANE_TAIL_DEBUG").is_some() {
+                            eprintln!(
+                                "[tail] bogus native.code {code:#x} for pc {pc:#x} (kind {:?}) — bail",
+                                *kind
+                            );
+                        }
+                        return (0, 0, 0);
                     }
+                    // The machine-code ABI takes the trace's ops slice: the
+                    // TARGET's slice rides along (the adapter hands the
+                    // ORIGINAL trace's slice; the code stashes it for the
+                    // trap-index path).
+                    let (ops_ptr, ops_len) = (ct.ops.as_ptr() as usize, ct.ops.len());
                     // Pin rotation (see the plain-Rust impl).
                     lock.tail_flip = !lock.tail_flip;
                     let ct_addr = if lock.tail_flip {
                         core::ptr::from_ref(lock.tail_pin_a.insert(ct)) as usize
                     } else {
                         core::ptr::from_ref(lock.tail_pin_b.insert(ct)) as usize
-                    };
-                    drop(lock);
+                    };                    drop(lock);
                     $crate::vane_arch::VANE_TAIL_DIRECT
                         .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    (code, ct_addr)
+                    (code, ops_ptr, ops_len)
                 }
                 fn lr_read_byte(&self, addr: u64) -> u8 {
                     // Fetch validation (CheckCode): translate as exec.

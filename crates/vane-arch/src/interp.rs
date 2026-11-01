@@ -870,10 +870,12 @@ pub trait LocalReactor {
         false
     }
     /// Direct tail-call lookup (compiled-trace -> compiled-trace chaining):
-    /// given the tail target pc, return `(target_fn, target_ct)` so JIT'd
-    /// code can jump straight into the next compiled trace instead of
-    /// exiting to the Rust dispatch loop. `(0, 0)` means "no direct tail
-    /// available — exit normally" and MUST be returned when any of:
+    /// given the tail target pc, return `(target_machine_code,
+    /// target_ops_ptr, target_ops_len)` so JIT'd code can jump straight into
+    /// the next compiled trace (its `NativeTraceFn` ABI takes the ops slice)
+    /// instead of exiting to the Rust dispatch loop. `(0, 0, 0)` means "no
+    /// direct tail available — exit normally" and MUST be returned when any
+    /// of:
     ///
     /// - the hop budget is exhausted (bounds the chain so the dispatch
     ///   loop's interrupt delivery, fuel accounting and io ticks keep
@@ -884,10 +886,10 @@ pub trait LocalReactor {
     ///   visibility),
     /// - the target is not a registered compiled trace.
     ///
-    /// The default returns `(0, 0)` (no direct tailing) so hosts without a
-    /// compiled-trace registry are unaffected.
-    fn lr_direct_tail_target(&mut self, _pc: u64) -> (usize, usize) {
-        (0, 0)
+    /// The default returns `(0, 0, 0)` (no direct tailing) so hosts without
+    /// a compiled-trace registry are unaffected.
+    fn lr_direct_tail_target(&mut self, _pc: u64) -> (usize, usize, usize) {
+        (0, 0, 0)
     }
     /// Byte width of a [`MemWidth`].
     fn lr_width_bytes(width: MemWidth) -> u64 {

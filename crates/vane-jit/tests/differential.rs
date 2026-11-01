@@ -14,7 +14,7 @@ struct MockReactor {
     /// Direct-tail wiring (the direct_tail_chains test): pc -> `(target
     /// machine code, unused)` — mirrors the real registry (only registered
     /// pcs chain; anything else exits to the dispatch loop).
-    tail: std::cell::RefCell<std::collections::BTreeMap<u64, (usize, usize)>>,
+    tail: std::cell::RefCell<std::collections::BTreeMap<u64, (usize, usize, usize)>>,
 }
 
 impl LocalReactor for MockReactor {
@@ -33,8 +33,9 @@ impl LocalReactor for MockReactor {
     fn lr_has_local_regfile(&self) -> bool {
         true
     }
-    fn lr_direct_tail_target(&mut self, pc: u64) -> (usize, usize) {
-        self.tail.borrow().get(&pc).copied().unwrap_or((0, 0))
+    fn lr_direct_tail_target(&mut self, pc: u64) -> (usize, usize, usize) {
+        let (code, _, _) = self.tail.borrow().get(&pc).copied().unwrap_or((0, 0, 0));
+        (code, 0usize, 0usize)
     }
 }
 
@@ -480,7 +481,7 @@ fn native_direct_tail_chains() {
     host.reactor
         .tail
         .borrow_mut()
-        .insert(0x2000, (b_code, 0));
+        .insert(0x2000, (b_code, 0, 0));
 
     let exit = (a.f)(&mut host, &a);
     assert_eq!(exit_key(&exit), (0, 0x8000), "B's exit propagates");

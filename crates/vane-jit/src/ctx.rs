@@ -18,6 +18,8 @@
 
 use core::ffi::c_void;
 
+use vane_arch::StackOp;
+
 /// Value-stack capacity. Codegen computes the trace's exact maximum depth and
 /// refuses (falls back to the interpreter) if it exceeds this.
 pub const STACK_CAP: usize = 512;
@@ -59,9 +61,10 @@ pub type ShimFpConvert = unsafe extern "C" fn(u8, u8, u64) -> u64;
 /// A direct tail-call target, returned by the tail-lookup shim in two
 /// registers (`#[repr(C)]` struct of two `usize` — aarch64 SysV returns
 /// x0/x1): `f` is the target trace's MACHINE CODE entry (jumped to with the
-/// CURRENT TraceCtx in x0 — its exit flows back through the shared ctx to
-/// the original adapter), `ct` the pinned `&CompiledTrace` (bookkeeping).
-/// `(0, 0)` means "not available — exit to the dispatch loop".
+/// CURRENT TraceCtx in x0 and the target's ops slice in x1/x2 — its exit
+/// flows back through the shared ctx to the original adapter), `ct` the
+/// pinned `&CompiledTrace` (bookkeeping). `(0, 0)` means "not available —
+/// exit to the dispatch loop".
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TailTarget {
@@ -129,6 +132,12 @@ pub struct TraceCtx {
     /// last so the offsets the codegen bakes via `offset_of!` for the
     /// fields above are unchanged.
     pub tail_lookup: ShimTailLookup,
+    /// The direct tail target's ops slice: the machine-code ABI is
+    /// `(ctx, ops_ptr, ops_len) -> tag`, and a chained hop must hand the
+    /// TARGET's ops to the target's code (the shim stashes them here; the
+    /// lowering loads them into x1/x2 before the br).
+    pub next_ops: *const StackOp,
+    pub next_ops_len: usize,
 }
 
 /// Pending-op tags written by the async shims into `TraceCtx::pending_op`.
