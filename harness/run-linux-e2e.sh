@@ -18,7 +18,8 @@
 #     hung boot's process is killed
 #
 # Engines: JIT = --features native-jit; no-JIT = plain interpreter. The
-# interpreter boot is SLOW (tens of minutes); this is a manual/nightly gate.
+# interpreter boot is SLOW (tens of minutes); this is a manual/nightly gate.# Under a loaded machine (load average in the double digits was observed
+# during bring-up), boots stretch 5-15x: raise VANE_E2E_TIMEOUT_* if needed.
 #
 # Usage: harness/run-linux-e2e.sh [engines...]   (default: "jit nojit")
 set -euo pipefail
@@ -27,8 +28,8 @@ cd "$(dirname "$0")/.."
 artifacts=harness/linux
 engines="${*:-jit nojit}"
 ram_bytes=$(( ${VANE_E2E_RAM_MB:-128} * 1024 * 1024 ))
-timeout_jit=${VANE_E2E_TIMEOUT_JIT:-2700}
-timeout_nojit=${VANE_E2E_TIMEOUT_NOJIT:-5400}
+timeout_jit=${VANE_E2E_TIMEOUT_JIT:-7200}
+timeout_nojit=${VANE_E2E_TIMEOUT_NOJIT:-10800}
 
 # NOTE: linux-generic (7.2.11) is REQUIRED here: the module set inside
 # initrd-virtio.gz is built for exactly that release (version magic

@@ -119,13 +119,24 @@ impl DirFs {
 impl vane::vane_riscv::virtio_9p::Host9p for DirFs {
     fn stat(&mut self, path: &str) -> Result<vane::vane_riscv::virtio_9p::Meta9p, i32> {
         let p = self.resolve(path);
+        let dbg = std::env::var_os("VANE_9P_DEBUG").is_some();
         match std::fs::metadata(&p) {
-            Ok(m) => Ok(vane::vane_riscv::virtio_9p::Meta9p {
-                mode: 0o644,
-                size: m.len(),
-                is_dir: m.is_dir(),
-            }),
-            Err(_) => Err(2), // ENOENT
+            Ok(m) => {
+                if dbg {
+                    eprintln!("9p: stat {p:?} -> ok ({} bytes)", m.len());
+                }
+                Ok(vane::vane_riscv::virtio_9p::Meta9p {
+                    mode: 0o644,
+                    size: m.len(),
+                    is_dir: m.is_dir(),
+                })
+            }
+            Err(_) => {
+                if dbg {
+                    eprintln!("9p: stat {p:?} -> ENOENT");
+                }
+                Err(2) // ENOENT
+            }
         }
     }
     fn open(&mut self, path: &str, flags: u32) -> Result<u64, i32> {
