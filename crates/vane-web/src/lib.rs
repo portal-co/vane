@@ -410,6 +410,23 @@ impl WebMachine {
         Ok(o.into())
     }
 
+    /// Trace-engine counters for perf triage (web baseline, t-1963):
+    /// hit/miss/compile/flush/flushDropped plus the core's code_gen,
+    /// code_dirty and cache len.
+    #[wasm_bindgen(js_name = "debugCounters")]
+    pub fn debug_counters(&self) -> js_sys::Object {
+        use wasm_bindgen::JsCast;
+        use vane::vane_arch::{TRACE_HIT, TRACE_MISS, TRACE_COMPILE, TRACE_FLUSH, TRACE_FLUSH_DROPPED};
+        let o = js_sys::Object::new();
+        let rel = |v: &std::sync::atomic::AtomicU64| v.load(std::sync::atomic::Ordering::Relaxed);
+        let set = |k: &str, v: u64| { let _ = js_sys::Reflect::set(&o, &k.into(), &JsValue::from(v)); };
+        let (hit, miss, comp, flush, dropped) = (rel(&TRACE_HIT), rel(&TRACE_MISS), rel(&TRACE_COMPILE), rel(&TRACE_FLUSH), rel(&TRACE_FLUSH_DROPPED));
+        set("hit", hit); set("miss", miss); set("compile", comp); set("flush", flush); set("flushDropped", dropped);
+        let c = self.reactor.debug_core_counters();
+        set("codeGen", c.0); set("codeDirty", c.1 as u64); set("cacheLen", c.2 as u64); set("revalDrop", c.3);
+        o
+    }
+
     /// Serialize the hot trace cache (guest pc → StackOp trace) to bytes. This
     /// is the producer half of the wizen-then-register flow: the interpreter
     /// dumps its traces, the bytes are embedded before Wizer snapshots, and

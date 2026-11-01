@@ -800,6 +800,18 @@ impl Reactor {
         }
     }
 
+    /// Perf-diagnostic counters (web baseline, t-1963): (code_gen,
+    /// code_dirty, trace_cache len, TRACE_FLUSH_DROPPED).
+    pub fn debug_core_counters(&self) -> (u64, bool, usize, u64) {
+        let g = self.core.lock();
+        let cache_len = g.trace_cache.borrow().len();
+        let gen = g.code_gen.get();
+        let dirty = g.code_dirty;
+        drop(g);
+        let drops = vane_arch::TRACE_FLUSH_DROPPED.load(std::sync::atomic::Ordering::Relaxed);
+        (gen, dirty, cache_len, drops)
+    }
+
     /// Enable encrypted swap for the machine-mode RAM region (M5,
     /// PLAN_LINUX_WASM.md §6). `swap_base`/`swap_len` delimit the physical
     /// RAM range routed through the [`vane_swap::PageCache`]. Call before
@@ -1802,7 +1814,19 @@ impl Reactor {
             } else {
                 pc
             };
-            let code = unsafe { (mem.get_page(fetch_pa) as *mut u32).read_unaligned() };
+            // The peek must use the swap-aware byte path when swap is
+            // active: get_page on a swap-backed page reads garbage (the
+            // resident frame pool), decode then fails, and EVERY pc takes
+            // the stepper — the trace engine never emits (9x web perf
+            // regression caught by the t-1963 baseline). Same idiom as the
+            // step_one fetch above.
+            let code = if (fetch_pa & 0xFFFF) > 0xFFFC || mem.swap_active() {
+                (0..4).fold(0u32, |acc, i| {
+                    acc | ((mem.read_byte(fetch_pa.wrapping_add(i)) as u32) << (8 * i))
+                })
+            } else {
+                unsafe { (mem.get_page(fetch_pa) as *mut u32).read_unaligned() }
+            };
             let needs_step = match Inst::decode(code, Xlen::Rv64) {
                 Ok((inst, _)) => {
                     is_ecall = matches!(inst, Inst::Ecall);
