@@ -46,7 +46,12 @@ pub enum InputEvent {
     /// code hashed to u32 by the shell), `pressed` = down.
     Key { code: u32, pressed: bool },
     /// Pointer event. `kind`: 0 = move, 1 = button down, 2 = button up.
-    Pointer { x: u32, y: u32, buttons: u8, kind: u8 },
+    Pointer {
+        x: u32,
+        y: u32,
+        buttons: u8,
+        kind: u8,
+    },
 }
 
 /// Outcome of a subimage push.
@@ -280,7 +285,15 @@ mod tests {
             }
         }
         assert_eq!(
-            s.push(Region { x: 2, y: 2, w: 4, h: 4 }, &px),
+            s.push(
+                Region {
+                    x: 2,
+                    y: 2,
+                    w: 4,
+                    h: 4
+                },
+                &px
+            ),
             PushStatus::Applied
         );
         let fb = s.fb();
@@ -292,7 +305,15 @@ mod tests {
         // The damage record is the clipped rect, not the requested one.
         assert_eq!(s.pending_len(), 1);
         let drained = s.drain();
-        assert_eq!(drained[0].0, Region { x: 2, y: 2, w: 2, h: 2 });
+        assert_eq!(
+            drained[0].0,
+            Region {
+                x: 2,
+                y: 2,
+                w: 2,
+                h: 2
+            }
+        );
         assert_eq!(&drained[0].1[0..4], &[255, 0, 0, 255]);
         assert_eq!(drained[0].1.len(), 2 * 2 * 4);
     }
@@ -301,13 +322,29 @@ mod tests {
     fn fully_outside_push_is_outside() {
         let mut s = DisplaySurface::new(4, 4, 8);
         assert_eq!(
-            s.push(Region { x: 10, y: 10, w: 2, h: 2 }, &[]),
+            s.push(
+                Region {
+                    x: 10,
+                    y: 10,
+                    w: 2,
+                    h: 2
+                },
+                &[]
+            ),
             PushStatus::Outside
         );
         assert_eq!(s.pending_len(), 0);
         // Zero-size too.
         assert_eq!(
-            s.push(Region { x: 0, y: 0, w: 0, h: 0 }, &[]),
+            s.push(
+                Region {
+                    x: 0,
+                    y: 0,
+                    w: 0,
+                    h: 0
+                },
+                &[]
+            ),
             PushStatus::Outside
         );
     }
@@ -318,7 +355,15 @@ mod tests {
         // Truncated rows: the blit stops at what was provided.
         let px = vec![7u8; 5];
         assert_eq!(
-            s.push(Region { x: 0, y: 0, w: 2, h: 2 }, &px),
+            s.push(
+                Region {
+                    x: 0,
+                    y: 0,
+                    w: 2,
+                    h: 2
+                },
+                &px
+            ),
             PushStatus::Applied
         );
     }
@@ -328,16 +373,40 @@ mod tests {
         let mut s = DisplaySurface::new(4, 4, 2);
         let px = vec![1u8; 4 * 4];
         assert_eq!(
-            s.push(Region { x: 0, y: 0, w: 1, h: 1 }, &px),
+            s.push(
+                Region {
+                    x: 0,
+                    y: 0,
+                    w: 1,
+                    h: 1
+                },
+                &px
+            ),
             PushStatus::Applied
         );
         assert_eq!(
-            s.push(Region { x: 2, y: 2, w: 1, h: 1 }, &px),
+            s.push(
+                Region {
+                    x: 2,
+                    y: 2,
+                    w: 1,
+                    h: 1
+                },
+                &px
+            ),
             PushStatus::Applied
         );
         assert_eq!(s.credits(), 0);
         assert_eq!(
-            s.push(Region { x: 0, y: 2, w: 1, h: 1 }, &px),
+            s.push(
+                Region {
+                    x: 0,
+                    y: 2,
+                    w: 1,
+                    h: 1
+                },
+                &px
+            ),
             PushStatus::Throttled
         );
         // The throttled push still blitted and recorded.
@@ -352,9 +421,25 @@ mod tests {
     fn contained_push_dedupes_but_still_costs_credit() {
         let mut s = DisplaySurface::new(8, 8, 4);
         let px = vec![1u8; 8 * 8 * 4];
-        s.push(Region { x: 0, y: 0, w: 4, h: 4 }, &px);
+        s.push(
+            Region {
+                x: 0,
+                y: 0,
+                w: 4,
+                h: 4,
+            },
+            &px,
+        );
         let n = s.pending_len();
-        s.push(Region { x: 1, y: 1, w: 2, h: 2 }, &px);
+        s.push(
+            Region {
+                x: 1,
+                y: 1,
+                w: 2,
+                h: 2,
+            },
+            &px,
+        );
         assert_eq!(s.pending_len(), n, "contained region must not duplicate");
         assert_eq!(s.credits(), 2, "dedupe still consumes the credit");
     }
@@ -368,9 +453,25 @@ mod tests {
         for _ in 0..4 {
             all.extend_from_slice(&blue);
         }
-        s.push(Region { x: 0, y: 0, w: 2, h: 2 }, &all);
+        s.push(
+            Region {
+                x: 0,
+                y: 0,
+                w: 2,
+                h: 2,
+            },
+            &all,
+        );
         let green = [0u8, 255, 0, 255];
-        s.push(Region { x: 1, y: 1, w: 1, h: 1 }, &green);
+        s.push(
+            Region {
+                x: 1,
+                y: 1,
+                w: 1,
+                h: 1,
+            },
+            &green,
+        );
         let drained = s.drain();
         // The green push was contained by the full-frame damage and got
         // deduped — but the drained region's pixels must still show the
@@ -393,7 +494,15 @@ mod tests {
         assert_eq!(a.pending_len(), 1);
         let d = a.drain();
         assert_eq!(d.len(), 1);
-        assert_eq!(d[0].0, Region { x: 0, y: 0, w: 64, h: 64 });
+        assert_eq!(
+            d[0].0,
+            Region {
+                x: 0,
+                y: 0,
+                w: 64,
+                h: 64
+            }
+        );
         assert_eq!(d[0].1.len(), 64 * 64 * 4);
         // Opaque alpha everywhere.
         assert!(d[0].1.iter().skip(3).step_by(4).all(|&v| v == 255));

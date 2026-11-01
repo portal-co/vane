@@ -108,6 +108,10 @@ pub fn bootstrap(browser: &Browser, mem_size: u64, abi: GuestAbi, host_callback:
     let number = serde_json::to_string(&number).expect("state key is serializable");
     let result = serde_json::to_string(&result).expect("state key is serializable");
     let args = args.map(|key| serde_json::to_string(&key).expect("state key is serializable"));
+    // Perf runtime first (PageMap / Tlb / PagedRuntime): $.perf aliases
+    // globalThis.__vanePerf so emitted glue and the paged seeding twin can
+    // reach the structures without a global lookup dance.
+    browser.run_raw_code(format_args!("{};", vane_target_js::PERF_JS));
     let code = format!(
         "globalThis.$={{\
             f:{max_u64}n,\
@@ -116,6 +120,8 @@ pub fn bootstrap(browser: &Browser, mem_size: u64, abi: GuestAbi, host_callback:
             p:{{}},\
             _pending_syscalls:new Map(),\
             _next_syscall:0,\
+            perf:globalThis.__vanePerf,\
+            pagemap:new globalThis.__vanePerf.PageMap(),\
             _host_syscall:{callback},\
             get_page(a){{return Number(a%{mem_size}n);}},\
             _sys(name){{return name==='memory'?{{buffer:this.mem}}:undefined;}},\
@@ -160,6 +166,20 @@ pub async fn seed_memory(browser: &Browser, mem: &Mem, mem_size: u64) {
         let bytes = page.iter().map(u8::to_string).collect::<Vec<_>>().join(",");
         browser.run_raw_code(format_args!(
             "(new Uint8Array($.mem)).set([{bytes}],{offset});"
+        ));
+    }
+}
+
+/// Seed the browser-side perf PageMap (`$.pagemap`) with every populated
+/// 64 KiB page of `mem`, in the native ascending page-number order (the
+/// JS PageMap's `setPage` replaces whole pages, so iteration order only
+/// affects transfer order, not content). The guest-visible structures are
+/// identical to the native PageMap — this is the JS perf-port seeding path.
+pub async fn seed_memory_paged(browser: &Browser, mem: &Mem) {
+    for (page_no, page) in mem.pages.iter() {
+        let bytes = page.iter().map(u8::to_string).collect::<Vec<_>>().join(",");
+        browser.run_raw_code(format_args!(
+            "$.pagemap.setPage({page_no},new Uint8Array([{bytes}]));"
         ));
     }
 }

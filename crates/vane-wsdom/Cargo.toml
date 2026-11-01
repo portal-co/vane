@@ -16,6 +16,7 @@ required-features = ["browser-e2e"]
 
 [dependencies]
 vane-riscv = { path = "../vane-riscv", default-features = false, features = ["target-js"] }
+vane-target-js = { path = "../vane-target-js" }
 vane-aarch64 = { path = "../vane-aarch64", default-features = false, features = ["target-js"] }
 wsdom = { workspace = true }
 wsdom-core = { workspace = true }
