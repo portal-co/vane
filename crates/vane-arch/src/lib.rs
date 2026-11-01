@@ -170,7 +170,7 @@ pub struct Mem {
     /// `Mem`, so locks never nest.
     pub swap: Option<spin::Mutex<vane_swap::PageCache>>,
 
-/// Physical address of the first swap-backed byte (machine RAM base).
+    /// Physical address of the first swap-backed byte (machine RAM base).
     pub swap_base: u64,
 
     /// Size in bytes of the swap-backed RAM region.
@@ -196,7 +196,7 @@ pub struct Mem {
 /// The direct table never resizes after construction, so raw pointers
 /// handed out by [`Mem::get_page`] stay valid for the life of the `Mem`
 /// (a `Box` never moves once allocated).
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct PageMap {
     /// One slot per 64 KiB page of the low 4 GiB.
     direct: Vec<Option<Box<[u8; 65536]>>>,
@@ -204,10 +204,21 @@ pub struct PageMap {
     overflow: BTreeMap<u64, Box<[u8; 65536]>>,
 }
 
+impl Default for PageMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PageMap {
     /// Slots covering the low 4 GiB.
     const DIRECT_SLOTS: usize = 1 << 16;
 
+    /// Allocate with the full direct table. This (not a derived `Default`,
+    /// which would leave the table EMPTY and panic on the first RAM access —
+    /// a live boot-failing bug) is the only valid construction path; all
+    /// guards below check `direct.len()` so an under-sized table degrades
+    /// to the overflow map instead of panicking.
     pub fn new() -> Self {
         PageMap {
             direct: alloc::vec![None; Self::DIRECT_SLOTS],
@@ -217,7 +228,7 @@ impl PageMap {
 
     #[inline]
     fn slot(&self, page_no: u64) -> Option<&Box<[u8; 65536]>> {
-        if page_no < Self::DIRECT_SLOTS as u64 {
+        if page_no < self.direct.len() as u64 {
             return self.direct[page_no as usize].as_ref();
         }
         self.overflow.get(&page_no)
@@ -231,9 +242,8 @@ impl PageMap {
 
     /// Allocation-on-touch store access (write paths / `get_page`).
     pub fn get_or_alloc_mut(&mut self, page_no: u64) -> &mut Box<[u8; 65536]> {
-        if page_no < Self::DIRECT_SLOTS as u64 {
-            self.direct[page_no as usize]
-                .get_or_insert_with(|| Box::new([0u8; 65536]))
+        if page_no < self.direct.len() as u64 {
+            self.direct[page_no as usize].get_or_insert_with(|| Box::new([0u8; 65536]))
         } else {
             self.overflow
                 .entry(page_no)
@@ -279,7 +289,9 @@ impl FromIterator<(u64, Box<[u8; 65536]>)> for PageMap {
 
 impl core::fmt::Debug for PageMap {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("PageMap").field("pages", &self.len()).finish()
+        f.debug_struct("PageMap")
+            .field("pages", &self.len())
+            .finish()
     }
 }
 
